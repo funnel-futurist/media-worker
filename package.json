@@ -1,0 +1,22 @@
+{
+  "name": "railway-media-worker",
+  "version": "1.0.0",
+  "description": "Railway media worker — audit voiceovers, screenshots, and annotations",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "@google/genai": "^1.46.0",
+    "@remotion/renderer": "^4.0.428",
+    "axios": "^1.7.9",
+    "cloudinary": "^2.5.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "form-data": "^4.0.1",
+    "googleapis": "^171.4.0",
+    "playwright": "^1.50.0"
+  }
+}

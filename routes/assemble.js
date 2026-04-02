@@ -46,8 +46,11 @@ assembleRouter.post('/video-assembly', async (req, res, next) => {
           const trimmedPath = join(tmpDir, `trimmed_${i}.${ext}`);
           const { start = 0, end } = clip.trim;
           const duration = end ? `-t ${end - start}` : '';
+          const codec = outputFormat === 'mp3'
+            ? '-c:a libmp3lame -q:a 2'
+            : '-c:v libx264 -c:a aac -movflags +faststart';
           await execAsync(
-            `ffmpeg -ss ${start} ${duration} -i "${clipPath}" -c copy -y "${trimmedPath}"`
+            `ffmpeg -ss ${start} ${duration} -i "${clipPath}" ${codec} -y "${trimmedPath}"`
           );
           return trimmedPath;
         }

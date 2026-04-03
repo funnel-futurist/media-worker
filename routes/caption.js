@@ -37,10 +37,10 @@ captionRouter.post('/caption-video', async (req, res, next) => {
     const videoRes = await axios.get(videoUrl, { responseType: 'arraybuffer' });
     writeFileSync(videoPath, Buffer.from(videoRes.data));
 
-    // 2. Extract audio (MP3, mono, 16kHz)
+    // 2. Extract audio (MP3, mono, 16kHz) with +6dB boost for quiet speakers
     const audioPath = join(tmpDir, 'audio.mp3');
     await execAsync(
-      `ffmpeg -i "${videoPath}" -vn -ac 1 -ar 16000 -q:a 4 -y "${audioPath}"`
+      `ffmpeg -i "${videoPath}" -vn -ac 1 -ar 16000 -af "volume=6dB" -q:a 4 -y "${audioPath}"`
     );
 
     // 3. Upload audio to Gemini Files API
@@ -61,7 +61,7 @@ captionRouter.post('/caption-video', async (req, res, next) => {
 
     // 6. Burn subtitles into video
     const captionedPath = join(tmpDir, 'captioned.mp4');
-    const subtitleStyle = 'FontName=Arial,FontSize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,BorderStyle=1,Alignment=2';
+    const subtitleStyle = 'FontName=Arial,FontSize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,BorderStyle=3,Alignment=2';
     if (hasTimestamps) {
       await execAsync(
         `ffmpeg -i "${videoPath}" -vf "subtitles='${srtPath}':force_style='${subtitleStyle}'" -c:a copy -y "${captionedPath}"`

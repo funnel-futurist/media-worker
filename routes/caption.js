@@ -56,7 +56,7 @@ captionRouter.post('/caption-video', async (req, res, next) => {
 
     // 6. Burn subtitles into video
     const captionedPath = join(tmpDir, 'captioned.mp4');
-    const subtitleStyle = 'FontName=Arial,FontSize=18,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2';
+    const subtitleStyle = 'FontName=Arial,FontSize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,BorderStyle=1,Alignment=2';
     await execAsync(
       `ffmpeg -i "${videoPath}" -vf "subtitles='${srtPath}':force_style='${subtitleStyle}'" -c:a copy -y "${captionedPath}"`
     );

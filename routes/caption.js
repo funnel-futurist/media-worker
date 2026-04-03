@@ -3,7 +3,6 @@ import { writeFileSync, readFileSync, mkdirSync, rmSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import axios from 'axios';
-import FormData from 'form-data';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { uploadAudio } from '../lib/storage.js';
@@ -15,15 +14,15 @@ export const captionRouter = Router();
 
 /**
  * POST /caption-video
- * Transcribe video with Whisper and burn hardcoded subtitles via ffmpeg.
+ * Transcribe video with Gemini and burn hardcoded subtitles via ffmpeg.
  *
  * Body: {
  *   videoUrl: string,
- *   language?: string   (ISO 639-1, e.g. 'en' — helps Whisper accuracy)
+ *   language?: string   (ISO 639-1, e.g. 'en' — hints to Gemini)
  * }
  * Returns: { captionedUrl, srtUrl }
  *
- * Pipeline: download → extract audio → Whisper (SRT) → ffmpeg subtitle burn → Cloudinary
+ * Pipeline: download → extract audio → Gemini Files API (SRT) → ffmpeg subtitle burn → Cloudinary
  */
 captionRouter.post('/caption-video', async (req, res, next) => {
   const tmpDir = join('/tmp', `cap-${randomUUID()}`);
@@ -38,45 +37,31 @@ captionRouter.post('/caption-video', async (req, res, next) => {
     const videoRes = await axios.get(videoUrl, { responseType: 'arraybuffer' });
     writeFileSync(videoPath, Buffer.from(videoRes.data));
 
-    // 2. Extract audio for Whisper (MP3, mono, 16kHz — optimal for Whisper)
+    // 2. Extract audio (MP3, mono, 16kHz)
     const audioPath = join(tmpDir, 'audio.mp3');
     await execAsync(
       `ffmpeg -i "${videoPath}" -vn -ac 1 -ar 16000 -q:a 4 -y "${audioPath}"`
     );
 
-    // 3. Transcribe with OpenAI Whisper API → SRT format
+    // 3. Upload audio to Gemini Files API
     const audioBuffer = readFileSync(audioPath);
-    const form = new FormData();
-    form.append('file', audioBuffer, { filename: 'audio.mp3', contentType: 'audio/mpeg' });
-    form.append('model', 'whisper-1');
-    form.append('response_format', 'srt');
-    if (language) form.append('language', language);
+    const geminiFileUri = await uploadToGeminiFiles(audioBuffer, 'audio/mpeg', 'audio.mp3');
 
-    const whisperRes = await axios.post(
-      'https://api.openai.com/v1/audio/transcriptions',
-      form,
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-          ...form.getHeaders(),
-        },
-        maxBodyLength: Infinity,
-      }
-    );
+    // 4. Transcribe with Gemini → SRT format
+    const srtContent = await transcribeWithGemini(geminiFileUri, language);
 
-    // 4. Write SRT file
+    // 5. Write SRT file
     const srtPath = join(tmpDir, 'subtitles.srt');
-    writeFileSync(srtPath, whisperRes.data);
+    writeFileSync(srtPath, srtContent);
 
-    // 5. Burn subtitles into video
-    // Style: white text, black outline, bottom-center, readable at mobile size
+    // 6. Burn subtitles into video
     const captionedPath = join(tmpDir, 'captioned.mp4');
     const subtitleStyle = 'FontName=Arial,FontSize=18,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2';
     await execAsync(
       `ffmpeg -i "${videoPath}" -vf "subtitles='${srtPath}':force_style='${subtitleStyle}'" -c:a copy -y "${captionedPath}"`
     );
 
-    // 6. Upload both captioned video and raw SRT to Cloudinary
+    // 7. Upload captioned video + SRT to Cloudinary
     const [{ url: captionedUrl }, { url: srtUrl }] = await Promise.all([
       uploadAudio(captionedPath, 'audit-videos/captioned'),
       uploadSrt(srtPath),
@@ -89,6 +74,103 @@ captionRouter.post('/caption-video', async (req, res, next) => {
     rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+/**
+ * Upload audio buffer to Gemini Files API.
+ * Returns the file URI for use in generateContent calls.
+ */
+async function uploadToGeminiFiles(buffer, mimeType, displayName) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error('GEMINI_API_KEY is not set');
+
+  // Initiate resumable upload
+  const initRes = await axios.post(
+    `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${apiKey}`,
+    { file: { display_name: displayName } },
+    {
+      headers: {
+        'X-Goog-Upload-Protocol': 'resumable',
+        'X-Goog-Upload-Command': 'start',
+        'X-Goog-Upload-Header-Content-Length': String(buffer.length),
+        'X-Goog-Upload-Header-Content-Type': mimeType,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+
+  const uploadUrl = initRes.headers['x-goog-upload-url'];
+  if (!uploadUrl) throw new Error('Failed to get Gemini upload URL');
+
+  // Upload the file
+  const uploadRes = await axios.put(uploadUrl, buffer, {
+    headers: {
+      'X-Goog-Upload-Command': 'upload, finalize',
+      'X-Goog-Upload-Offset': '0',
+      'Content-Length': String(buffer.length),
+      'Content-Type': mimeType,
+    },
+  });
+
+  const fileData = uploadRes.data;
+  let fileState = fileData.file?.state;
+  const fileName = fileData.file?.name;
+
+  // Wait for processing
+  while (fileState === 'PROCESSING') {
+    await new Promise(r => setTimeout(r, 3000));
+    const checkRes = await axios.get(
+      `https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${apiKey}`
+    );
+    fileState = checkRes.data.state;
+    if (fileState === 'ACTIVE') return checkRes.data.uri;
+  }
+
+  return fileData.file?.uri;
+}
+
+/**
+ * Ask Gemini to transcribe audio and return SRT-formatted subtitles.
+ */
+async function transcribeWithGemini(fileUri, language) {
+  const apiKey = process.env.GEMINI_API_KEY;
+
+  const prompt = `Transcribe this audio and return the transcript in SRT subtitle format.
+Rules:
+- Use standard SRT format: index, timestamp (HH:MM:SS,mmm --> HH:MM:SS,mmm), text, blank line
+- Max 8 words per subtitle line
+- Timestamps must be accurate to the audio
+- Language: ${language}
+- Return ONLY the raw SRT content, no markdown, no explanation
+
+Example:
+1
+00:00:00,000 --> 00:00:02,500
+Hello and welcome to this video
+
+2
+00:00:02,500 --> 00:00:05,000
+Today we are talking about AI`;
+
+  const res = await axios.post(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+    {
+      contents: [{
+        parts: [
+          { file_data: { mime_type: 'audio/mpeg', file_uri: fileUri } },
+          { text: prompt },
+        ],
+      }],
+      generationConfig: { temperature: 0.1 },
+    },
+    { headers: { 'Content-Type': 'application/json' } }
+  );
+
+  const text = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) throw new Error('Gemini returned empty transcription');
+
+  // Strip markdown code fences if present
+  return text.replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/i, '').trim();
+}
 
 // Upload raw SRT as a raw file to Cloudinary
 async function uploadSrt(srtPath) {

@@ -5,7 +5,7 @@ import { randomUUID } from 'crypto';
 import axios from 'axios';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { uploadAudio } from '../lib/storage.js';
+import { uploadAudio, uploadVideo } from '../lib/storage.js';
 import { v2 as cloudinary } from 'cloudinary';
 
 const execAsync = promisify(exec);
@@ -63,7 +63,7 @@ captionRouter.post('/caption-video', async (req, res, next) => {
 
     // 7. Upload captioned video + SRT to Cloudinary
     const [{ url: captionedUrl }, { url: srtUrl }] = await Promise.all([
-      uploadAudio(captionedPath, 'audit-videos/captioned'),
+      uploadVideo(captionedPath, 'audit-videos/captioned'),
       uploadSrt(srtPath),
     ]);
 

@@ -8,6 +8,7 @@ import { captionRouter } from './routes/caption.js';
 import { lipsyncRouter } from './routes/lipsync.js';
 import { remotionRenderRouter } from './routes/remotion-render.js';
 import { extractRouter } from './routes/extract.js';
+import { brollRouter } from './routes/broll.js';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -39,6 +40,8 @@ app.use('/', lipsyncRouter);
 app.use('/', remotionRenderRouter);
 // Routes — Phase 4 (IP Extraction)
 app.use('/', extractRouter);
+// Routes — Phase 5 (B-Roll Insertion)
+app.use('/', brollRouter);
 
 // Global error handler
 app.use((err, req, res, _next) => {

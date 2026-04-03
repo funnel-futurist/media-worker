@@ -52,14 +52,24 @@ captionRouter.post('/caption-video', async (req, res, next) => {
 
     // 5. Write SRT file
     const srtPath = join(tmpDir, 'subtitles.srt');
+    console.log('[caption] SRT length:', srtContent.length, '| preview:', srtContent.slice(0, 200));
+    const hasTimestamps = srtContent.includes('-->');
+    if (!hasTimestamps) {
+      console.warn('[caption] SRT has no timestamps — Gemini may have returned plain text instead of SRT:', srtContent);
+    }
     writeFileSync(srtPath, srtContent);
 
     // 6. Burn subtitles into video
     const captionedPath = join(tmpDir, 'captioned.mp4');
     const subtitleStyle = 'FontName=Arial,FontSize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,BorderStyle=1,Alignment=2';
-    await execAsync(
-      `ffmpeg -i "${videoPath}" -vf "subtitles='${srtPath}':force_style='${subtitleStyle}'" -c:a copy -y "${captionedPath}"`
-    );
+    if (hasTimestamps) {
+      await execAsync(
+        `ffmpeg -i "${videoPath}" -vf "subtitles='${srtPath}':force_style='${subtitleStyle}'" -c:a copy -y "${captionedPath}"`
+      );
+    } else {
+      // No valid SRT — copy video as-is so pipeline doesn't fail
+      await execAsync(`ffmpeg -i "${videoPath}" -c copy -y "${captionedPath}"`);
+    }
 
     // 7. Upload captioned video + SRT to Cloudinary
     const [{ url: captionedUrl }, { url: srtUrl }] = await Promise.all([

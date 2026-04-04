@@ -50,23 +50,34 @@ captionRouter.post('/caption-video', async (req, res, next) => {
     // 4. Transcribe with Gemini → SRT format
     const srtContent = await transcribeWithGemini(geminiFileUri, language);
 
-    // 5. Write SRT file
+    // 5. Normalize SRT timestamps: Gemini sometimes emits MM:SS,mmm instead of HH:MM:SS,mmm
+    const normalizedSrt = srtContent.split('\n').map(line => {
+      if (!line.includes(' --> ')) return line;
+      return line.replace(/\b(\d{1,2}):(\d{2}),(\d{3})\b/g, (match, p1, p2, p3) => {
+        // Already HH:MM:SS,mmm if the matched portion has 3 colon-parts — leave it
+        // Here we matched only 2 parts (MM:SS,mmm), so prepend hours
+        return `00:${p1.padStart(2, '0')}:${p2},${p3}`;
+      });
+    }).join('\n');
+
+    // Write SRT file
     const srtPath = join(tmpDir, 'subtitles.srt');
-    console.log('[caption] SRT length:', srtContent.length, '| preview:', srtContent.slice(0, 200));
-    const hasTimestamps = srtContent.includes('-->');
+    console.log('[caption] SRT length:', normalizedSrt.length, '| preview:', normalizedSrt.slice(0, 200));
+    const hasTimestamps = normalizedSrt.includes('-->');
     if (!hasTimestamps) {
-      console.warn('[caption] SRT has no timestamps — Gemini may have returned plain text instead of SRT:', srtContent);
+      console.warn('[caption] SRT has no timestamps — Gemini may have returned plain text instead of SRT:', normalizedSrt);
     }
-    writeFileSync(srtPath, srtContent);
+    writeFileSync(srtPath, normalizedSrt);
 
     // 6. Burn subtitles into video
+    // Use relative filename 'subtitles.srt' with cwd=tmpDir — libass on Linux can fail
+    // to open absolute paths in the filtergraph even when the file exists.
     const captionedPath = join(tmpDir, 'captioned.mp4');
     const subtitleStyle = 'FontName=Arial,FontSize=22,Bold=1,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=3,Shadow=0,BorderStyle=1,Alignment=2,MarginV=40';
     if (hasTimestamps) {
-      // Escape path for ffmpeg filtergraph: replace : with \: and ' with \'
-      const escapedSrtPath = srtPath.replace(/\\/g, '\\\\').replace(/:/g, '\\:').replace(/'/g, "\\'");
       await execAsync(
-        `ffmpeg -i "${videoPath}" -vf "subtitles=${escapedSrtPath}:force_style='${subtitleStyle}'" -c:a copy -y "${captionedPath}"`
+        `ffmpeg -i "${videoPath}" -vf "subtitles=subtitles.srt:force_style='${subtitleStyle}'" -c:a copy -y "${captionedPath}"`,
+        { cwd: tmpDir }
       );
     } else {
       // No valid SRT — copy video as-is so pipeline doesn't fail

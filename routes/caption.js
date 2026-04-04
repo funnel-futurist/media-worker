@@ -61,7 +61,7 @@ captionRouter.post('/caption-video', async (req, res, next) => {
 
     // 6. Burn subtitles into video
     const captionedPath = join(tmpDir, 'captioned.mp4');
-    const subtitleStyle = 'FontName=Arial,FontSize=20,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=2,Shadow=0,BorderStyle=1,Alignment=2,MarginV=30';
+    const subtitleStyle = 'FontName=Arial,FontSize=22,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=3,Shadow=0,BorderStyle=1,Alignment=2,MarginV=40';
     if (hasTimestamps) {
       await execAsync(
         `ffmpeg -i "${videoPath}" -vf "subtitles='${srtPath}':force_style='${subtitleStyle}'" -c:a copy -y "${captionedPath}"`
@@ -147,19 +147,24 @@ async function transcribeWithGemini(fileUri, language) {
   const prompt = `Transcribe this audio and return the transcript in SRT subtitle format.
 Rules:
 - Use standard SRT format: index, timestamp (HH:MM:SS,mmm --> HH:MM:SS,mmm), text, blank line
-- Max 8 words per subtitle line
-- Timestamps must be accurate to the audio
+- Max 4-5 words per subtitle line — split at natural speech pauses
+- Each subtitle should feel like a punch: short, snappy, easy to read
+- Timestamps must be accurate to the audio — sync tightly to when words are spoken
 - Language: ${language}
 - Return ONLY the raw SRT content, no markdown, no explanation
 
 Example:
 1
-00:00:00,000 --> 00:00:02,500
-Hello and welcome to this video
+00:00:00,000 --> 00:00:01,200
+They need to reflect
 
 2
-00:00:02,500 --> 00:00:05,000
-Today we are talking about AI`;
+00:00:01,200 --> 00:00:02,800
+on what they learned
+
+3
+00:00:02,800 --> 00:00:04,500
+not just memorize facts`;
 
   const res = await axios.post(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,

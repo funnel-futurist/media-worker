@@ -52,11 +52,12 @@ assembleRouter.post('/video-assembly', async (req, res, next) => {
         writeFileSync(rawPath, Buffer.from(response.data));
 
         if (outputFormat !== 'mp3') {
-          // Detect codec — if already H.264 we still re-encode to strip HEVC/ProRes/etc.
-          // ultrafast+crf22 gives good quality; the one transcode cost beats N HEVC decodes.
+          // Normalise to H.264 at a fixed 1500 kbps so the washed video stays small
+          // (under ~25 MB for a 2-min clip) regardless of the source codec or bitrate.
+          // ultrafast+CRF produced files 10-20x too large for high-bitrate HEVC input.
           const normPath = join(tmpDir, `src_${urlToPath.size}.mp4`);
           await execAsync(
-            `ffmpeg -i "${rawPath}" -c:v libx264 -preset ultrafast -crf 22 -c:a aac -movflags +faststart -y "${normPath}"`,
+            `ffmpeg -i "${rawPath}" -c:v libx264 -preset veryfast -b:v 1500k -c:a aac -b:a 128k -movflags +faststart -y "${normPath}"`,
             { timeout: 300000 }
           );
           rmSync(rawPath, { force: true });

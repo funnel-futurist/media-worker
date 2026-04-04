@@ -48,7 +48,7 @@ assembleRouter.post('/video-assembly', async (req, res, next) => {
           const duration = end ? `-t ${end - start}` : '';
           const codec = outputFormat === 'mp3'
             ? '-c:a libmp3lame -q:a 2'
-            : '-c:v libx264 -c:a aac -movflags +faststart';
+            : '-c copy'; // stream copy avoids decoding — handles HEVC, AV1, etc.
           await execAsync(
             `ffmpeg -ss ${start} ${duration} -i "${clipPath}" ${codec} -y "${trimmedPath}"`
           );
@@ -71,9 +71,10 @@ assembleRouter.post('/video-assembly', async (req, res, next) => {
         `ffmpeg -f concat -safe 0 -i "${listPath}" -c:a libmp3lame -q:a 2 -y "${outputPath}"`
       );
     } else {
-      // Video concat — copy streams (fastest, requires matching codec/resolution)
+      // Video concat — re-encode to H.264/AAC to handle mixed codecs (HEVC, AV1, etc.)
+      // and ensure the output is always compatible with downstream captioning.
       await execAsync(
-        `ffmpeg -f concat -safe 0 -i "${listPath}" -c copy -y "${outputPath}"`
+        `ffmpeg -f concat -safe 0 -i "${listPath}" -c:v libx264 -c:a aac -movflags +faststart -y "${outputPath}"`
       );
     }
 

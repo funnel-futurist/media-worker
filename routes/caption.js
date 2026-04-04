@@ -50,12 +50,12 @@ captionRouter.post('/caption-video', async (req, res, next) => {
     // 4. Transcribe with Gemini → SRT format
     const srtContent = await transcribeWithGemini(geminiFileUri, language);
 
-    // 5. Normalize SRT timestamps: Gemini sometimes emits MM:SS,mmm instead of HH:MM:SS,mmm
+    // 5. Normalize SRT timestamps: Gemini sometimes emits MM:SS,mmm instead of HH:MM:SS,mmm.
+    // Use negative lookbehind (?<!\d:) to avoid corrupting already-valid HH:MM:SS,mmm timestamps
+    // (without it, the regex matches the SS,mmm part of a 3-part timestamp and prepends 00: again).
     const normalizedSrt = srtContent.split('\n').map(line => {
       if (!line.includes(' --> ')) return line;
-      return line.replace(/\b(\d{1,2}):(\d{2}),(\d{3})\b/g, (match, p1, p2, p3) => {
-        // Already HH:MM:SS,mmm if the matched portion has 3 colon-parts — leave it
-        // Here we matched only 2 parts (MM:SS,mmm), so prepend hours
+      return line.replace(/(?<!\d:)\b(\d{1,2}):(\d{2}),(\d{3})\b/g, (match, p1, p2, p3) => {
         return `00:${p1.padStart(2, '0')}:${p2},${p3}`;
       });
     }).join('\n');
@@ -69,15 +69,14 @@ captionRouter.post('/caption-video', async (req, res, next) => {
     }
     writeFileSync(srtPath, normalizedSrt);
 
-    // 6. Burn subtitles into video
-    // Use relative filename 'subtitles.srt' with cwd=tmpDir — libass on Linux can fail
-    // to open absolute paths in the filtergraph even when the file exists.
+    // 6. Burn subtitles into video.
+    // Wrap srtPath in single quotes within the filtergraph — explicitly delimits the filename
+    // from the :force_style option so libass can open the file correctly.
     const captionedPath = join(tmpDir, 'captioned.mp4');
     const subtitleStyle = 'FontName=Arial,FontSize=22,Bold=1,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=3,Shadow=0,BorderStyle=1,Alignment=2,MarginV=40';
     if (hasTimestamps) {
       await execAsync(
-        `ffmpeg -i "${videoPath}" -vf "subtitles=subtitles.srt:force_style='${subtitleStyle}'" -c:a copy -y "${captionedPath}"`,
-        { cwd: tmpDir }
+        `ffmpeg -i "${videoPath}" -vf "subtitles='${srtPath}':force_style='${subtitleStyle}'" -c:a copy -y "${captionedPath}"`
       );
     } else {
       // No valid SRT — copy video as-is so pipeline doesn't fail

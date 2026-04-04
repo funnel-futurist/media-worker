@@ -36,31 +36,46 @@ assembleRouter.post('/video-assembly', async (req, res, next) => {
     // Download each unique URL once, then trim segments from the cached file.
     // This avoids downloading the same video N times (e.g. 10 silence cuts = 10x download).
     const ext = outputFormat === 'mp3' ? 'mp3' : 'mp4';
-    const urlToPath = new Map();
+    const urlToPath = new Map(); // url → H.264-normalised source path
     const clipPaths = [];
 
     for (let i = 0; i < clips.length; i++) {
       const clip = clips[i];
 
-      // Download only if we haven't seen this URL before
+      // Download + normalise to H.264 once per unique URL.
+      // iPhone/Mac recordings are HEVC (H.265) — decoding them N times concurrently
+      // exhausts Railway's container RAM. One transcode pass up-front lets every
+      // subsequent trim use -c copy (stream copy, no decode).
       if (!urlToPath.has(clip.url)) {
-        const srcPath = join(tmpDir, `src_${urlToPath.size}.${ext}`);
+        const rawPath = join(tmpDir, `raw_${urlToPath.size}.${ext}`);
         const response = await axios.get(clip.url, { responseType: 'arraybuffer' });
-        writeFileSync(srcPath, Buffer.from(response.data));
-        urlToPath.set(clip.url, srcPath);
+        writeFileSync(rawPath, Buffer.from(response.data));
+
+        if (outputFormat !== 'mp3') {
+          // Detect codec — if already H.264 we still re-encode to strip HEVC/ProRes/etc.
+          // ultrafast+crf22 gives good quality; the one transcode cost beats N HEVC decodes.
+          const normPath = join(tmpDir, `src_${urlToPath.size}.mp4`);
+          await execAsync(
+            `ffmpeg -i "${rawPath}" -c:v libx264 -preset ultrafast -crf 22 -c:a aac -movflags +faststart -y "${normPath}"`,
+            { timeout: 300000 }
+          );
+          rmSync(rawPath, { force: true });
+          urlToPath.set(clip.url, normPath);
+        } else {
+          urlToPath.set(clip.url, rawPath);
+        }
       }
       const srcPath = urlToPath.get(clip.url);
 
       if (clip.trim) {
         const trimmedPath = join(tmpDir, `trimmed_${i}.${ext}`);
         const { start = 0, end } = clip.trim;
-        const duration = end ? `-t ${end - start}` : '';
-        const codec = outputFormat === 'mp3'
-          ? '-c:a libmp3lame -q:a 2'
-          : '-threads 1 -c:v libx264 -preset ultrafast -c:a aac -movflags +faststart';
+        const durationArg = end ? `-t ${end - start}` : '';
+        // Source is now H.264 — stream copy is fast and memory-free.
+        const codec = outputFormat === 'mp3' ? '-c:a libmp3lame -q:a 2' : '-c copy';
         await execAsync(
-          `ffmpeg -ss ${start} ${duration} -i "${srcPath}" ${codec} -y "${trimmedPath}"`,
-          { timeout: 120000 }
+          `ffmpeg -ss ${start} ${durationArg} -i "${srcPath}" ${codec} -y "${trimmedPath}"`,
+          { timeout: 60000 }
         );
         if (!existsSync(trimmedPath)) {
           throw new Error(`ffmpeg trim produced no output for clip ${i} (start=${start}, end=${end})`);
@@ -71,7 +86,7 @@ assembleRouter.post('/video-assembly', async (req, res, next) => {
       }
     }
 
-    // Clean up source files now that all trims are done
+    // Clean up normalised source files now that all trims are done
     for (const srcPath of urlToPath.values()) {
       rmSync(srcPath, { force: true });
     }

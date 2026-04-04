@@ -1,5 +1,16 @@
 import 'dotenv/config';
 import express from 'express';
+
+// Keep the process alive when a stream emits an unhandled 'error' event
+// (e.g. Cloudinary upload_large ReadStream on a missing file).
+// Log the error so it's visible in Railway logs, then let the route's
+// try/catch or the Express error handler deal with the response.
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException] Process kept alive:', err.message, err.code ?? '');
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection] Process kept alive:', reason);
+});
 import { voiceoverRouter } from './routes/voiceover.js';
 import { screenshotRouter } from './routes/screenshot.js';
 import { annotateRouter } from './routes/annotate.js';

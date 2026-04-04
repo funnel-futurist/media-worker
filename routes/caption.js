@@ -61,10 +61,12 @@ captionRouter.post('/caption-video', async (req, res, next) => {
 
     // 6. Burn subtitles into video
     const captionedPath = join(tmpDir, 'captioned.mp4');
-    const subtitleStyle = 'FontName=Arial,FontSize=22,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=3,Shadow=0,BorderStyle=1,Alignment=2,MarginV=40';
+    const subtitleStyle = 'FontName=Arial,FontSize=22,Bold=1,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=3,Shadow=0,BorderStyle=1,Alignment=2,MarginV=40';
     if (hasTimestamps) {
+      // Escape path for ffmpeg filtergraph: replace : with \: and ' with \'
+      const escapedSrtPath = srtPath.replace(/\\/g, '\\\\').replace(/:/g, '\\:').replace(/'/g, "\\'");
       await execAsync(
-        `ffmpeg -i "${videoPath}" -vf "subtitles='${srtPath}':force_style='${subtitleStyle}'" -c:a copy -y "${captionedPath}"`
+        `ffmpeg -i "${videoPath}" -vf "subtitles=${escapedSrtPath}:force_style='${subtitleStyle}'" -c:a copy -y "${captionedPath}"`
       );
     } else {
       // No valid SRT — copy video as-is so pipeline doesn't fail

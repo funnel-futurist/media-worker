@@ -33,31 +33,34 @@ assembleRouter.post('/video-assembly', async (req, res, next) => {
 
     mkdirSync(tmpDir, { recursive: true });
 
-    // Download all clips in parallel
-    const clipPaths = await Promise.all(
-      clips.map(async (clip, i) => {
-        const ext = outputFormat === 'mp3' ? 'mp3' : 'mp4';
-        const clipPath = join(tmpDir, `clip_${i}.${ext}`);
-        const response = await axios.get(clip.url, { responseType: 'arraybuffer' });
-        writeFileSync(clipPath, Buffer.from(response.data));
+    // Process clips sequentially — concurrent ffmpeg processes cause HEVC decoder
+    // resource contention (EAGAIN) on Railway's constrained environment.
+    const ext = outputFormat === 'mp3' ? 'mp3' : 'mp4';
+    const clipPaths = [];
+    for (let i = 0; i < clips.length; i++) {
+      const clip = clips[i];
+      const clipPath = join(tmpDir, `clip_${i}.${ext}`);
+      const response = await axios.get(clip.url, { responseType: 'arraybuffer' });
+      writeFileSync(clipPath, Buffer.from(response.data));
 
-        // Apply trim if requested
-        if (clip.trim) {
-          const trimmedPath = join(tmpDir, `trimmed_${i}.${ext}`);
-          const { start = 0, end } = clip.trim;
-          const duration = end ? `-t ${end - start}` : '';
-          const codec = outputFormat === 'mp3'
-            ? '-c:a libmp3lame -q:a 2'
-            : '-threads 1 -c:v libx264 -preset ultrafast -c:a aac -movflags +faststart';
-          await execAsync(
-            `ffmpeg -ss ${start} ${duration} -i "${clipPath}" ${codec} -y "${trimmedPath}"`,
-            { timeout: 120000 }
-          );
-          return trimmedPath;
-        }
-        return clipPath;
-      })
-    );
+      if (clip.trim) {
+        const trimmedPath = join(tmpDir, `trimmed_${i}.${ext}`);
+        const { start = 0, end } = clip.trim;
+        const duration = end ? `-t ${end - start}` : '';
+        const codec = outputFormat === 'mp3'
+          ? '-c:a libmp3lame -q:a 2'
+          : '-threads 1 -c:v libx264 -preset ultrafast -c:a aac -movflags +faststart';
+        await execAsync(
+          `ffmpeg -ss ${start} ${duration} -i "${clipPath}" ${codec} -y "${trimmedPath}"`,
+          { timeout: 120000 }
+        );
+        // Remove source clip immediately to free disk space
+        rmSync(clipPath, { force: true });
+        clipPaths.push(trimmedPath);
+      } else {
+        clipPaths.push(clipPath);
+      }
+    }
 
     // Write ffmpeg concat file list
     const listPath = join(tmpDir, 'filelist.txt');

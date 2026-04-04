@@ -74,13 +74,20 @@ captionRouter.post('/caption-video', async (req, res, next) => {
     // from the :force_style option so libass can open the file correctly.
     const captionedPath = join(tmpDir, 'captioned.mp4');
     const subtitleStyle = 'FontName=Arial,FontSize=22,Bold=1,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=3,Shadow=0,BorderStyle=1,Alignment=2,MarginV=40';
+    // Encode flags: scale to ≤720p + cap at 1.2 Mbps to stay under Cloudinary's 100 MB limit.
+    // Subtitle burn requires decode+encode anyway, so encoding params add no extra cost.
+    const videoFlags = '-c:v libx264 -preset fast -crf 26 -maxrate 1200k -bufsize 2400k -c:a aac -b:a 128k';
     if (hasTimestamps) {
       await execAsync(
-        `ffmpeg -i "${videoPath}" -vf "subtitles='${srtPath}':force_style='${subtitleStyle}'" -c:a copy -y "${captionedPath}"`
+        `ffmpeg -i "${videoPath}" -vf "scale=-2:'min(ih,720)',subtitles='${srtPath}':force_style='${subtitleStyle}'" ${videoFlags} -y "${captionedPath}"`,
+        { timeout: 600000 }
       );
     } else {
-      // No valid SRT — copy video as-is so pipeline doesn't fail
-      await execAsync(`ffmpeg -i "${videoPath}" -c copy -y "${captionedPath}"`);
+      // No valid SRT — compress + scale as-is so pipeline doesn't fail
+      await execAsync(
+        `ffmpeg -i "${videoPath}" -vf "scale=-2:'min(ih,720)'" ${videoFlags} -y "${captionedPath}"`,
+        { timeout: 600000 }
+      );
     }
 
     // 7. Upload captioned video + SRT to Cloudinary

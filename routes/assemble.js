@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { writeFileSync, mkdirSync, rmSync, createWriteStream } from 'fs';
+import { writeFileSync, mkdirSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import axios from 'axios';
@@ -62,6 +62,9 @@ assembleRouter.post('/video-assembly', async (req, res, next) => {
           `ffmpeg -ss ${start} ${duration} -i "${srcPath}" ${codec} -y "${trimmedPath}"`,
           { timeout: 120000 }
         );
+        if (!existsSync(trimmedPath)) {
+          throw new Error(`ffmpeg trim produced no output for clip ${i} (start=${start}, end=${end})`);
+        }
         clipPaths.push(trimmedPath);
       } else {
         clipPaths.push(srcPath);
@@ -93,6 +96,9 @@ assembleRouter.post('/video-assembly', async (req, res, next) => {
       );
     }
 
+    if (!existsSync(outputPath)) {
+      throw new Error(`ffmpeg concat produced no output file`);
+    }
     const duration = await getDuration(outputPath);
     const folder = outputFormat === 'mp3' ? 'audit-voiceovers/assembled' : 'audit-videos/assembled';
     const upload = outputFormat === 'mp3' ? uploadAudio : uploadVideo;

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { renderMedia, selectComposition } from '@remotion/renderer';
-import { mkdirSync, rmSync } from 'fs';
+import { mkdirSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { chromium } from 'playwright';
@@ -102,6 +102,9 @@ remotionRenderRouter.post('/render-composition', async (req, res, next) => {
     });
 
     console.log(`[remotion] Render complete, uploading...`);
+    if (!existsSync(outputPath)) {
+      throw new Error(`[remotion] renderMedia completed but output file not found: ${outputPath}`);
+    }
     const cloudinaryFolder = `${outputFolder}/${compositionId.toLowerCase()}`;
     const { url: videoUrl } = await uploadVideo(outputPath, cloudinaryFolder);
 

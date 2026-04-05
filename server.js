@@ -20,6 +20,7 @@ import { lipsyncRouter } from './routes/lipsync.js';
 import { remotionRenderRouter } from './routes/remotion-render.js';
 import { extractRouter } from './routes/extract.js';
 import { brollRouter } from './routes/broll.js';
+import { submagicRouter } from './routes/submagic.js';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -53,6 +54,8 @@ app.use('/', remotionRenderRouter);
 app.use('/', extractRouter);
 // Routes — Phase 5 (B-Roll Insertion)
 app.use('/', brollRouter);
+// Routes — Phase 6 (Submagic AI Edit)
+app.use('/', submagicRouter);
 
 // Global error handler
 app.use((err, req, res, _next) => {

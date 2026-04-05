@@ -114,7 +114,7 @@ async function callGemini(fileUri, mimeType, prompt) {
           { text: prompt },
         ],
       }],
-      generationConfig: { responseMimeType: 'application/json', temperature: 0.1 },
+      generationConfig: { responseMimeType: 'application/json', temperature: 0.1, maxOutputTokens: 8192 },
     }),
   });
 

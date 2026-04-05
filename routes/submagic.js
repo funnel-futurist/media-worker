@@ -53,6 +53,8 @@ submagicRouter.post('/submagic-edit', async (req, res, next) => {
       removeSilencePace = 'natural',
       removeBadTakes = true,
       clientBrolls = [],
+      bgmUrl = process.env.SUBMAGIC_BGM_URL ?? null,
+      bgmVolume = 20,
     } = req.body;
 
     if (!videoUrl) return res.status(400).json({ error: 'videoUrl is required' });
@@ -78,6 +80,23 @@ submagicRouter.post('/submagic-edit', async (req, res, next) => {
     // Fall back to AI stock b-roll if no client clips provided
     const magicBrolls = items.length === 0;
 
+    // ── Step 1b: Upload BGM to Submagic user-media (if provided) ─────────
+    let music = undefined;
+    if (bgmUrl) {
+      try {
+        console.log(`[submagic] uploading BGM: ${bgmUrl}`);
+        const { data: bgmMedia } = await axios.post(
+          `${BASE}/user-media`,
+          { url: bgmUrl },
+          { headers: headers() }
+        );
+        music = { userMediaId: bgmMedia.userMediaId, volume: bgmVolume };
+        console.log(`[submagic] BGM registered: ${bgmMedia.userMediaId}`);
+      } catch (bgmErr) {
+        console.warn(`[submagic] BGM upload failed (non-fatal): ${bgmErr.message}`);
+      }
+    }
+
     // ── Step 2: Create Submagic project ───────────────────────────────────
     console.log(`[submagic] creating project for: ${videoUrl}`);
     const projectBody = {
@@ -88,9 +107,11 @@ submagicRouter.post('/submagic-edit', async (req, res, next) => {
       removeSilencePace,
       removeBadTakes,
       magicBrolls,
-      magicZooms: true,
+      magicZooms: false,   // disabled — client prefers no auto zoom
       cleanAudio: true,
+      top: 75,             // captions near bottom (0=top, 80=bottom) — below chin
       ...(items.length > 0 && { items }),
+      ...(music && { music }),
     };
 
     const { data: project } = await axios.post(`${BASE}/projects`, projectBody, {

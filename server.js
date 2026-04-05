@@ -21,6 +21,7 @@ import { remotionRenderRouter } from './routes/remotion-render.js';
 import { extractRouter } from './routes/extract.js';
 import { brollRouter } from './routes/broll.js';
 import { submagicRouter } from './routes/submagic.js';
+import { classifyRouter } from './routes/classify.js';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -56,6 +57,8 @@ app.use('/', extractRouter);
 app.use('/', brollRouter);
 // Routes — Phase 6 (Submagic AI Edit)
 app.use('/', submagicRouter);
+// Routes — Phase 7 (Async Gemini Classification)
+app.use('/', classifyRouter);
 
 // Global error handler
 app.use((err, req, res, _next) => {

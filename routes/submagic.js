@@ -102,12 +102,20 @@ submagicRouter.post('/submagic-edit', async (req, res, next) => {
     // ── Step 3: Poll until processing complete ────────────────────────────
     const processed = await pollProject(project.id, 'completed');
 
-    // ── Step 4: Trigger export ─────────────────────────────────────────────
-    console.log(`[submagic] triggering export for project ${project.id}`);
-    await axios.post(`${BASE}/projects/${project.id}/export`, {}, { headers: headers() });
+    // ── Step 4: Use downloadUrl if already present, otherwise trigger export ──
+    let exported = processed;
+    if (!processed.downloadUrl) {
+      console.log(`[submagic] triggering export for project ${project.id}`);
+      try {
+        await axios.post(`${BASE}/projects/${project.id}/export`, {}, { headers: headers() });
+      } catch (exportErr) {
+        // Some Submagic plans auto-export — 404 here is non-fatal, poll anyway
+        console.warn(`[submagic] export endpoint returned ${exportErr?.response?.status ?? exportErr.message}, polling for downloadUrl anyway`);
+      }
 
-    // ── Step 5: Poll until download URL available ─────────────────────────
-    const exported = await pollProject(project.id, 'completed', 10000, 180000);
+      // ── Step 5: Poll until download URL available ─────────────────────────
+      exported = await pollProject(project.id, 'completed', 10000, 180000);
+    }
 
     if (!exported.downloadUrl) {
       throw new Error('Submagic export completed but no downloadUrl returned');

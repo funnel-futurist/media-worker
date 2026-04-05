@@ -14,8 +14,8 @@ function getGeminiKey() {
 }
 
 function getSupabaseHeaders() {
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!key) throw new Error('SUPABASE_SERVICE_ROLE_KEY is not set in Railway env vars');
+  const key = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!key) throw new Error('SUPABASE_SERVICE_KEY is not set in Railway env vars');
   return {
     'apikey': key,
     'Authorization': `Bearer ${key}`,

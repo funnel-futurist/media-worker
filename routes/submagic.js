@@ -107,9 +107,7 @@ submagicRouter.post('/submagic-edit', async (req, res, next) => {
       removeSilencePace,
       removeBadTakes,
       magicBrolls,
-      magicZooms: false,   // disabled — client prefers no auto zoom
       cleanAudio: true,
-      top: 75,             // captions near bottom (0=top, 80=bottom) — below chin
       ...(items.length > 0 && { items }),
       ...(music && { music }),
     };
@@ -151,6 +149,10 @@ submagicRouter.post('/submagic-edit', async (req, res, next) => {
       words: exported.words ?? [],
     });
   } catch (err) {
+    if (err.response) {
+      console.error(`[submagic] API error ${err.response.status}:`, JSON.stringify(err.response.data));
+      err.message = `Submagic API ${err.response.status}: ${JSON.stringify(err.response.data)}`;
+    }
     next(err);
   }
 });

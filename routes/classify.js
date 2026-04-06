@@ -108,14 +108,14 @@ async function callGemini(fileUri, mimeType, prompt) {
   // so we only need classification metadata from Gemini.
   const compactConstraint = `
 
-CRITICAL OUTPUT CONSTRAINT (token limit): Return these fields as EMPTY ARRAYS []:
-- word_timestamps
-- silence_map
-- bad_take_flags
-- broll_cues
-- timestamps
+CRITICAL OUTPUT CONSTRAINT (token limit):
+- word_timestamps → EMPTY ARRAY []
+- silence_map → EMPTY ARRAY []
+- bad_take_flags → EMPTY ARRAY []
+- timestamps → EMPTY ARRAY []
+- broll_cues → MAX 5 entries, format: [{"time_seconds": 5, "duration_seconds": 4}] — NO other fields
+- transcript → ONE sentence only (max 30 words)
 
-For "transcript": return ONE sentence summary only (max 30 words).
 Focus all tokens on accurate classification, quality scores, and pipeline routing.`;
 
   const res = await fetch(`${GEMINI_API_URL}/${MODEL}:generateContent?key=${apiKey}`, {

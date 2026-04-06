@@ -24,7 +24,13 @@ export const captionRouter = Router();
  *
  * Pipeline: download → extract audio → Gemini Files API (SRT) → ffmpeg subtitle burn → Cloudinary
  */
-captionRouter.post('/caption-video', async (req, res, next) => {
+captionRouter.post('/caption-video', async (req, res) => {
+  // Disabled — pipeline now uses Submagic for captioning via /submagic-edit
+  console.warn('[caption] /caption-video called but route is disabled — use /submagic-edit');
+  return res.status(410).json({ error: 'caption-video is disabled. Use /submagic-edit instead.' });
+});
+
+captionRouter.post('/caption-video-legacy', async (req, res, next) => {
   const tmpDir = join('/tmp', `cap-${randomUUID()}`);
   try {
     const { videoUrl, language = 'en' } = req.body;

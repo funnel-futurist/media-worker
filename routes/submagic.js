@@ -124,6 +124,7 @@ submagicRouter.post('/submagic-edit', async (req, res, next) => {
       removeBadTakes,
       magicBrolls,
       cleanAudio: true,
+      hookTitle: true,   // AI Hook Title — generates attention-grabbing intro text
       ...(items.length > 0 && { items }),
       ...(music && { music }),
     };

@@ -109,7 +109,8 @@ submagicRouter.post('/submagic-edit', async (req, res, next) => {
 
     // ── Step 1b: Pick BGM from Submagic library based on emotion tags ────
     const musicId = pickMusicId(emotionTags);
-    const music = { userMediaId: musicId, volume: 10 };
+    // Volume scale is 1-100. Keep low (5) so BGM sits under the voice.
+    const music = { userMediaId: musicId, volume: 5 };
     console.log(`[submagic] BGM selected: ${musicId} (emotions: ${emotionTags.join(', ') || 'none → default'})`);
 
 
@@ -124,7 +125,8 @@ submagicRouter.post('/submagic-edit', async (req, res, next) => {
       removeBadTakes,
       magicBrolls,
       cleanAudio: true,
-      hookTitle: true,   // AI Hook Title — generates attention-grabbing intro text
+      // AI Hook Title with 'steph' template — clean design without heavy styling
+      hookTitle: { template: 'steph' },
       ...(items.length > 0 && { items }),
       ...(music && { music }),
     };

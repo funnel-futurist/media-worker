@@ -5,6 +5,34 @@ export const submagicRouter = Router();
 
 const BASE = 'https://api.submagic.co/v1';
 
+// ── Emotion → Submagic library track ID ──────────────────────────────────
+// These are internal Submagic media library IDs — no upload needed.
+// Sourced from auto_submagic.ts on Vercel side (keep in sync).
+const EMOTION_MUSIC_MAP = {
+  confidence:    'ad8fafb7-ce41-4c90-8895-666251f73dd7',
+  authority:     'b007ac0d-fb65-4860-9d02-7a242b7accba',
+  urgency:       '61507c96-4141-47db-8d1c-aa3748d6b846',
+  excitement:    'c61f881c-0699-45f7-8bb1-023f61e6b76c',
+  defiance:      'dd5f90f4-e939-45db-a422-f58535c69185',
+  frustration:   'f1b18266-9fe2-4d84-abf3-3f859ab94203',
+  curiosity:     '75440ec4-b109-4d56-a6cc-4ac283202473',
+  calm:          '6a76513d-41e8-47e2-b87d-1a64d2a3bcee',
+  trust:         '4bb76b8a-d152-40f6-b010-08755341dc85',
+  relief:        '415b2522-f14e-4e74-96d5-f04647a9165d',
+  hope:          'd0a8080b-a898-4f0a-9e93-13fea23b88a6',
+  vulnerability: '95cb3570-9a73-4b21-b7a8-b41276f58726',
+  empathy:       '2f536439-cccc-44cc-9ad9-19662c1958f6',
+  fear:          '522bb662-cd49-428c-acfb-7a2178e78870',
+};
+const DEFAULT_MUSIC_ID = '1e12ddf5-0f34-492b-b112-6bfcad9a87f7'; // smart-corporate-identity
+
+function pickMusicId(emotionTags = []) {
+  for (const tag of emotionTags) {
+    if (EMOTION_MUSIC_MAP[tag]) return EMOTION_MUSIC_MAP[tag];
+  }
+  return DEFAULT_MUSIC_ID;
+}
+
 function headers() {
   const key = process.env.SUBMAGIC_API_KEY;
   if (!key) throw new Error('SUBMAGIC_API_KEY is not set in Railway env vars');
@@ -53,8 +81,7 @@ submagicRouter.post('/submagic-edit', async (req, res, next) => {
       removeSilencePace = 'natural',
       removeBadTakes = true,
       clientBrolls = [],
-      bgmUrl = process.env.SUBMAGIC_BGM_URL ?? null,
-      bgmVolume = 20,
+      emotionTags = [],
     } = req.body;
 
     if (!videoUrl) return res.status(400).json({ error: 'videoUrl is required' });
@@ -80,22 +107,11 @@ submagicRouter.post('/submagic-edit', async (req, res, next) => {
     // Fall back to AI stock b-roll if no client clips provided
     const magicBrolls = items.length === 0;
 
-    // ── Step 1b: Upload BGM to Submagic user-media (if provided) ─────────
-    let music = undefined;
-    if (bgmUrl) {
-      try {
-        console.log(`[submagic] uploading BGM: ${bgmUrl}`);
-        const { data: bgmMedia } = await axios.post(
-          `${BASE}/user-media`,
-          { url: bgmUrl },
-          { headers: headers() }
-        );
-        music = { userMediaId: bgmMedia.userMediaId, volume: bgmVolume };
-        console.log(`[submagic] BGM registered: ${bgmMedia.userMediaId}`);
-      } catch (bgmErr) {
-        console.warn(`[submagic] BGM upload failed (non-fatal): ${bgmErr.message}`);
-      }
-    }
+    // ── Step 1b: Pick BGM from Submagic library based on emotion tags ────
+    const musicId = pickMusicId(emotionTags);
+    const music = { userMediaId: musicId, volume: 10 };
+    console.log(`[submagic] BGM selected: ${musicId} (emotions: ${emotionTags.join(', ') || 'none → default'})`);
+
 
     // ── Step 2: Create Submagic project ───────────────────────────────────
     console.log(`[submagic] creating project for: ${videoUrl}`);

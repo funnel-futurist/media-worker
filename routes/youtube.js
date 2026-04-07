@@ -205,6 +205,7 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
 
           await supabaseInsert('ad_ingestion', {
             client_id: clientId,
+            uploaded_by: clientId,
             upload_source: 'youtube_clip',
             asset_type: 'reel_raw',
             format: 'video',

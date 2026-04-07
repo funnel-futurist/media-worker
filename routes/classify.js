@@ -113,10 +113,11 @@ CRITICAL OUTPUT CONSTRAINT (token limit):
 - silence_map → EMPTY ARRAY []
 - bad_take_flags → EMPTY ARRAY []
 - timestamps → EMPTY ARRAY []
-- broll_cues → MAX 5 entries, format: [{"time_seconds": 5, "duration_seconds": 4}] — NO other fields
+- broll_cues → REQUIRED: pick 3-5 natural moments where a cutaway would work. Format EXACTLY: [{"time_seconds": 5, "duration_seconds": 4}] — integer seconds only, no other fields
 - transcript → ONE sentence only (max 30 words)
+- emotion_tags → REQUIRED: 1-2 tags based on delivery tone
 
-Focus all tokens on accurate classification, quality scores, and pipeline routing.`;
+Focus all tokens on accurate classification, quality scores, pipeline routing, broll_cues, and emotion_tags.`;
 
   const res = await fetch(`${GEMINI_API_URL}/${MODEL}:generateContent?key=${apiKey}`, {
     method: 'POST',
@@ -162,7 +163,7 @@ async function runClassification({ ingestionId, storageUrl, mimeType, filename, 
     await supabaseUpdate('ad_ingestion', ingestionId, {
       asset_type: result.classification.asset_type,
       gemini_classification: result.classification,
-      gemini_markup: result.markup,
+      gemini_markup: { ...(result.markup ?? {}), emotion_tags: result.emotion_tags ?? [] },
       re_record_flag: result.classification.re_record_flag ?? false,
       re_record_notes: result.classification.re_record_notes ?? null,
       pipeline: result.pipeline_routing?.pipeline ?? null,

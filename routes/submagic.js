@@ -222,6 +222,52 @@ async function ensureH264(videoUrl) {
   }
 }
 
+const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif']);
+
+function isImageUrl(url) {
+  try {
+    const pathname = new URL(url).pathname.toLowerCase();
+    const ext = pathname.match(/\.[^./?]+$/)?.[0] ?? '';
+    return IMAGE_EXTENSIONS.has(ext);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Convert a static photo to a 4-second vertical MP4 with a subtle Ken Burns zoom.
+ * Required because Submagic /user-media only accepts video, not images.
+ */
+async function convertImageToBroll(imageUrl) {
+  const tmpId = randomUUID();
+  const extMatch = imageUrl.match(/\.(jpg|jpeg|png|webp)/i);
+  const ext = extMatch ? extMatch[1].toLowerCase() : 'jpg';
+  const inputPath = join('/tmp', `${tmpId}_photo.${ext}`);
+  const outputPath = join('/tmp', `${tmpId}_photo.mp4`);
+
+  try {
+    console.log(`[submagic] converting photo to b-roll video: ${imageUrl}`);
+    const { data } = await axios.get(imageUrl, { responseType: 'arraybuffer' });
+    writeFileSync(inputPath, Buffer.from(data));
+
+    // Scale to fill 1080x1920 (9:16 vertical), apply slow Ken Burns zoom-in over 4s
+    await execAsync(
+      `ffmpeg -loop 1 -i "${inputPath}" ` +
+      `-vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,` +
+      `zoompan=z='min(zoom+0.0015,1.3)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=120:s=1080x1920" ` +
+      `-t 4 -c:v libx264 -pix_fmt yuv420p -preset fast -r 30 -y "${outputPath}"`,
+      { timeout: 120000 }
+    );
+
+    const { url } = await uploadVideo(outputPath, 'submagic-broll');
+    console.log(`[submagic] photo → b-roll video: ${url}`);
+    return url;
+  } finally {
+    if (existsSync(inputPath)) unlinkSync(inputPath);
+    if (existsSync(outputPath)) unlinkSync(outputPath);
+  }
+}
+
 /**
  * Core Submagic edit logic — shared by /submagic-edit and /submagic-edit-async.
  */
@@ -240,10 +286,15 @@ async function runSubmagicEdit({
     // ── Step 1: Register client b-roll clips (if any) ─────────────────────
     const items = [];
     for (const broll of clientBrolls) {
-      console.log(`[submagic] registering client b-roll: ${broll.url}`);
+      // Photos must be converted to short video clips — Submagic /user-media rejects images
+      let brollVideoUrl = broll.url;
+      if (isImageUrl(broll.url)) {
+        brollVideoUrl = await convertImageToBroll(broll.url);
+      }
+      console.log(`[submagic] registering client b-roll: ${brollVideoUrl}`);
       const { data: mediaData } = await axios.post(
         `${BASE}/user-media`,
-        { url: broll.url },
+        { url: brollVideoUrl },
         { headers: headers() }
       );
       items.push({

@@ -115,7 +115,6 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
   const cmd = [
     'yt-dlp',
     cookiesArg,
-    '--extractor-args "youtube:player_client=ios"',
     `--download-sections "*${startTs}-${endTs}"`,
     '-f "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best"',
     '--merge-output-format mp4',
@@ -136,7 +135,7 @@ async function downloadTranscript(youtubeUrl, tmpDir) {
   try {
     const cookiesArg = getYtDlpCookiesArg();
     await execAsync(
-      `yt-dlp ${cookiesArg} --extractor-args "youtube:player_client=ios" --write-auto-subs --sub-langs en --sub-format vtt --skip-download --no-playlist -o "${tmpDir}/transcript" "${youtubeUrl}"`,
+      `yt-dlp ${cookiesArg} --write-auto-subs --sub-langs en --sub-format vtt --skip-download --no-playlist -o "${tmpDir}/transcript" "${youtubeUrl}"`,
       { timeout: 60000 }
     );
     // yt-dlp writes transcript.en.vtt
@@ -233,15 +232,14 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
 
       // Mark plan as extracted
       await supabasePatch('youtube_clip_plans', clipPlanId, {
-        extraction_status: extractedClips.length > 0 ? 'extracted' : 'failed',
+        extraction_status: extractedClips.length > 0 ? 'extracted' : 'dispatch_failed',
       });
 
       console.log(`[youtube] done: ${extractedClips.length}/${clips.length} clips extracted for plan ${clipPlanId}`);
     } catch (err) {
       console.error(`[youtube] extraction failed for plan ${clipPlanId}:`, err.message);
       await supabasePatch('youtube_clip_plans', clipPlanId, {
-        extraction_status: 'failed',
-        last_error: err.message,
+        extraction_status: 'dispatch_failed',
       }).catch(() => {});
     } finally {
       // Cleanup temp dir

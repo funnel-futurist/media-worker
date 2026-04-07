@@ -163,9 +163,6 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
     try {
       console.log(`[youtube] starting extraction for plan ${clipPlanId} (${clips.length} clips)`);
 
-      // Mark plan as extracting
-      await supabasePatch('youtube_clip_plans', clipPlanId, { extraction_status: 'extracting' });
-
       const extractedClips = [];
 
       for (let i = 0; i < clips.length; i++) {

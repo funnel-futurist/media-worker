@@ -98,10 +98,10 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
 
   if (duration <= 0) throw new Error(`Invalid time range: ${startTs} → ${endTs}`);
 
-  // yt-dlp with --download-sections for time-based extraction
-  // Falls back to full download + ffmpeg trim if sections not supported
+  // Use iOS player client to bypass YouTube bot detection / 429 errors
   const cmd = [
     'yt-dlp',
+    '--extractor-args "youtube:player_client=ios"',
     `--download-sections "*${startTs}-${endTs}"`,
     '-f "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best"',
     '--merge-output-format mp4',
@@ -121,7 +121,7 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
 async function downloadTranscript(youtubeUrl, tmpDir) {
   try {
     await execAsync(
-      `yt-dlp --write-auto-subs --sub-langs en --sub-format vtt --skip-download --no-playlist -o "${tmpDir}/transcript" "${youtubeUrl}"`,
+      `yt-dlp --extractor-args "youtube:player_client=ios" --write-auto-subs --sub-langs en --sub-format vtt --skip-download --no-playlist -o "${tmpDir}/transcript" "${youtubeUrl}"`,
       { timeout: 60000 }
     );
     // yt-dlp writes transcript.en.vtt
@@ -219,7 +219,6 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
       // Mark plan as extracted
       await supabasePatch('youtube_clip_plans', clipPlanId, {
         extraction_status: extractedClips.length > 0 ? 'extracted' : 'failed',
-        extracted_clip_count: extractedClips.length,
       });
 
       console.log(`[youtube] done: ${extractedClips.length}/${clips.length} clips extracted for plan ${clipPlanId}`);

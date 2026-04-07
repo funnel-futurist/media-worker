@@ -72,20 +72,113 @@ async function pollProject(projectId, targetStatus, intervalMs = 10000, maxMs = 
  *
  * Returns: { videoUrl, duration }
  */
-submagicRouter.post('/submagic-edit', async (req, res, next) => {
-  try {
-    const {
-      videoUrl,
-      language = 'en',
-      templateName = 'Hormozi 1',
-      removeSilencePace = 'natural',
-      removeBadTakes = true,
-      clientBrolls = [],
-      emotionTags = [],
-    } = req.body;
+// ── Supabase helpers (mirror of classify.js) ─────────────────────────────
+function getSupabaseHeaders() {
+  const key = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!key) throw new Error('SUPABASE_SERVICE_KEY not set');
+  return {
+    apikey: key,
+    Authorization: `Bearer ${key}`,
+    'Content-Type': 'application/json',
+    'Accept-Profile': 'marketing',
+    'Content-Profile': 'marketing',
+  };
+}
 
-    if (!videoUrl) return res.status(400).json({ error: 'videoUrl is required' });
+function getSupabaseUrl() {
+  const url = process.env.SUPABASE_URL;
+  if (!url) throw new Error('SUPABASE_URL not set');
+  return url;
+}
 
+async function supabasePatch(table, id, data) {
+  const res = await fetch(`${getSupabaseUrl()}/rest/v1/${table}?id=eq.${id}`, {
+    method: 'PATCH',
+    headers: getSupabaseHeaders(),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(`Supabase PATCH ${table} failed: ${await res.text()}`);
+}
+
+async function supabaseInsertEvent(clientId, eventType, metadata) {
+  await fetch(`${getSupabaseUrl()}/rest/v1/content_pipeline_events`, {
+    method: 'POST',
+    headers: getSupabaseHeaders(),
+    body: JSON.stringify({ client_id: clientId, event_type: eventType, source_module: 'railway/submagic-async', metadata }),
+  });
+}
+
+/**
+ * POST /submagic-edit-async
+ *
+ * Fire-and-forget version of /submagic-edit.
+ * Accepts the job, responds immediately with { accepted: true },
+ * then processes in background and updates ad_ingestion in Supabase directly.
+ * Eliminates Vercel 300s timeout risk for long Submagic jobs.
+ *
+ * Extra body fields: ingestionId, clientId (for Supabase callback)
+ */
+submagicRouter.post('/submagic-edit-async', async (req, res) => {
+  const { ingestionId, clientId, ...editParams } = req.body;
+  if (!ingestionId || !clientId) {
+    return res.status(400).json({ error: 'ingestionId and clientId are required' });
+  }
+  if (!editParams.videoUrl) {
+    return res.status(400).json({ error: 'videoUrl is required' });
+  }
+
+  // Respond immediately — Vercel won't time out waiting
+  res.json({ accepted: true, ingestionId });
+
+  // Process in background — Railway has no serverless timeout
+  setImmediate(async () => {
+    try {
+      console.log(`[submagic-async] starting job for ingestion ${ingestionId}`);
+      const result = await runSubmagicEdit(editParams);
+
+      await supabasePatch('ad_ingestion', ingestionId, {
+        status: 'rendered',
+        file_url: result.videoUrl,
+        last_error: null,
+      });
+
+      await supabaseInsertEvent(clientId, 'render_complete', {
+        ingestion_id: ingestionId,
+        final_url: result.videoUrl,
+        duration: result.duration,
+        preview_url: result.previewUrl,
+      });
+
+      console.log(`[submagic-async] done for ${ingestionId}: ${result.videoUrl}`);
+    } catch (err) {
+      const message = err?.message ?? String(err);
+      console.error(`[submagic-async] failed for ${ingestionId}:`, message);
+
+      await supabasePatch('ad_ingestion', ingestionId, {
+        status: 'classified',
+        last_error: message,
+      }).catch(e => console.error('[submagic-async] failed to revert status:', e));
+
+      await supabaseInsertEvent(clientId, 'error', {
+        ingestion_id: ingestionId,
+        error: message,
+      }).catch(() => {});
+    }
+  });
+});
+
+/**
+ * Core Submagic edit logic — shared by /submagic-edit and /submagic-edit-async.
+ */
+async function runSubmagicEdit({
+  videoUrl,
+  language = 'en',
+  templateName = 'Hormozi 1',
+  removeSilencePace = 'natural',
+  removeBadTakes = true,
+  clientBrolls = [],
+  emotionTags = [],
+}) {
     // ── Step 1: Register client b-roll clips (if any) ─────────────────────
     const items = [];
     for (const broll of clientBrolls) {
@@ -104,18 +197,12 @@ submagicRouter.post('/submagic-edit', async (req, res, next) => {
       });
     }
 
-    // Fall back to AI stock b-roll if no client clips provided
     const magicBrolls = items.length === 0;
 
-    // ── Step 1b: Pick BGM from Submagic library based on emotion tags ────
     const musicId = pickMusicId(emotionTags);
-    // Volume scale is 1-100. Keep low (5) so BGM sits under the voice.
     const music = { userMediaId: musicId, volume: 5 };
     console.log(`[submagic] BGM selected: ${musicId} (emotions: ${emotionTags.join(', ') || 'none → default'})`);
 
-
-    // ── Step 2: Create Submagic project ───────────────────────────────────
-    console.log(`[submagic] creating project for: ${videoUrl}`);
     const projectBody = {
       title: `pipeline-${Date.now()}`,
       videoUrl,
@@ -125,48 +212,44 @@ submagicRouter.post('/submagic-edit', async (req, res, next) => {
       removeBadTakes,
       magicBrolls,
       cleanAudio: true,
-      // AI Hook Title with 'steph' template — clean design without heavy styling
       hookTitle: { template: 'steph' },
       ...(items.length > 0 && { items }),
       ...(music && { music }),
     };
 
-    const { data: project } = await axios.post(`${BASE}/projects`, projectBody, {
-      headers: headers(),
-    });
-
+    console.log(`[submagic] creating project for: ${videoUrl}`);
+    const { data: project } = await axios.post(`${BASE}/projects`, projectBody, { headers: headers() });
     console.log(`[submagic] project created: ${project.id}`);
 
-    // ── Step 3: Poll until processing complete ────────────────────────────
     const processed = await pollProject(project.id, 'completed');
 
-    // ── Step 4: Use downloadUrl if already present, otherwise trigger export ──
     let exported = processed;
     if (!processed.downloadUrl) {
       console.log(`[submagic] triggering export for project ${project.id}`);
       try {
         await axios.post(`${BASE}/projects/${project.id}/export`, {}, { headers: headers() });
       } catch (exportErr) {
-        // Some Submagic plans auto-export — 404 here is non-fatal, poll anyway
-        console.warn(`[submagic] export endpoint returned ${exportErr?.response?.status ?? exportErr.message}, polling for downloadUrl anyway`);
+        console.warn(`[submagic] export endpoint returned ${exportErr?.response?.status ?? exportErr.message}, polling anyway`);
       }
-
-      // ── Step 5: Poll until download URL available ─────────────────────────
       exported = await pollProject(project.id, 'completed', 10000, 180000);
     }
 
-    if (!exported.downloadUrl) {
-      throw new Error('Submagic export completed but no downloadUrl returned');
-    }
+    if (!exported.downloadUrl) throw new Error('Submagic export completed but no downloadUrl returned');
 
     console.log(`[submagic] done: ${exported.downloadUrl}`);
-
-    res.json({
+    return {
       videoUrl: exported.downloadUrl,
       previewUrl: exported.previewUrl ?? null,
       duration: exported.videoMetaData?.duration ?? processed.videoMetaData?.duration ?? null,
       words: exported.words ?? [],
-    });
+    };
+}
+
+submagicRouter.post('/submagic-edit', async (req, res, next) => {
+  try {
+    if (!req.body.videoUrl) return res.status(400).json({ error: 'videoUrl is required' });
+    const result = await runSubmagicEdit(req.body);
+    res.json(result);
   } catch (err) {
     if (err.response) {
       console.error(`[submagic] API error ${err.response.status}:`, JSON.stringify(err.response.data));

@@ -1,5 +1,13 @@
 import { Router } from 'express';
 import axios from 'axios';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import { writeFileSync, unlinkSync, existsSync } from 'fs';
+import { join } from 'path';
+import { randomUUID } from 'crypto';
+import { uploadVideo } from '../lib/storage.js';
+
+const execAsync = promisify(exec);
 
 export const submagicRouter = Router();
 
@@ -168,6 +176,53 @@ submagicRouter.post('/submagic-edit-async', async (req, res) => {
 });
 
 /**
+ * If the video is H.265/HEVC, transcode to H.264 and upload to Cloudinary.
+ * Submagic's ingest pipeline rejects H.265 with "Virus scan failed".
+ * Returns the original URL if already H.264, or a new Cloudinary URL if transcoded.
+ */
+async function ensureH264(videoUrl) {
+  const tmpId = randomUUID();
+  const inputPath = join('/tmp', `${tmpId}_in.mp4`);
+  const outputPath = join('/tmp', `${tmpId}_out.mp4`);
+
+  try {
+    // Probe codec from URL — ffprobe only downloads the container header
+    let codec = 'unknown';
+    try {
+      const { stdout } = await execAsync(
+        `ffprobe -v quiet -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "${videoUrl}"`,
+        { timeout: 30000 }
+      );
+      codec = stdout.trim().toLowerCase();
+    } catch {
+      console.warn('[submagic] ffprobe failed — assuming H.264, skipping transcode');
+      return videoUrl;
+    }
+
+    console.log(`[submagic] codec detected: ${codec}`);
+    if (codec !== 'hevc' && codec !== 'h265') return videoUrl;
+
+    console.log('[submagic] H.265 detected — transcoding to H.264 for Submagic compatibility');
+
+    // Download the full file for transcoding
+    const { data } = await axios.get(videoUrl, { responseType: 'arraybuffer' });
+    writeFileSync(inputPath, Buffer.from(data));
+
+    await execAsync(
+      `ffmpeg -i "${inputPath}" -c:v libx264 -preset fast -crf 23 -c:a aac -movflags +faststart -y "${outputPath}"`,
+      { timeout: 300000 } // 5 min max
+    );
+
+    const { url } = await uploadVideo(outputPath, 'submagic-intake');
+    console.log(`[submagic] transcoded H.264 uploaded: ${url}`);
+    return url;
+  } finally {
+    if (existsSync(inputPath)) unlinkSync(inputPath);
+    if (existsSync(outputPath)) unlinkSync(outputPath);
+  }
+}
+
+/**
  * Core Submagic edit logic — shared by /submagic-edit and /submagic-edit-async.
  */
 async function runSubmagicEdit({
@@ -179,6 +234,9 @@ async function runSubmagicEdit({
   clientBrolls = [],
   emotionTags = [],
 }) {
+    // ── Step 0: Ensure H.264 — Submagic rejects H.265 with "Virus scan failed" ──
+    videoUrl = await ensureH264(videoUrl);
+
     // ── Step 1: Register client b-roll clips (if any) ─────────────────────
     const items = [];
     for (const broll of clientBrolls) {

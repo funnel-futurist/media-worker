@@ -22,6 +22,7 @@ import { extractRouter } from './routes/extract.js';
 import { brollRouter } from './routes/broll.js';
 import { submagicRouter } from './routes/submagic.js';
 import { classifyRouter } from './routes/classify.js';
+import { youtubeRouter } from './routes/youtube.js';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -59,6 +60,8 @@ app.use('/', brollRouter);
 app.use('/', submagicRouter);
 // Routes — Phase 7 (Async Gemini Classification)
 app.use('/', classifyRouter);
+// Routes — Phase 8 (YouTube Clip Extraction)
+app.use('/', youtubeRouter);
 
 // Global error handler
 app.use((err, req, res, _next) => {

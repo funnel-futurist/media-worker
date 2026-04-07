@@ -1,8 +1,11 @@
 # Base: Microsoft Playwright image (Node 20 + Chromium + all deps pre-installed)
 FROM mcr.microsoft.com/playwright:v1.50.0-noble
 
-# Install ffmpeg (only extra dep needed)
-RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+# Install ffmpeg + yt-dlp (standalone binary — no Python needed)
+RUN apt-get update && apt-get install -y ffmpeg wget && \
+    wget -qO /usr/local/bin/yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp && \
+    chmod +x /usr/local/bin/yt-dlp && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

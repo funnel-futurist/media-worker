@@ -1,10 +1,9 @@
 import { Router } from 'express';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { writeFileSync, unlinkSync, existsSync, readFileSync } from 'fs';
+import { unlinkSync, existsSync, readFileSync, createReadStream, statSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
-import { uploadVideo } from '../lib/storage.js';
 
 const execAsync = promisify(exec);
 
@@ -26,6 +25,37 @@ function getSupabaseUrl() {
   const url = process.env.SUPABASE_URL;
   if (!url) throw new Error('SUPABASE_URL not set');
   return url;
+}
+
+/**
+ * Upload a local file to Supabase Storage.
+ * Returns the public URL.
+ */
+async function uploadToSupabaseStorage(filePath, storagePath) {
+  const key = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!key) throw new Error('SUPABASE_SERVICE_KEY not set');
+
+  const fileBuffer = readFileSync(filePath);
+  const fileSize = statSync(filePath).size;
+
+  const res = await fetch(
+    `${getSupabaseUrl()}/storage/v1/object/video-modules/${storagePath}`,
+    {
+      method: 'POST',
+      headers: {
+        apikey: key,
+        Authorization: `Bearer ${key}`,
+        'Content-Type': 'video/mp4',
+        'Content-Length': String(fileSize),
+        'x-upsert': 'true',
+      },
+      body: fileBuffer,
+    }
+  );
+
+  if (!res.ok) throw new Error(`Supabase Storage upload failed: ${await res.text()}`);
+
+  return `${getSupabaseUrl()}/storage/v1/object/public/video-modules/${storagePath}`;
 }
 
 async function supabasePatch(table, id, data) {
@@ -150,8 +180,11 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
             continue;
           }
 
-          // Upload to Cloudinary
-          const { url: clipUrl } = await uploadVideo(clipPath, 'youtube-clips');
+          // Upload to Supabase Storage
+          const date = new Date().toISOString().split('T')[0];
+          const safeFilename = (clip.title ?? `clip_${i}`).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 60);
+          const storagePath = `youtube-clips/${clientId}/${date}/${randomUUID()}_${safeFilename}.mp4`;
+          const clipUrl = await uploadToSupabaseStorage(clipPath, storagePath);
           console.log(`[youtube] clip ${i} uploaded: ${clipUrl}`);
 
           // Create ad_ingestion row — pipeline will add captions via Submagic

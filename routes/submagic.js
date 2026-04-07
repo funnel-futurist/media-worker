@@ -286,9 +286,11 @@ async function runSubmagicEdit({
     // ── Step 1: Register client b-roll clips (if any) ─────────────────────
     const items = [];
     for (const broll of clientBrolls) {
-      // Photos must be converted to short video clips — Submagic /user-media rejects images
+      // Photos must be converted to short video clips — Submagic /user-media rejects images.
+      // Check both URL extension and asset_type (existing photos were stored with .mp4 extension by mistake).
+      const isPhoto = isImageUrl(broll.url) || (broll.assetType ?? '').toLowerCase().includes('photo');
       let brollVideoUrl = broll.url;
-      if (isImageUrl(broll.url)) {
+      if (isPhoto) {
         brollVideoUrl = await convertImageToBroll(broll.url);
       }
       console.log(`[submagic] registering client b-roll: ${brollVideoUrl}`);

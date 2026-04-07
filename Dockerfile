@@ -7,6 +7,9 @@ RUN apt-get update && apt-get install -y ffmpeg wget && \
     chmod +x /usr/local/bin/yt-dlp && \
     rm -rf /var/lib/apt/lists/*
 
+# Tell yt-dlp to use Node.js (already present via Playwright image) for JS challenge solving
+ENV YT_DLP_JS_RUNTIMES=node
+
 WORKDIR /app
 
 # Don't re-download browsers — they're already in the image

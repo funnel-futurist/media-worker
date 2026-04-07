@@ -1,13 +1,26 @@
 import { Router } from 'express';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { unlinkSync, existsSync, readFileSync, createReadStream, statSync } from 'fs';
+import { unlinkSync, existsSync, readFileSync, createReadStream, statSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 
 const execAsync = promisify(exec);
 
 export const youtubeRouter = Router();
+
+const COOKIES_PATH = '/tmp/youtube-cookies.txt';
+
+/**
+ * Write YOUTUBE_COOKIES env var to a temp file and return the --cookies flag.
+ * Returns empty string if env var not set.
+ */
+function getYtDlpCookiesArg() {
+  const cookiesEnv = process.env.YOUTUBE_COOKIES;
+  if (!cookiesEnv) return '';
+  writeFileSync(COOKIES_PATH, cookiesEnv, 'utf8');
+  return `--cookies "${COOKIES_PATH}"`;
+}
 
 function getSupabaseHeaders() {
   const key = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -98,9 +111,10 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
 
   if (duration <= 0) throw new Error(`Invalid time range: ${startTs} → ${endTs}`);
 
-  // Use iOS player client to bypass YouTube bot detection / 429 errors
+  const cookiesArg = getYtDlpCookiesArg();
   const cmd = [
     'yt-dlp',
+    cookiesArg,
     '--extractor-args "youtube:player_client=ios"',
     `--download-sections "*${startTs}-${endTs}"`,
     '-f "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best"',
@@ -108,7 +122,7 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
     '--no-playlist',
     `--output "${outputPath}"`,
     `"${youtubeUrl}"`,
-  ].join(' ');
+  ].filter(Boolean).join(' ');
 
   console.log(`[youtube] downloading clip ${startTs}→${endTs} (${duration}s)`);
   await execAsync(cmd, { timeout: 300000 }); // 5 min max per clip
@@ -120,8 +134,9 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
  */
 async function downloadTranscript(youtubeUrl, tmpDir) {
   try {
+    const cookiesArg = getYtDlpCookiesArg();
     await execAsync(
-      `yt-dlp --extractor-args "youtube:player_client=ios" --write-auto-subs --sub-langs en --sub-format vtt --skip-download --no-playlist -o "${tmpDir}/transcript" "${youtubeUrl}"`,
+      `yt-dlp ${cookiesArg} --extractor-args "youtube:player_client=ios" --write-auto-subs --sub-langs en --sub-format vtt --skip-download --no-playlist -o "${tmpDir}/transcript" "${youtubeUrl}"`,
       { timeout: 60000 }
     );
     // yt-dlp writes transcript.en.vtt

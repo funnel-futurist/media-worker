@@ -43,7 +43,7 @@ function headers() {
  * Poll a Submagic project until it reaches a target status or fails.
  * Returns the final project object.
  */
-async function pollProject(projectId, targetStatus, intervalMs = 10000, maxMs = 300000) {
+async function pollProject(projectId, targetStatus, intervalMs = 10000, maxMs = 900000) {
   const deadline = Date.now() + maxMs;
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, intervalMs));
@@ -231,7 +231,7 @@ async function runSubmagicEdit({
       } catch (exportErr) {
         console.warn(`[submagic] export endpoint returned ${exportErr?.response?.status ?? exportErr.message}, polling anyway`);
       }
-      exported = await pollProject(project.id, 'completed', 10000, 180000);
+      exported = await pollProject(project.id, 'completed', 10000, 600000);
     }
 
     if (!exported.downloadUrl) throw new Error('Submagic export completed but no downloadUrl returned');

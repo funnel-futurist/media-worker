@@ -129,24 +129,55 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
 }
 
 /**
- * Convert a landscape YouTube clip to portrait (1080x1920) split-screen format.
- * Left half of the frame → top speaker, right half → bottom speaker.
+ * Convert a landscape YouTube clip to portrait (1080x1920).
+ * For split-screen podcasts: left half → top, right half → bottom.
+ * For single-speaker: center-crop to fill 9:16.
  * Overwrites the file in place.
  */
 async function convertToPortraitSplit(inputPath) {
   const outputPath = inputPath.replace('.mp4', '_portrait.mp4');
   try {
-    // Split landscape frame into left (guest/top) and right (host/bottom), stack vertically
-    await execAsync(
-      `ffmpeg -i "${inputPath}" ` +
-      `-filter_complex "[0:v]crop=iw/2:ih:0:0,scale=1080:960[top];[0:v]crop=iw/2:ih:iw/2:0,scale=1080:960[bottom];[top][bottom]vstack[out]" ` +
-      `-map "[out]" -map 0:a -c:v libx264 -preset fast -crf 23 -c:a aac -movflags +faststart -y "${outputPath}"`,
-      { timeout: 120000 }
+    // Detect input dimensions
+    const { stdout } = await execAsync(
+      `ffprobe -v quiet -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "${inputPath}"`
     );
+    const [w, h] = stdout.trim().split(',').map(Number);
+    console.log(`[youtube] input dimensions: ${w}x${h}`);
+
+    // If already portrait or near-square, just scale to 1080x1920
+    if (h >= w) {
+      await execAsync(
+        `ffmpeg -i "${inputPath}" ` +
+        `-vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" ` +
+        `-c:v libx264 -preset fast -crf 23 -c:a aac -movflags +faststart -y "${outputPath}"`,
+        { timeout: 120000 }
+      );
+    }
+    // If wide landscape (likely split-screen podcast): split left/right, stack top/bottom
+    else if (w / h >= 1.7) {
+      await execAsync(
+        `ffmpeg -i "${inputPath}" ` +
+        `-filter_complex "[0:v]crop=iw/2:ih:0:0,scale=1080:960[top];[0:v]crop=iw/2:ih:iw/2:0,scale=1080:960[bottom];[top][bottom]vstack[out]" ` +
+        `-map "[out]" -map 0:a -c:v libx264 -preset fast -crf 23 -c:a aac -movflags +faststart -y "${outputPath}"`,
+        { timeout: 120000 }
+      );
+    }
+    // Otherwise center-crop to 9:16
+    else {
+      const cropW = Math.floor(h * 9 / 16);
+      const cropX = Math.floor((w - cropW) / 2);
+      await execAsync(
+        `ffmpeg -i "${inputPath}" ` +
+        `-vf "crop=${cropW}:${h}:${cropX}:0,scale=1080:1920" ` +
+        `-c:v libx264 -preset fast -crf 23 -c:a aac -movflags +faststart -y "${outputPath}"`,
+        { timeout: 120000 }
+      );
+    }
+
     // Replace original with portrait version
     unlinkSync(inputPath);
     await execAsync(`mv "${outputPath}" "${inputPath}"`);
-    console.log(`[youtube] converted to portrait split-screen: ${inputPath}`);
+    console.log(`[youtube] converted to portrait (${w}x${h} → 1080x1920): ${inputPath}`);
   } catch (err) {
     if (existsSync(outputPath)) unlinkSync(outputPath);
     throw err;

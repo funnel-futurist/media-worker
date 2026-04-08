@@ -129,6 +129,31 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
 }
 
 /**
+ * Convert a landscape YouTube clip to portrait (1080x1920) split-screen format.
+ * Left half of the frame → top speaker, right half → bottom speaker.
+ * Overwrites the file in place.
+ */
+async function convertToPortraitSplit(inputPath) {
+  const outputPath = inputPath.replace('.mp4', '_portrait.mp4');
+  try {
+    // Split landscape frame into left (guest/top) and right (host/bottom), stack vertically
+    await execAsync(
+      `ffmpeg -i "${inputPath}" ` +
+      `-filter_complex "[0:v]crop=iw/2:ih:0:0,scale=1080:960[top];[0:v]crop=iw/2:ih:iw/2:0,scale=1080:960[bottom];[top][bottom]vstack[out]" ` +
+      `-map "[out]" -map 0:a -c:v libx264 -preset fast -crf 23 -c:a aac -movflags +faststart -y "${outputPath}"`,
+      { timeout: 120000 }
+    );
+    // Replace original with portrait version
+    unlinkSync(inputPath);
+    await execAsync(`mv "${outputPath}" "${inputPath}"`);
+    console.log(`[youtube] converted to portrait split-screen: ${inputPath}`);
+  } catch (err) {
+    if (existsSync(outputPath)) unlinkSync(outputPath);
+    throw err;
+  }
+}
+
+/**
  * Download transcript (auto-generated captions) from a YouTube video.
  * Returns the raw VTT text, or null if unavailable.
  */
@@ -191,6 +216,9 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
             console.warn(`[youtube] clip ${i} file not found after download, skipping`);
             continue;
           }
+
+          // Convert landscape to portrait split-screen (host bottom, guest top)
+          await convertToPortraitSplit(clipPath);
 
           // Upload to Supabase Storage
           const date = new Date().toISOString().split('T')[0];

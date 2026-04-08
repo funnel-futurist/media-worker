@@ -279,6 +279,7 @@ async function runSubmagicEdit({
   removeBadTakes = true,
   clientBrolls = [],
   emotionTags = [],
+  skipHook = false,
 }) {
     // ── Step 0: Ensure H.264 — Submagic rejects H.265 with "Virus scan failed" ──
     videoUrl = await ensureH264(videoUrl);
@@ -323,7 +324,7 @@ async function runSubmagicEdit({
       removeBadTakes,
       magicBrolls,
       cleanAudio: true,
-      hookTitle: { template: 'steph' },
+      ...(!skipHook && { hookTitle: { template: 'steph' } }),
       ...(items.length > 0 && { items }),
       ...(music && { music }),
     };

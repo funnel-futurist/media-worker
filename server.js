@@ -23,6 +23,7 @@ import { brollRouter } from './routes/broll.js';
 import { submagicRouter } from './routes/submagic.js';
 import { classifyRouter } from './routes/classify.js';
 import { youtubeRouter } from './routes/youtube.js';
+import { youtubeAuthRouter } from './routes/youtube-auth.js';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -62,6 +63,8 @@ app.use('/', submagicRouter);
 app.use('/', classifyRouter);
 // Routes — Phase 8 (YouTube Clip Extraction)
 app.use('/', youtubeRouter);
+// Routes — Phase 9 (YouTube Auth / Cookie Refresh)
+app.use('/', youtubeAuthRouter);
 
 // Global error handler
 app.use((err, req, res, _next) => {

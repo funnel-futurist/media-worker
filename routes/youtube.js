@@ -4,30 +4,32 @@ import { promisify } from 'util';
 import { unlinkSync, existsSync, readFileSync, createReadStream, statSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
+import { getCachedCookies } from './youtube-auth.js';
 
 const execAsync = promisify(exec);
 
 export const youtubeRouter = Router();
 
-const OAUTH_TOKEN_PATH = '/tmp/yt-dlp-oauth2.json';
+const COOKIES_PATH = '/tmp/youtube-cookies.txt';
 
 /**
- * Write YOUTUBE_OAUTH_TOKEN env var to the yt-dlp oauth2 token file.
- * Returns the --username/--password flags for oauth2 plugin if token exists.
- * Falls back to cookies if YOUTUBE_COOKIES is set.
+ * Returns the --cookies flag for yt-dlp.
+ * Priority order:
+ *   1. In-memory cached cookies (from /refresh-youtube-cookies, takes effect immediately)
+ *   2. YOUTUBE_COOKIES env var (set at deploy time)
  * Returns empty string if neither is configured.
  */
 function getYtDlpAuthArg() {
-  const oauthToken = process.env.YOUTUBE_OAUTH_TOKEN;
-  if (oauthToken) {
-    writeFileSync(OAUTH_TOKEN_PATH, oauthToken, 'utf8');
-    return `--username oauth2 --password "" --plugin-dirs /usr/local/lib/python3.*/dist-packages`;
+  // Check in-memory cache first (updated by /refresh-youtube-cookies without redeploy)
+  const cached = getCachedCookies();
+  if (cached) {
+    writeFileSync(COOKIES_PATH, cached, 'utf8');
+    return `--cookies "${COOKIES_PATH}"`;
   }
   const cookiesEnv = process.env.YOUTUBE_COOKIES;
   if (cookiesEnv) {
-    const cookiesPath = '/tmp/youtube-cookies.txt';
-    writeFileSync(cookiesPath, cookiesEnv, 'utf8');
-    return `--cookies "${cookiesPath}"`;
+    writeFileSync(COOKIES_PATH, cookiesEnv, 'utf8');
+    return `--cookies "${COOKIES_PATH}"`;
   }
   return '';
 }

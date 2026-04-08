@@ -311,9 +311,12 @@ async function runSubmagicEdit({
 
     const magicBrolls = items.length === 0;
 
-    const musicId = pickMusicId(emotionTags);
-    const music = { userMediaId: musicId, volume: 5 };
-    console.log(`[submagic] BGM selected: ${musicId} (emotions: ${emotionTags.join(', ') || 'none → default'})`);
+    let music = null;
+    if (!skipHook) {
+      const musicId = pickMusicId(emotionTags);
+      music = { userMediaId: musicId, volume: 5 };
+      console.log(`[submagic] BGM selected: ${musicId} (emotions: ${emotionTags.join(', ') || 'none → default'})`);
+    }
 
     const projectBody = {
       title: `pipeline-${Date.now()}`,

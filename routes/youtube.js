@@ -129,9 +129,33 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
 }
 
 /**
+ * Detect the face center X coordinate in a video frame using OpenCV.
+ * Returns null if no face found or detection fails.
+ */
+async function detectFaceCenterX(videoPath) {
+  const framePath = videoPath.replace('.mp4', '_frame.jpg');
+  try {
+    await execAsync(`ffmpeg -ss 1 -i "${videoPath}" -frames:v 1 -y "${framePath}"`, { timeout: 15000 });
+    const scriptPath = new URL('../lib/detect_face.py', import.meta.url).pathname;
+    const { stdout } = await execAsync(`python3 "${scriptPath}" "${framePath}"`, { timeout: 15000 });
+    const result = JSON.parse(stdout.trim());
+    if (result.cx != null) {
+      console.log(`[youtube] face detected at x=${result.cx} (size: ${result.w}x${result.h})`);
+      return result.cx;
+    }
+    console.log('[youtube] no face detected, using center crop');
+    return null;
+  } catch (err) {
+    console.warn('[youtube] face detection failed:', err.message);
+    return null;
+  } finally {
+    if (existsSync(framePath)) unlinkSync(framePath);
+  }
+}
+
+/**
  * Convert a landscape YouTube clip to portrait (1080x1920).
- * For split-screen podcasts: left half → top, right half → bottom.
- * For single-speaker: center-crop to fill 9:16.
+ * Uses face detection to center the crop on the speaker.
  * Overwrites the file in place.
  */
 async function convertToPortraitSplit(inputPath) {
@@ -152,20 +176,14 @@ async function convertToPortraitSplit(inputPath) {
         `-c:v libx264 -preset fast -crf 23 -c:a aac -movflags +faststart -y "${outputPath}"`,
         { timeout: 120000 }
       );
-    }
-    // If wide landscape (likely split-screen podcast): split left/right, stack top/bottom
-    else if (w / h >= 1.7) {
-      await execAsync(
-        `ffmpeg -i "${inputPath}" ` +
-        `-filter_complex "[0:v]crop=iw/2:ih:0:0,scale=1080:960[top];[0:v]crop=iw/2:ih:iw/2:0,scale=1080:960[bottom];[top][bottom]vstack[out]" ` +
-        `-map "[out]" -map 0:a -c:v libx264 -preset fast -crf 23 -c:a aac -movflags +faststart -y "${outputPath}"`,
-        { timeout: 120000 }
-      );
-    }
-    // Otherwise center-crop to 9:16
-    else {
+    } else {
+      // Detect face position — crop 9:16 window centered on face
+      const faceCx = await detectFaceCenterX(inputPath);
       const cropW = Math.floor(h * 9 / 16);
-      const cropX = Math.floor((w - cropW) / 2);
+      const centerX = faceCx ?? Math.floor(w / 2);
+      const cropX = Math.max(0, Math.min(w - cropW, Math.floor(centerX - cropW / 2)));
+
+      console.log(`[youtube] cropping at x=${cropX}, width=${cropW} (face center: ${faceCx ?? 'none'})`);
       await execAsync(
         `ffmpeg -i "${inputPath}" ` +
         `-vf "crop=${cropW}:${h}:${cropX}:0,scale=1080:1920" ` +
@@ -174,7 +192,6 @@ async function convertToPortraitSplit(inputPath) {
       );
     }
 
-    // Replace original with portrait version
     unlinkSync(inputPath);
     await execAsync(`mv "${outputPath}" "${inputPath}"`);
     console.log(`[youtube] converted to portrait (${w}x${h} → 1080x1920): ${inputPath}`);

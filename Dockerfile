@@ -3,7 +3,7 @@ FROM mcr.microsoft.com/playwright:v1.59.1-noble
 
 # Install ffmpeg, yt-dlp, Python + OpenCV for face detection + yt-dlp oauth2 plugin
 RUN apt-get update && apt-get install -y ffmpeg wget python3 python3-pip && \
-    pip3 install --break-system-packages opencv-python-headless yt-dlp yt-dlp-youtube-oauth2 && \
+    pip3 install --break-system-packages opencv-python-headless yt-dlp && \
     rm -rf /var/lib/apt/lists/*
 
 # Tell yt-dlp to use Node.js (already present via Playwright image) for JS challenge solving

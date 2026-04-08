@@ -1,11 +1,9 @@
 # Base: Microsoft Playwright image (Node 20 + Chromium + all deps pre-installed)
 FROM mcr.microsoft.com/playwright:v1.50.0-noble
 
-# Install ffmpeg, yt-dlp, Python + OpenCV for face detection
+# Install ffmpeg, yt-dlp, Python + OpenCV for face detection + yt-dlp oauth2 plugin
 RUN apt-get update && apt-get install -y ffmpeg wget python3 python3-pip && \
-    pip3 install --break-system-packages opencv-python-headless && \
-    wget -qO /usr/local/bin/yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp && \
-    chmod +x /usr/local/bin/yt-dlp && \
+    pip3 install --break-system-packages opencv-python-headless yt-dlp yt-dlp-youtube-oauth2 && \
     rm -rf /var/lib/apt/lists/*
 
 # Tell yt-dlp to use Node.js (already present via Playwright image) for JS challenge solving

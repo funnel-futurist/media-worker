@@ -9,17 +9,27 @@ const execAsync = promisify(exec);
 
 export const youtubeRouter = Router();
 
-const COOKIES_PATH = '/tmp/youtube-cookies.txt';
+const OAUTH_TOKEN_PATH = '/tmp/yt-dlp-oauth2.json';
 
 /**
- * Write YOUTUBE_COOKIES env var to a temp file and return the --cookies flag.
- * Returns empty string if env var not set.
+ * Write YOUTUBE_OAUTH_TOKEN env var to the yt-dlp oauth2 token file.
+ * Returns the --username/--password flags for oauth2 plugin if token exists.
+ * Falls back to cookies if YOUTUBE_COOKIES is set.
+ * Returns empty string if neither is configured.
  */
-function getYtDlpCookiesArg() {
+function getYtDlpAuthArg() {
+  const oauthToken = process.env.YOUTUBE_OAUTH_TOKEN;
+  if (oauthToken) {
+    writeFileSync(OAUTH_TOKEN_PATH, oauthToken, 'utf8');
+    return `--username oauth2 --password "" --plugin-dirs /usr/local/lib/python3.*/dist-packages`;
+  }
   const cookiesEnv = process.env.YOUTUBE_COOKIES;
-  if (!cookiesEnv) return '';
-  writeFileSync(COOKIES_PATH, cookiesEnv, 'utf8');
-  return `--cookies "${COOKIES_PATH}"`;
+  if (cookiesEnv) {
+    const cookiesPath = '/tmp/youtube-cookies.txt';
+    writeFileSync(cookiesPath, cookiesEnv, 'utf8');
+    return `--cookies "${cookiesPath}"`;
+  }
+  return '';
 }
 
 function getSupabaseHeaders() {
@@ -111,7 +121,7 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
 
   if (duration <= 0) throw new Error(`Invalid time range: ${startTs} → ${endTs}`);
 
-  const cookiesArg = getYtDlpCookiesArg();
+  const cookiesArg = getYtDlpAuthArg();
   const cmd = [
     'yt-dlp',
     cookiesArg,
@@ -213,7 +223,7 @@ async function convertToPortraitSplit(inputPath) {
  */
 async function downloadTranscript(youtubeUrl, tmpDir) {
   try {
-    const cookiesArg = getYtDlpCookiesArg();
+    const cookiesArg = getYtDlpAuthArg();
     await execAsync(
       `yt-dlp ${cookiesArg} --js-runtimes node --write-auto-subs --sub-langs en --sub-format vtt --skip-download --no-playlist -o "${tmpDir}/transcript" "${youtubeUrl}"`,
       { timeout: 60000 }

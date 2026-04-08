@@ -128,7 +128,8 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
     'yt-dlp',
     cookiesArg,
     '--js-runtimes node',
-    '--extractor-args "youtube:player_client=web,mweb"',
+    '--extractor-args "youtube:player_client=web_creator"',
+    '--remote-components ejs:github',
     `--download-sections "*${startTs}-${endTs}"`,
     '-f "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best"',
     '--merge-output-format mp4',
@@ -228,7 +229,7 @@ async function downloadTranscript(youtubeUrl, tmpDir) {
   try {
     const cookiesArg = getYtDlpAuthArg();
     await execAsync(
-      `yt-dlp ${cookiesArg} --js-runtimes node --write-auto-subs --sub-langs en --sub-format vtt --skip-download --no-playlist -o "${tmpDir}/transcript" "${youtubeUrl}"`,
+      `yt-dlp ${cookiesArg} --js-runtimes node --remote-components ejs:github --extractor-args "youtube:player_client=web_creator" --write-auto-subs --sub-langs en --sub-format vtt --skip-download --no-playlist -o "${tmpDir}/transcript" "${youtubeUrl}"`,
       { timeout: 60000 }
     );
     // yt-dlp writes transcript.en.vtt

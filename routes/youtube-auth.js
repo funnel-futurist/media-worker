@@ -132,9 +132,9 @@ async function loginAndExportCookies(email, password) {
     await page.click('#identifierNext');
     await page.waitForTimeout(2000);
 
-    // Step 3: Enter password
-    await page.waitForSelector('input[type="password"], input[name="Passwd"]', { timeout: 15000 });
-    await page.fill('input[type="password"], input[name="Passwd"]', password);
+    // Step 3: Enter password — wait for the visible password field (not the hidden one)
+    await page.waitForSelector('input[type="password"]:not([aria-hidden="true"])', { timeout: 15000, state: 'visible' });
+    await page.fill('input[type="password"]:not([aria-hidden="true"])', password);
     await page.waitForTimeout(500);
     await page.click('#passwordNext');
 

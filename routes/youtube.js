@@ -129,10 +129,10 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
 }
 
 /**
- * Detect the face center X coordinate in a video frame using OpenCV.
- * Returns null if no face found or detection fails.
+ * Detect the speaker's face in a video frame.
+ * Returns { cx, speakerSide } — speakerSide is 'left' or 'right'.
  */
-async function detectFaceCenterX(videoPath) {
+async function detectFace(videoPath) {
   const framePath = videoPath.replace('.mp4', '_frame.jpg');
   try {
     await execAsync(`ffmpeg -ss 1 -i "${videoPath}" -frames:v 1 -y "${framePath}"`, { timeout: 15000 });
@@ -140,14 +140,14 @@ async function detectFaceCenterX(videoPath) {
     const { stdout } = await execAsync(`python3 "${scriptPath}" "${framePath}"`, { timeout: 15000 });
     const result = JSON.parse(stdout.trim());
     if (result.cx != null) {
-      console.log(`[youtube] face detected at x=${result.cx} (size: ${result.w}x${result.h})`);
-      return result.cx;
+      console.log(`[youtube] face detected at x=${result.cx}, side=${result.speaker_side}`);
+      return { cx: result.cx, speakerSide: result.speaker_side };
     }
-    console.log('[youtube] no face detected, using center crop');
-    return null;
+    console.log('[youtube] no face detected, defaulting to left=speaker');
+    return { cx: null, speakerSide: 'left' };
   } catch (err) {
     console.warn('[youtube] face detection failed:', err.message);
-    return null;
+    return { cx: null, speakerSide: 'left' };
   } finally {
     if (existsSync(framePath)) unlinkSync(framePath);
   }
@@ -177,17 +177,23 @@ async function convertToPortraitSplit(inputPath) {
         { timeout: 120000 }
       );
     } else {
-      // Detect face position — crop 9:16 window centered on face
-      const faceCx = await detectFaceCenterX(inputPath);
-      const cropW = Math.floor(h * 9 / 16);
-      const centerX = faceCx ?? Math.floor(w / 2);
-      const cropX = Math.max(0, Math.min(w - cropW, Math.floor(centerX - cropW / 2)));
+      // Detect which side the speaker is on
+      const { speakerSide } = await detectFace(inputPath);
 
-      console.log(`[youtube] cropping at x=${cropX}, width=${cropW} (face center: ${faceCx ?? 'none'})`);
+      // Split left/right halves — speaker goes bottom, content/guest goes top
+      // Layout: [top = guest/content] [bottom = speaker face]
+      const speakerCrop = speakerSide === 'left'
+        ? `crop=iw/2:ih:0:0` // left half = speaker
+        : `crop=iw/2:ih:iw/2:0`; // right half = speaker
+      const contentCrop = speakerSide === 'left'
+        ? `crop=iw/2:ih:iw/2:0` // right half = content
+        : `crop=iw/2:ih:0:0`; // left half = content
+
+      console.log(`[youtube] speaker on ${speakerSide} → speaker=bottom, content=top`);
       await execAsync(
         `ffmpeg -i "${inputPath}" ` +
-        `-vf "crop=${cropW}:${h}:${cropX}:0,scale=1080:1920" ` +
-        `-c:v libx264 -preset fast -crf 23 -c:a aac -movflags +faststart -y "${outputPath}"`,
+        `-filter_complex "[0:v]${contentCrop},scale=1080:960[top];[0:v]${speakerCrop},scale=1080:960[bottom];[top][bottom]vstack[out]" ` +
+        `-map "[out]" -map 0:a -c:v libx264 -preset fast -crf 23 -c:a aac -movflags +faststart -y "${outputPath}"`,
         { timeout: 120000 }
       );
     }

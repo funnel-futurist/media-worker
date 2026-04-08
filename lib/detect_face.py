@@ -10,7 +10,7 @@ import json
 def detect_face(image_path):
     img = cv2.imread(image_path)
     if img is None:
-        print(json.dumps({"cx": None, "cy": None}))
+        print(json.dumps({"cx": None, "cy": None, "speaker_side": "left"}))
         return
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -18,7 +18,7 @@ def detect_face(image_path):
     faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(60, 60))
 
     if len(faces) == 0:
-        print(json.dumps({"cx": None, "cy": None}))
+        print(json.dumps({"cx": None, "cy": None, "speaker_side": "left"}))
         return
 
     # Pick the largest face
@@ -26,7 +26,9 @@ def detect_face(image_path):
     x, y, w, h = largest
     cx = int(x + w / 2)
     cy = int(y + h / 2)
-    print(json.dumps({"cx": cx, "cy": cy, "w": int(w), "h": int(h)}))
+    img_w = img.shape[1]
+    speaker_side = "left" if cx < img_w / 2 else "right"
+    print(json.dumps({"cx": cx, "cy": cy, "w": int(w), "h": int(h), "speaker_side": speaker_side}))
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

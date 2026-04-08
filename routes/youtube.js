@@ -130,6 +130,7 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
     '--js-runtimes node',
     '--extractor-args "youtube:player_client=web_creator"',
     '--remote-components ejs:github',
+    '--sleep-requests 2',
     `--download-sections "*${startTs}-${endTs}"`,
     '-f "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best"',
     '--merge-output-format mp4',

@@ -1,5 +1,5 @@
 # Base: Microsoft Playwright image (Node 20 + Chromium + all deps pre-installed)
-FROM mcr.microsoft.com/playwright:v1.50.0-noble
+FROM mcr.microsoft.com/playwright:v1.59.1-noble
 
 # Install ffmpeg, yt-dlp, Python + OpenCV for face detection + yt-dlp oauth2 plugin
 RUN apt-get update && apt-get install -y ffmpeg wget python3 python3-pip && \

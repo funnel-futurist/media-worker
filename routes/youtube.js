@@ -320,6 +320,20 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
           extractedClips.push({ title: clip.title, url: clipUrl });
         } catch (clipErr) {
           console.error(`[youtube] clip ${i} failed:`, clipErr.message);
+          // Persist error to pipeline events so we can diagnose without Railway logs
+          await supabaseInsert('content_pipeline_events', {
+            client_id: clientId,
+            event_type: 'error',
+            source_module: 'youtube/clip-extraction',
+            metadata: {
+              clip_plan_id: clipPlanId,
+              clip_index: i,
+              clip_title: clip.title,
+              error: clipErr.message,
+              start: clip.startTimestamp,
+              end: clip.endTimestamp,
+            },
+          }).catch(() => {});
         }
 
         // Cleanup clip temp file
@@ -334,6 +348,12 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
       console.log(`[youtube] done: ${extractedClips.length}/${clips.length} clips extracted for plan ${clipPlanId}`);
     } catch (err) {
       console.error(`[youtube] extraction failed for plan ${clipPlanId}:`, err.message);
+      await supabaseInsert('content_pipeline_events', {
+        client_id: clientId,
+        event_type: 'error',
+        source_module: 'youtube/extraction-outer',
+        metadata: { clip_plan_id: clipPlanId, error: err.message },
+      }).catch(() => {});
       await supabasePatch('youtube_clip_plans', clipPlanId, {
         extraction_status: 'dispatch_failed',
       }).catch(() => {});

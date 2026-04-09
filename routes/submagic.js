@@ -573,7 +573,7 @@ async function runSubmagicEdit({
   emotionTags = [],
   skipHook = false,
   forceMagicBrolls = null,  // null = auto (true when no client brolls), false = always off
-  captionsPosition = null,  // null = template default, 'center' = 50 (Submagic field: top, range 0-80)
+  captionsPosition = null,  // reserved — Submagic API has no caption position field; ignored for now
 }) {
     // ── Step 0: Ensure H.264 — Submagic rejects H.265 with "Virus scan failed" ──
     videoUrl = await ensureH264(videoUrl);
@@ -625,8 +625,9 @@ async function runSubmagicEdit({
       removeBadTakes,
       magicBrolls,
       cleanAudio: true,
-      // Submagic caption vertical position: field is "top", range 0-80 (0=top, 80=bottom, 50=center)
-      ...(captionsPosition === 'center' && { top: 50 }),
+      // NOTE: Submagic API has no top-level caption position field.
+      // 'top' only exists inside hookTitle (hook text position), not for regular captions.
+      // captionsPosition param is accepted by our API but silently ignored until Submagic adds support.
       ...(!skipHook && { hookTitle: { template: 'steph' } }),
       ...(items.length > 0 && { items }),
       ...(music && { music }),

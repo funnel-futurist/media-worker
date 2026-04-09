@@ -280,6 +280,8 @@ async function runSubmagicEdit({
   clientBrolls = [],
   emotionTags = [],
   skipHook = false,
+  forceMagicBrolls = null,  // null = auto (true when no client brolls), false = always off
+  captionsPosition = null,  // null = template default, 'center' = middle of frame
 }) {
     // ── Step 0: Ensure H.264 — Submagic rejects H.265 with "Virus scan failed" ──
     videoUrl = await ensureH264(videoUrl);
@@ -309,7 +311,7 @@ async function runSubmagicEdit({
       });
     }
 
-    const magicBrolls = items.length === 0;
+    const magicBrolls = forceMagicBrolls !== null ? forceMagicBrolls : items.length === 0;
 
     let music = null;
     if (!skipHook) {
@@ -327,6 +329,7 @@ async function runSubmagicEdit({
       removeBadTakes,
       magicBrolls,
       cleanAudio: true,
+      ...(captionsPosition && { captionsPosition }),
       ...(!skipHook && { hookTitle: { template: 'steph' } }),
       ...(items.length > 0 && { items }),
       ...(music && { music }),

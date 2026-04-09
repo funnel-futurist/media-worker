@@ -124,13 +124,14 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
   if (duration <= 0) throw new Error(`Invalid time range: ${startTs} → ${endTs}`);
 
   const cookiesArg = getYtDlpAuthArg();
-  const cmd = [
+
+  // Strategy 1: Try iOS client first — no auth needed for public videos, bypasses bot detection
+  // Strategy 2: Fall back to web_creator with cookies if iOS fails
+  const buildCmd = (playerClient, withCookies = false) => [
     'yt-dlp',
-    cookiesArg,
-    '--js-runtimes node',
-    '--extractor-args "youtube:player_client=web_creator"',
-    '--remote-components ejs:github',
-    '--sleep-requests 2',
+    withCookies ? cookiesArg : '',
+    `--extractor-args "youtube:player_client=${playerClient}"`,
+    '--sleep-requests 3',
     `--download-sections "*${startTs}-${endTs}"`,
     '-f "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best"',
     '--merge-output-format mp4',
@@ -140,7 +141,17 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
   ].filter(Boolean).join(' ');
 
   console.log(`[youtube] downloading clip ${startTs}→${endTs} (${duration}s)`);
-  await execAsync(cmd, { timeout: 300000 }); // 5 min max per clip
+
+  // Attempt 1: iOS client (no auth, works for public videos)
+  try {
+    await execAsync(buildCmd('ios', false), { timeout: 300000 });
+    return;
+  } catch (iosErr) {
+    console.warn(`[youtube] iOS client failed: ${iosErr.message.split('\n')[0]} — retrying with cookies`);
+  }
+
+  // Attempt 2: web_creator with cookies (handles age-restricted or private videos)
+  await execAsync(buildCmd('web_creator', true), { timeout: 300000 });
 }
 
 /**
@@ -205,9 +216,11 @@ async function convertToPortraitSplit(inputPath) {
         : `crop=iw/2:ih:0:0`; // left half = content
 
       console.log(`[youtube] speaker on ${speakerSide} → speaker=bottom, content=top`);
+      // scale to fit (not fill) so full body stays visible — pad black bars on sides if needed
+      const fitScale = `scale=1080:960:force_original_aspect_ratio=decrease,pad=1080:960:(ow-iw)/2:(oh-ih)/2`;
       await execAsync(
         `ffmpeg -i "${inputPath}" ` +
-        `-filter_complex "[0:v]${contentCrop},scale=1080:960[top];[0:v]${speakerCrop},scale=1080:960[bottom];[top][bottom]vstack[out]" ` +
+        `-filter_complex "[0:v]${contentCrop},${fitScale}[top];[0:v]${speakerCrop},${fitScale}[bottom];[top][bottom]vstack[out]" ` +
         `-map "[out]" -map 0:a -c:v libx264 -preset fast -crf 23 -c:a aac -movflags +faststart -y "${outputPath}"`,
         { timeout: 120000 }
       );
@@ -227,14 +240,26 @@ async function convertToPortraitSplit(inputPath) {
  * Returns the raw VTT text, or null if unavailable.
  */
 async function downloadTranscript(youtubeUrl, tmpDir) {
+  const cookiesArg = getYtDlpAuthArg();
+  const vttPath = join(tmpDir, 'transcript.en.vtt');
+
+  // Try iOS client first (no auth needed for public videos)
   try {
-    const cookiesArg = getYtDlpAuthArg();
     await execAsync(
-      `yt-dlp ${cookiesArg} --js-runtimes node --remote-components ejs:github --extractor-args "youtube:player_client=web_creator" --write-auto-subs --sub-langs en --sub-format vtt --skip-download --no-playlist -o "${tmpDir}/transcript" "${youtubeUrl}"`,
+      `yt-dlp --extractor-args "youtube:player_client=ios" --write-auto-subs --sub-langs en --sub-format vtt --skip-download --no-playlist -o "${tmpDir}/transcript" "${youtubeUrl}"`,
       { timeout: 60000 }
     );
-    // yt-dlp writes transcript.en.vtt
-    const vttPath = join(tmpDir, 'transcript.en.vtt');
+    if (existsSync(vttPath)) return readFileSync(vttPath, 'utf8');
+  } catch {
+    // fall through to cookie attempt
+  }
+
+  // Fall back to web_creator with cookies
+  try {
+    await execAsync(
+      `yt-dlp ${cookiesArg} --extractor-args "youtube:player_client=web_creator" --write-auto-subs --sub-langs en --sub-format vtt --skip-download --no-playlist -o "${tmpDir}/transcript" "${youtubeUrl}"`,
+      { timeout: 60000 }
+    );
     if (existsSync(vttPath)) return readFileSync(vttPath, 'utf8');
     return null;
   } catch {

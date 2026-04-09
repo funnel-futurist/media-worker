@@ -9,6 +9,89 @@ export const youtubeAuthRouter = Router();
 // Updated by /refresh-youtube-cookies and read by getYtDlpAuthArg() in youtube.js.
 let _cachedCookiesStr = null;
 
+const SUPABASE_COOKIES_BUCKET = 'video-modules';
+const SUPABASE_COOKIES_PATH = 'youtube-auth/cookies.txt';
+
+/**
+ * Persist cookies to Supabase Storage so they survive Railway redeployments.
+ * Uses the service role key — never exposed publicly.
+ */
+async function saveToSupabase(cookiesStr) {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !key) {
+    console.warn('[youtube-auth] Supabase env vars not set — skipping Supabase cookie persist');
+    return false;
+  }
+  try {
+    const res = await fetch(
+      `${supabaseUrl}/storage/v1/object/${SUPABASE_COOKIES_BUCKET}/${SUPABASE_COOKIES_PATH}`,
+      {
+        method: 'POST',
+        headers: {
+          apikey: key,
+          Authorization: `Bearer ${key}`,
+          'Content-Type': 'text/plain',
+          'x-upsert': 'true',
+        },
+        body: cookiesStr,
+      }
+    );
+    if (!res.ok) {
+      console.error('[youtube-auth] Supabase Storage save failed:', await res.text());
+      return false;
+    }
+    console.log('[youtube-auth] Cookies saved to Supabase Storage');
+    return true;
+  } catch (err) {
+    console.error('[youtube-auth] Supabase Storage save error:', err.message);
+    return false;
+  }
+}
+
+/**
+ * Load persisted cookies from Supabase Storage.
+ * Called on startup so cookies survive Railway redeployments without manual re-paste.
+ */
+async function loadFromSupabase() {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !key) return null;
+  try {
+    const res = await fetch(
+      `${supabaseUrl}/storage/v1/object/authenticated/${SUPABASE_COOKIES_BUCKET}/${SUPABASE_COOKIES_PATH}`,
+      {
+        headers: {
+          apikey: key,
+          Authorization: `Bearer ${key}`,
+        },
+      }
+    );
+    if (!res.ok) {
+      if (res.status !== 404) console.warn('[youtube-auth] Supabase Storage load failed:', res.status);
+      return null;
+    }
+    const text = await res.text();
+    return text || null;
+  } catch (err) {
+    console.error('[youtube-auth] Supabase Storage load error:', err.message);
+    return null;
+  }
+}
+
+// Auto-load persisted cookies from Supabase on startup.
+// This is the key behaviour: after a Railway redeploy, cookies come back automatically.
+loadFromSupabase().then(cookiesStr => {
+  if (cookiesStr) {
+    _cachedCookiesStr = cookiesStr;
+    try { writeFileSync('/tmp/youtube-cookies.txt', cookiesStr, 'utf8'); } catch {}
+    const count = cookiesStr.split('\n').filter(l => l && !l.startsWith('#')).length;
+    console.log(`[youtube-auth] Loaded ${count} cookies from Supabase Storage on startup`);
+  } else {
+    console.log('[youtube-auth] No persisted cookies in Supabase — will use anonymous session until cookies are pasted');
+  }
+}).catch(() => {});
+
 /**
  * Get the in-memory cached cookies string, if any.
  * Called by youtube.js before falling back to the YOUTUBE_COOKIES env var.
@@ -234,7 +317,10 @@ youtubeAuthRouter.post('/refresh-youtube-cookies', async (req, res) => {
     writeFileSync('/tmp/youtube-cookies.txt', cookiesStr, 'utf8');
     console.log('[youtube-auth] Cookies cached in memory and written to /tmp/youtube-cookies.txt');
 
-    // Persist to Railway env var so cookies survive redeployments
+    // Persist to Supabase Storage — survives Railway redeployments (loaded on startup)
+    const supabaseUpdated = await saveToSupabase(cookiesStr);
+
+    // Also try Railway env var if RAILWAY_TOKEN is set
     const railwayUpdated = await updateRailwayEnvVar(cookiesStr);
 
     const lineCount = cookiesStr.split('\n').filter(l => l && !l.startsWith('#')).length;
@@ -243,10 +329,11 @@ youtubeAuthRouter.post('/refresh-youtube-cookies', async (req, res) => {
       ok: true,
       mode: manualCookies ? 'manual' : 'playwright',
       cookieCount: lineCount,
+      supabaseUpdated,
       railwayUpdated,
-      message: railwayUpdated
-        ? `${lineCount} cookies updated in memory + Railway env var. Will persist through redeployments.`
-        : `${lineCount} cookies updated in memory only. Add RAILWAY_TOKEN env var to also persist through redeployments.`,
+      message: supabaseUpdated
+        ? `${lineCount} cookies cached in memory + Supabase Storage. Will auto-load after redeployments.`
+        : `${lineCount} cookies cached in memory only. Supabase persist failed — check SUPABASE_SERVICE_KEY.`,
     });
   } catch (err) {
     console.error('[youtube-auth] /refresh-youtube-cookies failed:', err.message);

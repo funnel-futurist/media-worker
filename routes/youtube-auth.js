@@ -345,7 +345,11 @@ youtubeAuthRouter.post('/youtube-oauth2-init', async (req, res) => {
 
     if (!responseSent) {
       responseSent = true;
-      res.status(500).json({ error: 'OAuth2 flow did not produce an authorization URL. Check Railway logs.' });
+      res.status(500).json({
+        error: 'OAuth2 flow exited without producing an authorization URL.',
+        rawOutput: allOutput.join('').substring(0, 2000),
+        exitCode,
+      });
     }
   });
 

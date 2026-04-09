@@ -269,12 +269,12 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
       ...(cookieHeader && { cookie: cookieHeader }),
     });
 
-    // Try clients in priority order. TV_EMBEDDED is first because:
-    //   - It's not subject to the SABR streaming experiment (account-level, web-only)
-    //   - It doesn't require sign-in for most public/restricted videos
-    //   - ANDROID/IOS with authenticated SABR-enrolled cookies return formats without URLs
+    // Try clients in priority order.
+    // WEB with cookies is most reliable: supports cookie auth and handles SABR-enrolled accounts.
+    // TV_EMBEDDED as fallback: not subject to SABR, but may be geo-restricted from Railway IPs.
+    // ANDROID/IOS as last resort: may fail with 400 when cookies are from a SABR-enrolled account.
     // NOTE: youtubei.js v15+ requires { client: 'TYPE' } object, not a plain string.
-    const clientsToTry = ['TV_EMBEDDED', 'ANDROID', 'IOS'];
+    const clientsToTry = ['WEB', 'TV_EMBEDDED', 'ANDROID', 'IOS'];
     let info = null;
     let adaptiveFormats = [];
 
@@ -295,7 +295,7 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
       }
     }
 
-    if (adaptiveFormats.length === 0) throw new Error('No usable adaptive formats from any Innertube client (TV_EMBEDDED, ANDROID, IOS)');
+    if (adaptiveFormats.length === 0) throw new Error('No usable adaptive formats from any Innertube client (WEB, TV_EMBEDDED, ANDROID, IOS)');
 
     // Pick best MP4 video ≤1080p
     const videoFmt = adaptiveFormats
@@ -361,10 +361,10 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
   ].join(' ');
 
   const attempts = [
-    // android + tv_embedded clients are less likely to return SABR-only formats
-    `yt-dlp ${cookiesArg} --extractor-args "youtube:player_client=android" ${baseArgs}`,
-    `yt-dlp ${cookiesArg} --extractor-args "youtube:player_client=tv_embedded" ${baseArgs}`,
-    // Without cookies: avoids SABR but may hit bot detection
+    // web client supports cookies (android/tv_embedded no longer do in newer yt-dlp)
+    `yt-dlp ${cookiesArg} --extractor-args "youtube:player_client=web" ${baseArgs}`,
+    `yt-dlp ${cookiesArg} --extractor-args "youtube:player_client=mweb" ${baseArgs}`,
+    // Without cookies: avoids SABR but may hit bot detection on Railway IPs
     `yt-dlp --extractor-args "youtube:player_client=android" ${baseArgs}`,
     `yt-dlp --extractor-args "youtube:player_client=ios" ${baseArgs}`,
   ];

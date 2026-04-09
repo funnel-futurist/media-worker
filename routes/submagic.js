@@ -573,7 +573,7 @@ async function runSubmagicEdit({
   emotionTags = [],
   skipHook = false,
   forceMagicBrolls = null,  // null = auto (true when no client brolls), false = always off
-  captionsPosition = null,  // null = template default, 'center' = middle of frame
+  captionsPosition = null,  // null = template default, 'center' = 50 (Submagic field: top, range 0-80)
 }) {
     // ── Step 0: Ensure H.264 — Submagic rejects H.265 with "Virus scan failed" ──
     videoUrl = await ensureH264(videoUrl);
@@ -625,7 +625,8 @@ async function runSubmagicEdit({
       removeBadTakes,
       magicBrolls,
       cleanAudio: true,
-      ...(captionsPosition && { captionsPosition }),
+      // Submagic caption vertical position: field is "top", range 0-80 (0=top, 80=bottom, 50=center)
+      ...(captionsPosition === 'center' && { top: 50 }),
       ...(!skipHook && { hookTitle: { template: 'steph' } }),
       ...(items.length > 0 && { items }),
       ...(music && { music }),

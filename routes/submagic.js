@@ -240,7 +240,8 @@ submagicRouter.post('/submagic-edit-async', async (req, res) => {
       console.log(`[submagic-async] QC failed both attempts for ${ingestionId} — held for review`);
     } catch (err) {
       const message = err?.message ?? String(err);
-      console.error(`[submagic-async] failed for ${ingestionId}:`, message);
+      const responseBody = err?.response?.data ? JSON.stringify(err.response.data).slice(0, 500) : null;
+      console.error(`[submagic-async] failed for ${ingestionId}:`, message, responseBody ? `| Submagic response: ${responseBody}` : '');
 
       await supabasePatch('ad_ingestion', ingestionId, {
         status: 'classified',
@@ -631,6 +632,7 @@ async function runSubmagicEdit({
     };
 
     console.log(`[submagic] creating project for: ${videoUrl}`);
+    console.log(`[submagic] project body: ${JSON.stringify(projectBody)}`);
     const { data: project } = await axios.post(`${BASE}/projects`, projectBody, { headers: headers() });
     console.log(`[submagic] project created: ${project.id}`);
 

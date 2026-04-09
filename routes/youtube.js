@@ -263,24 +263,35 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
     } else {
       console.log('[youtube] Innertube: no authenticated cookies — unauthenticated session (may hit LOGIN_REQUIRED)');
     }
+    // Authenticated session (with cookies) — used for ANDROID/IOS which support cookie auth
     const yt = await Innertube.create({
       cache: null,
       generate_session_locally: true,
       ...(cookieHeader && { cookie: cookieHeader }),
     });
 
+    // Anonymous session — used for WEB client to avoid SABR (which is account-level).
+    // Shannon's Google account is SABR-enrolled: authenticated WEB returns status=OK but 0 URLs.
+    // An anonymous WEB session bypasses SABR and returns direct stream URLs.
+    const ytAnon = await Innertube.create({ cache: null, generate_session_locally: true });
+
     // Try clients in priority order.
-    // WEB with cookies is most reliable: supports cookie auth and handles SABR-enrolled accounts.
-    // TV_EMBEDDED as fallback: not subject to SABR, but may be geo-restricted from Railway IPs.
-    // ANDROID/IOS as last resort: may fail with 400 when cookies are from a SABR-enrolled account.
+    // WEB (anon): avoids SABR enrollment, usually has direct stream URLs.
+    // TV_EMBEDDED: not subject to SABR, but geo-restricted from Railway IPs.
+    // ANDROID/IOS (auth): cookie auth works, but 400s if cookies are SABR-enrolled.
     // NOTE: youtubei.js v15+ requires { client: 'TYPE' } object, not a plain string.
-    const clientsToTry = ['WEB', 'TV_EMBEDDED', 'ANDROID', 'IOS'];
+    const clientsToTry = [
+      { client: 'WEB', session: ytAnon },
+      { client: 'TV_EMBEDDED', session: yt },
+      { client: 'ANDROID', session: yt },
+      { client: 'IOS', session: yt },
+    ];
     let info = null;
     let adaptiveFormats = [];
 
-    for (const client of clientsToTry) {
+    for (const { client, session } of clientsToTry) {
       try {
-        const clientInfo = await yt.getBasicInfo(videoId, { client });
+        const clientInfo = await session.getBasicInfo(videoId, { client });
         const status = clientInfo.playability_status?.status;
         // Only count formats that have an actual URL (SABR formats have no URL)
         const fmts = (clientInfo.streaming_data?.adaptive_formats ?? []).filter(f => f.url);
@@ -295,7 +306,7 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
       }
     }
 
-    if (adaptiveFormats.length === 0) throw new Error('No usable adaptive formats from any Innertube client (WEB, TV_EMBEDDED, ANDROID, IOS)');
+    if (adaptiveFormats.length === 0) throw new Error('No usable adaptive formats from any Innertube client (WEB-anon, TV_EMBEDDED, ANDROID, IOS)');
 
     // Pick best MP4 video ≤1080p
     const videoFmt = adaptiveFormats
@@ -361,10 +372,11 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
   ].join(' ');
 
   const attempts = [
-    // web client supports cookies (android/tv_embedded no longer do in newer yt-dlp)
-    `yt-dlp ${cookiesArg} --extractor-args "youtube:player_client=web" ${baseArgs}`,
-    `yt-dlp ${cookiesArg} --extractor-args "youtube:player_client=mweb" ${baseArgs}`,
-    // Without cookies: avoids SABR but may hit bot detection on Railway IPs
+    // web (no cookies, anonymous) + node JS runtime: avoids SABR (account-level), node solves n-challenge
+    `yt-dlp --js-runtimes node --extractor-args "youtube:player_client=web" ${baseArgs}`,
+    // web + cookies + node: node handles SABR protocol natively in newer yt-dlp versions
+    `yt-dlp --js-runtimes node ${cookiesArg} --extractor-args "youtube:player_client=web" ${baseArgs}`,
+    // android/ios without cookies: no n-challenge needed (mobile API), last resort
     `yt-dlp --extractor-args "youtube:player_client=android" ${baseArgs}`,
     `yt-dlp --extractor-args "youtube:player_client=ios" ${baseArgs}`,
   ];

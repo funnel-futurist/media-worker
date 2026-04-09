@@ -221,16 +221,19 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
     // not the full watch page. This avoids the TwoColumnWatchNextResults /
     // CompositeVideoPrimaryInfo parser issues that affect getInfo().
     // ANDROID client also provides pre-deciphered format URLs.
-    let info = await yt.getBasicInfo(videoId, 'ANDROID');
+    // NOTE: youtubei.js v15+ requires { client: 'TYPE' } object, not a plain string.
+    let info = await yt.getBasicInfo(videoId, { client: 'ANDROID' });
     let adaptiveFormats = info.streaming_data?.adaptive_formats ?? [];
+    console.log(`[youtube] Innertube ANDROID: status=${info.playability_status?.status}, formats=${adaptiveFormats.length}`);
 
     if (adaptiveFormats.length === 0) {
       console.log('[youtube] Innertube ANDROID: no formats, trying IOS client...');
-      info = await yt.getBasicInfo(videoId, 'IOS');
+      info = await yt.getBasicInfo(videoId, { client: 'IOS' });
       adaptiveFormats = info.streaming_data?.adaptive_formats ?? [];
+      console.log(`[youtube] Innertube IOS: status=${info.playability_status?.status}, formats=${adaptiveFormats.length}`);
     }
 
-    if (adaptiveFormats.length === 0) throw new Error('No adaptive formats from ANDROID or IOS client');
+    if (adaptiveFormats.length === 0) throw new Error(`No adaptive formats from ANDROID or IOS client (status: ${info.playability_status?.status})`);
 
     console.log(`[youtube] Innertube: got ${adaptiveFormats.length} adaptive formats`);
 

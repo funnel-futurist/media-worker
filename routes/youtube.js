@@ -269,25 +269,33 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
       ...(cookieHeader && { cookie: cookieHeader }),
     });
 
-    // Use getBasicInfo() with ANDROID client — hits only the /player endpoint,
-    // not the full watch page. This avoids the TwoColumnWatchNextResults /
-    // CompositeVideoPrimaryInfo parser issues that affect getInfo().
-    // ANDROID client also provides pre-deciphered format URLs.
+    // Try clients in priority order. TV_EMBEDDED is first because:
+    //   - It's not subject to the SABR streaming experiment (account-level, web-only)
+    //   - It doesn't require sign-in for most public/restricted videos
+    //   - ANDROID/IOS with authenticated SABR-enrolled cookies return formats without URLs
     // NOTE: youtubei.js v15+ requires { client: 'TYPE' } object, not a plain string.
-    let info = await yt.getBasicInfo(videoId, { client: 'ANDROID' });
-    let adaptiveFormats = info.streaming_data?.adaptive_formats ?? [];
-    console.log(`[youtube] Innertube ANDROID: status=${info.playability_status?.status}, formats=${adaptiveFormats.length}`);
+    const clientsToTry = ['TV_EMBEDDED', 'ANDROID', 'IOS'];
+    let info = null;
+    let adaptiveFormats = [];
 
-    if (adaptiveFormats.length === 0) {
-      console.log('[youtube] Innertube ANDROID: no formats, trying IOS client...');
-      info = await yt.getBasicInfo(videoId, { client: 'IOS' });
-      adaptiveFormats = info.streaming_data?.adaptive_formats ?? [];
-      console.log(`[youtube] Innertube IOS: status=${info.playability_status?.status}, formats=${adaptiveFormats.length}`);
+    for (const client of clientsToTry) {
+      try {
+        const clientInfo = await yt.getBasicInfo(videoId, { client });
+        const status = clientInfo.playability_status?.status;
+        // Only count formats that have an actual URL (SABR formats have no URL)
+        const fmts = (clientInfo.streaming_data?.adaptive_formats ?? []).filter(f => f.url);
+        console.log(`[youtube] Innertube ${client}: status=${status}, usable formats=${fmts.length}`);
+        if (fmts.length > 0) {
+          info = clientInfo;
+          adaptiveFormats = fmts;
+          break;
+        }
+      } catch (clientErr) {
+        console.error(`[youtube] Innertube ${client} error: ${clientErr.message}`);
+      }
     }
 
-    if (adaptiveFormats.length === 0) throw new Error(`No adaptive formats from ANDROID or IOS client (status: ${info.playability_status?.status})`);
-
-    console.log(`[youtube] Innertube: got ${adaptiveFormats.length} adaptive formats`);
+    if (adaptiveFormats.length === 0) throw new Error('No usable adaptive formats from any Innertube client (TV_EMBEDDED, ANDROID, IOS)');
 
     // Pick best MP4 video ≤1080p
     const videoFmt = adaptiveFormats
@@ -302,10 +310,9 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
     if (!videoFmt) throw new Error('No MP4 video format found');
     if (!audioFmt) throw new Error('No MP4 audio format found');
 
-    // ANDROID/IOS client URLs are pre-deciphered — f.url is available directly.
-    // Decipher fallback only if player JS was successfully loaded.
-    const videoUrl = videoFmt.url ?? (yt.session.player ? videoFmt.decipher(yt.session.player) : null);
-    const audioUrl = audioFmt.url ?? (yt.session.player ? audioFmt.decipher(yt.session.player) : null);
+    // All clients tried here return pre-deciphered URLs (f.url is set — filtered above)
+    const videoUrl = videoFmt.url;
+    const audioUrl = audioFmt.url;
 
     if (!videoUrl) throw new Error('Failed to get video stream URL');
     if (!audioUrl) throw new Error('Failed to get audio stream URL');
@@ -339,28 +346,39 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
     // Continue to yt-dlp fallback
   }
 
-  // ── Attempt 2: yt-dlp fallback (still useful for private/restricted videos) ──
+  // ── Attempt 2: yt-dlp fallback ───────────────────────────────────────────────
+  // SABR issue: Shannon's cookies enroll yt-dlp in SABR experiment (issue #12482)
+  // which makes web/ios/web_creator clients return no downloadable URLs.
+  // Strategy: try android + tv_embedded clients (SABR-resistant), with and without cookies.
   const cookiesArg = await getYtDlpCookiesArg();
-  const buildCmd = (playerClient) => [
-    'yt-dlp',
-    cookiesArg,
-    `--extractor-args "youtube:player_client=${playerClient}"`,
-    '--sleep-requests 2',
+  const baseArgs = [
     `--download-sections "*${startTs}-${endTs}"`,
     '-f "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best"',
     '--merge-output-format mp4',
     '--no-playlist',
     `--output "${outputPath}"`,
     `"${youtubeUrl}"`,
-  ].filter(Boolean).join(' ');
+  ].join(' ');
 
-  try {
-    await execAsync(buildCmd('ios'), { timeout: 300000 });
-    return;
-  } catch {
-    // fall through to web_creator
+  const attempts = [
+    // android + tv_embedded clients are less likely to return SABR-only formats
+    `yt-dlp ${cookiesArg} --extractor-args "youtube:player_client=android" ${baseArgs}`,
+    `yt-dlp ${cookiesArg} --extractor-args "youtube:player_client=tv_embedded" ${baseArgs}`,
+    // Without cookies: avoids SABR but may hit bot detection
+    `yt-dlp --extractor-args "youtube:player_client=android" ${baseArgs}`,
+    `yt-dlp --extractor-args "youtube:player_client=ios" ${baseArgs}`,
+  ];
+
+  for (const cmd of attempts) {
+    try {
+      console.log(`[youtube] yt-dlp attempt: ${cmd.slice(0, 80)}...`);
+      await execAsync(cmd, { timeout: 300000 });
+      if (existsSync(outputPath)) return;
+    } catch (e) {
+      console.error(`[youtube] yt-dlp attempt failed: ${e.message.split('\n').slice(0, 3).join(' | ')}`);
+    }
   }
-  await execAsync(buildCmd('web_creator'), { timeout: 300000 });
+  throw new Error('All yt-dlp attempts failed — see logs above for details');
 }
 
 /**

@@ -190,8 +190,8 @@ async function runClassification({ ingestionId, storageUrl, mimeType, filename, 
       },
     });
 
-    // 6. Slack notification
-    const channel = slackChannel || process.env.SLACK_CHANNEL_OPS;
+    // 6. Slack notification — classification always goes to internal ops channel only
+    const channel = process.env.SLACK_CHANNEL_OPS || slackChannel;
     const slackToken = process.env.SLACK_BOT_TOKEN;
     if (channel && slackToken) {
       const perf = result.performance_analysis;

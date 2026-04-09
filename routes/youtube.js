@@ -225,6 +225,164 @@ function tsToSeconds(ts) {
 }
 
 /**
+ * Parse a VTT timestamp string (HH:MM:SS.mmm or MM:SS.mmm) to seconds.
+ */
+function vttTimeToSeconds(ts) {
+  const parts = ts.trim().split(':');
+  if (parts.length === 3) {
+    return parseFloat(parts[0]) * 3600 + parseFloat(parts[1]) * 60 + parseFloat(parts[2]);
+  }
+  return parseFloat(parts[0]) * 60 + parseFloat(parts[1]);
+}
+
+/**
+ * Convert seconds to ASS timestamp format (H:MM:SS.cs — centiseconds).
+ */
+function secondsToAssTime(s) {
+  const totalCs = Math.round(s * 100);
+  const cs = totalCs % 100;
+  const totalSec = Math.floor(totalCs / 100);
+  const sec = totalSec % 60;
+  const totalMin = Math.floor(totalSec / 60);
+  const min = totalMin % 60;
+  const h = Math.floor(totalMin / 60);
+  return `${h}:${String(min).padStart(2, '0')}:${String(sec).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
+}
+
+/**
+ * Parse a YouTube VTT transcript and extract subtitle events for the given
+ * time range [startSec, endSec]. Returns events with timestamps adjusted
+ * to be relative to the clip start.
+ */
+function parseVttToAssEvents(vttText, startSec, endSec) {
+  if (!vttText) return [];
+
+  const events = [];
+  const seenTexts = new Set(); // dedup rolling captions
+
+  // Split into cue blocks by double newline
+  const blocks = vttText.split(/\n{2,}/);
+
+  for (const block of blocks) {
+    const lines = block.trim().split('\n');
+    const tsLine = lines.find(l => l.includes('-->'));
+    if (!tsLine) continue;
+
+    const tsMatch = tsLine.match(/(\d+:\d+:\d+\.\d+|\d+:\d+\.\d+)\s*-->\s*(\d+:\d+:\d+\.\d+|\d+:\d+\.\d+)/);
+    if (!tsMatch) continue;
+
+    const cueStart = vttTimeToSeconds(tsMatch[1]);
+    const cueEnd = vttTimeToSeconds(tsMatch[2]);
+
+    if (cueEnd <= startSec || cueStart >= endSec) continue;
+
+    const tsLineIdx = lines.indexOf(tsLine);
+    const text = lines
+      .slice(tsLineIdx + 1)
+      .map(l => l
+        .replace(/<\d+:\d+:\d+\.\d+>/g, '') // word-level timestamps
+        .replace(/<c[^>]*>/g, '').replace(/<\/c>/g, '') // <c> tags
+        .replace(/<[^>]+>/g, '') // remaining HTML
+        .trim()
+      )
+      .filter(l => l.length > 0)
+      .join(' ')
+      .trim();
+
+    if (!text || seenTexts.has(text)) continue;
+    seenTexts.add(text);
+
+    const adjStart = Math.max(0, cueStart - startSec);
+    const adjEnd = Math.min(endSec - startSec, cueEnd - startSec);
+    if (adjEnd <= adjStart) continue;
+
+    events.push({ start: adjStart, end: adjEnd, text });
+  }
+
+  return events;
+}
+
+/**
+ * Build an ASS subtitle file with captions centered at y=960 (the seam
+ * between the two speakers in the 1080x1920 portrait layout).
+ * Style: bold, white, thick black outline (Hormozi-ish).
+ */
+function buildAssFile(events) {
+  const header = `[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Seam,Arial,72,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,6,2,5,20,20,0,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+`;
+
+  const eventLines = events.map(e => {
+    // All-caps, wrap at ~28 chars per line for legibility in portrait
+    const words = e.text.toUpperCase().split(' ');
+    const maxCharsPerLine = 28;
+    const wrapped = [];
+    let line = '';
+    for (const word of words) {
+      if (line.length + word.length + 1 > maxCharsPerLine && line.length > 0) {
+        wrapped.push(line.trim());
+        line = word + ' ';
+      } else {
+        line += word + ' ';
+      }
+    }
+    if (line.trim()) wrapped.push(line.trim());
+    const assText = wrapped.join('\\N');
+    // \an5 = center-center alignment; \pos(540,960) = centered at the seam
+    return `Dialogue: 0,${secondsToAssTime(e.start)},${secondsToAssTime(e.end)},Seam,,0,0,0,,{\\an5\\pos(540,960)}${assText}`;
+  });
+
+  return header + eventLines.join('\n') + '\n';
+}
+
+/**
+ * Burn VTT captions into a portrait split-screen video at the seam (y=960,
+ * center of the 1080x1920 frame — between the two speakers).
+ * Uses Hormozi-ish styling: bold, white, thick black outline, all-caps.
+ * No-op if VTT is unavailable or no segments overlap the clip range.
+ * Errors are swallowed — deliver without captions rather than fail entirely.
+ */
+async function burnCaptionsAtSeam(videoPath, vttText, startSec, endSec) {
+  const events = parseVttToAssEvents(vttText, startSec, endSec);
+  if (events.length === 0) {
+    console.log('[youtube] no VTT segments for this clip range — delivering without captions');
+    return;
+  }
+
+  const assPath = videoPath.replace('.mp4', '_captions.ass');
+  const outputPath = videoPath.replace('.mp4', '_captioned.mp4');
+
+  try {
+    writeFileSync(assPath, buildAssFile(events), 'utf8');
+    console.log(`[youtube] burning ${events.length} caption events at seam (y=960)`);
+
+    await execAsync(
+      `ffmpeg -i "${videoPath}" -vf "ass='${assPath}'" -c:v libx264 -preset fast -crf 23 -c:a copy -movflags +faststart -y "${outputPath}"`,
+      { timeout: 180000 }
+    );
+
+    unlinkSync(videoPath);
+    await execAsync(`mv "${outputPath}" "${videoPath}"`);
+    console.log('[youtube] captions burned successfully');
+  } catch (err) {
+    console.error('[youtube] caption burn failed — delivering without captions:', err.message);
+    if (existsSync(outputPath)) unlinkSync(outputPath);
+  } finally {
+    if (existsSync(assPath)) unlinkSync(assPath);
+  }
+}
+
+/**
  * Download a time-ranged clip from a YouTube video using yt-dlp.
  * Returns path to the downloaded mp4 file.
  */
@@ -458,9 +616,8 @@ async function convertToPortraitSplit(inputPath) {
         : `crop=iw/2:ih:0:0`; // left half = content
 
       console.log(`[youtube] speaker on ${speakerSide} → speaker=top, content=bottom`);
-      // Equal 960/960 split (50/50). Hormozi 1 template places its single caption line
-      // at ~50% of frame height (right at the seam between the two sections) with no
-      // secondary subtitle above it — so the speaker's face stays clean.
+      // Equal 960/960 split (50/50). Captions are burned separately at y=960
+      // (the seam) by burnCaptionsAtSeam() — no Submagic involvement for YouTube clips.
       const topScale = `scale=1080:960:force_original_aspect_ratio=decrease,pad=1080:960:(ow-iw)/2:(oh-ih)/2`;
       const bottomScale = `scale=1080:960:force_original_aspect_ratio=decrease,pad=1080:960:(ow-iw)/2:(oh-ih)/2`;
       await execAsync(
@@ -542,6 +699,22 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
     try {
       console.log(`[youtube] starting extraction for plan ${clipPlanId} (${clips.length} clips)`);
 
+      // Download VTT transcript once for the whole plan — used to burn captions at the
+      // seam (y=960) ourselves. Submagic is bypassed for YouTube clips because its
+      // template caption positions can't be overridden and always land on speakers' faces.
+      let planVttText = null;
+      try {
+        console.log('[youtube] downloading VTT transcript for caption generation...');
+        planVttText = await downloadTranscript(youtubeUrl, tmpDir);
+        if (planVttText) {
+          console.log('[youtube] transcript downloaded successfully');
+        } else {
+          console.log('[youtube] transcript unavailable — clips will be delivered without captions');
+        }
+      } catch (transcriptErr) {
+        console.warn('[youtube] transcript download error:', transcriptErr.message);
+      }
+
       const extractedClips = [];
 
       for (let i = 0; i < clips.length; i++) {
@@ -559,6 +732,13 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
           // Convert landscape to portrait split-screen (host bottom, guest top)
           await convertToPortraitSplit(clipPath);
 
+          // Burn captions at the seam (y=960) from the YouTube VTT transcript.
+          // This bypasses Submagic's caption rendering — Submagic templates always
+          // place captions at fixed positions that land on speakers' faces in split-screen.
+          const startSec = tsToSeconds(clip.startTimestamp);
+          const endSec = tsToSeconds(clip.endTimestamp);
+          await burnCaptionsAtSeam(clipPath, planVttText, startSec, endSec);
+
           // Upload to Supabase Storage
           const date = new Date().toISOString().split('T')[0];
           const safeFilename = (clip.title ?? `clip_${i}`).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 60);
@@ -566,7 +746,9 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
           const clipUrl = await uploadToSupabaseStorage(clipPath, storagePath);
           console.log(`[youtube] clip ${i} uploaded: ${clipUrl}`);
 
-          // Create ad_ingestion row — pipeline will add captions via Submagic
+          // Create ad_ingestion row — mark as 'rendered' to skip Submagic.
+          // Captions are already burned at the seam above. upload_captioned will
+          // pick up 'rendered' rows and deliver directly to client Drive.
           const safeTitle = clip.title?.slice(0, 100) ?? `Clip ${i + 1}`;
           const filename = `${safeTitle}.mp4`;
 
@@ -578,7 +760,7 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
             format: 'video',
             file_url: clipUrl,
             original_filename: filename,
-            status: 'classified',
+            status: 'rendered',
             gemini_markup: {
               source: 'youtube',
               clip_plan_id: clipPlanId,

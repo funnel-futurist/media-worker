@@ -372,11 +372,12 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
   ].join(' ');
 
   const attempts = [
-    // web (no cookies, anonymous) + node JS runtime: avoids SABR (account-level), node solves n-challenge
-    `yt-dlp --js-runtimes node --extractor-args "youtube:player_client=web" ${baseArgs}`,
-    // web + cookies + node: node handles SABR protocol natively in newer yt-dlp versions
-    `yt-dlp --js-runtimes node ${cookiesArg} --extractor-args "youtube:player_client=web" ${baseArgs}`,
-    // android/ios without cookies: no n-challenge needed (mobile API), last resort
+    // web + cookies + EJS from GitHub: generates Botguard PO token, solves n-challenge, handles SABR
+    // --remote-components ejs:github downloads the challenge solver script yt-dlp needs for web client auth
+    `yt-dlp --js-runtimes node --remote-components ejs:github ${cookiesArg} --extractor-args "youtube:player_client=web" ${baseArgs}`,
+    // web anonymous + EJS: no SABR enrollment; Railway IP may be flagged but worth trying
+    `yt-dlp --js-runtimes node --remote-components ejs:github --extractor-args "youtube:player_client=web" ${baseArgs}`,
+    // android/ios without cookies: no n-challenge needed, last resort if IP un-flagged
     `yt-dlp --extractor-args "youtube:player_client=android" ${baseArgs}`,
     `yt-dlp --extractor-args "youtube:player_client=ios" ${baseArgs}`,
   ];

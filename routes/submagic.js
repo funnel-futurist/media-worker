@@ -222,6 +222,71 @@ async function ensureH264(videoUrl) {
   }
 }
 
+/**
+ * Probe the width/height of a video URL without downloading the full file.
+ * Returns { w, h } or null if probe fails.
+ */
+async function probeVideoDimensions(videoUrl) {
+  try {
+    const { stdout } = await execAsync(
+      `ffprobe -v quiet -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "${videoUrl}"`,
+      { timeout: 30000 }
+    );
+    const [w, h] = stdout.trim().split(',').map(Number);
+    if (w && h) return { w, h };
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fit a b-roll clip into a 1080x1920 (9:16) frame without cropping.
+ * - Already vertical (9:16): pass through unchanged.
+ * - Landscape (16:9) or square (1:1): scale to fit, pad sides/top-bottom with black.
+ * This respects the source asset's framing instead of aggressively cropping it.
+ * Returns the original URL if already vertical, or a new Cloudinary URL.
+ */
+async function fitToVertical(videoUrl) {
+  const dims = await probeVideoDimensions(videoUrl);
+  if (!dims) {
+    console.warn('[submagic] could not probe b-roll dimensions — using as-is');
+    return videoUrl;
+  }
+
+  const { w, h } = dims;
+  const ratio = w / h;
+  console.log(`[submagic] b-roll dimensions: ${w}x${h} (ratio ${ratio.toFixed(2)})`);
+
+  // Already portrait/vertical — no processing needed
+  if (ratio <= 0.75) return videoUrl;
+
+  const tmpId = randomUUID();
+  const inputPath = join('/tmp', `${tmpId}_broll_in.mp4`);
+  const outputPath = join('/tmp', `${tmpId}_broll_fit.mp4`);
+
+  try {
+    console.log(`[submagic] fitting ${w}x${h} b-roll to 1080x1920 with padding (no crop)`);
+    const { data } = await axios.get(videoUrl, { responseType: 'arraybuffer' });
+    writeFileSync(inputPath, Buffer.from(data));
+
+    // Scale to fit within 1080x1920, pad remaining space with black
+    await execAsync(
+      `ffmpeg -i "${inputPath}" ` +
+      `-vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black" ` +
+      `-c:v libx264 -preset fast -crf 23 -c:a aac -movflags +faststart -y "${outputPath}"`,
+      { timeout: 180000 }
+    );
+
+    const { url } = await uploadVideo(outputPath, 'submagic-broll');
+    console.log(`[submagic] b-roll fitted to vertical: ${url}`);
+    return url;
+  } finally {
+    if (existsSync(inputPath)) unlinkSync(inputPath);
+    if (existsSync(outputPath)) unlinkSync(outputPath);
+  }
+}
+
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif']);
 
 function isImageUrl(url) {
@@ -295,6 +360,9 @@ async function runSubmagicEdit({
       let brollVideoUrl = broll.url;
       if (isPhoto) {
         brollVideoUrl = await convertImageToBroll(broll.url);
+      } else {
+        // Fit non-vertical video to 1080x1920 with padding — avoids aggressive crop on 16:9 assets
+        brollVideoUrl = await fitToVertical(broll.url);
       }
       console.log(`[submagic] registering client b-roll: ${brollVideoUrl}`);
       const { data: mediaData } = await axios.post(

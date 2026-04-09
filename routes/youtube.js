@@ -214,51 +214,63 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
     const videoId = extractVideoId(youtubeUrl);
     if (!videoId) throw new Error('Could not extract video ID from URL');
 
+    console.log(`[youtube] Innertube: creating session for ${videoId}...`);
     const yt = await Innertube.create({ cache: null, generate_session_locally: true });
-    const info = await yt.getBasicInfo(videoId, 'ANDROID');
+    const info = await yt.getInfo(videoId);
 
-    // Get best video format (up to 1080p, MP4)
-    const videoFormat = info.chooseFormat({
-      quality: '1080p',
-      type: 'video',
-      format: 'mp4',
-    });
-    const audioFormat = info.chooseFormat({
-      type: 'audio',
-      format: 'mp4',
-    });
+    // Access adaptive formats from streaming data
+    const adaptiveFormats = info.streaming_data?.adaptive_formats ?? [];
+    if (adaptiveFormats.length === 0) throw new Error('No adaptive formats in streaming_data');
 
-    if (!videoFormat || !audioFormat) throw new Error('No suitable format found');
+    console.log(`[youtube] Innertube: got ${adaptiveFormats.length} adaptive formats`);
 
-    const videoUrl = videoFormat.decipher(yt.session.player);
-    const audioUrl = audioFormat.decipher(yt.session.player);
+    // Pick best MP4 video ≤1080p
+    const videoFmt = adaptiveFormats
+      .filter(f => f.mime_type?.startsWith('video/mp4') && (f.height ?? 0) <= 1080)
+      .sort((a, b) => (b.height ?? 0) - (a.height ?? 0))[0];
 
-    console.log(`[youtube] Innertube stream URLs obtained — using ffmpeg to extract ${startTs}→${endTs}`);
+    // Pick best MP4 audio
+    const audioFmt = adaptiveFormats
+      .filter(f => f.mime_type?.startsWith('audio/mp4'))
+      .sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0))[0];
 
-    // Use ffmpeg to download only the needed time range from the stream URLs
+    if (!videoFmt) throw new Error('No MP4 video format found');
+    if (!audioFmt) throw new Error('No MP4 audio format found');
+
+    // Get URLs — decipher if needed
+    const videoUrl = videoFmt.url ?? videoFmt.decipher(yt.session.player);
+    const audioUrl = audioFmt.url ?? audioFmt.decipher(yt.session.player);
+
+    if (!videoUrl) throw new Error('Failed to get video stream URL');
+    if (!audioUrl) throw new Error('Failed to get audio stream URL');
+
+    console.log(`[youtube] Innertube: stream URLs ready — extracting ${startTs}→${endTs} via ffmpeg`);
+
     const tmpVideo = outputPath.replace('.mp4', '_v.mp4');
     const tmpAudio = outputPath.replace('.mp4', '_a.m4a');
 
-    await execAsync(
-      `ffmpeg -ss ${startSec} -t ${duration} -i "${videoUrl}" -c:v copy -y "${tmpVideo}"`,
-      { timeout: 300000 }
-    );
-    await execAsync(
-      `ffmpeg -ss ${startSec} -t ${duration} -i "${audioUrl}" -c:a aac -y "${tmpAudio}"`,
-      { timeout: 120000 }
-    );
-    await execAsync(
-      `ffmpeg -i "${tmpVideo}" -i "${tmpAudio}" -c:v copy -c:a copy -y "${outputPath}"`,
-      { timeout: 60000 }
-    );
-
-    if (existsSync(tmpVideo)) unlinkSync(tmpVideo);
-    if (existsSync(tmpAudio)) unlinkSync(tmpAudio);
-
-    console.log(`[youtube] Innertube download complete: ${outputPath}`);
-    return;
+    try {
+      await execAsync(
+        `ffmpeg -ss ${startSec} -t ${duration} -i "${videoUrl}" -c:v copy -y "${tmpVideo}"`,
+        { timeout: 300000 }
+      );
+      await execAsync(
+        `ffmpeg -ss ${startSec} -t ${duration} -i "${audioUrl}" -c:a aac -y "${tmpAudio}"`,
+        { timeout: 120000 }
+      );
+      await execAsync(
+        `ffmpeg -i "${tmpVideo}" -i "${tmpAudio}" -c:v copy -c:a copy -y "${outputPath}"`,
+        { timeout: 60000 }
+      );
+      console.log(`[youtube] Innertube download complete: ${outputPath}`);
+      return;
+    } finally {
+      if (existsSync(tmpVideo)) unlinkSync(tmpVideo);
+      if (existsSync(tmpAudio)) unlinkSync(tmpAudio);
+    }
   } catch (innertubeErr) {
-    console.warn(`[youtube] Innertube failed: ${innertubeErr.message.split('\n')[0]} — falling back to yt-dlp`);
+    console.error(`[youtube] Innertube failed: ${innertubeErr.message}`);
+    // Continue to yt-dlp fallback
   }
 
   // ── Attempt 2: yt-dlp fallback (still useful for private/restricted videos) ──

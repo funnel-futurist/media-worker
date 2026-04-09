@@ -60,6 +60,47 @@ async function fetchAnonYoutubeCookies() {
 const OAUTH2_COOKIES_PATH = '/tmp/youtube-oauth2.txt';
 
 /**
+ * Convert a Netscape cookies.txt string to the cookie header string format
+ * expected by youtubei.js (Innertube.create({ cookie: "..." })).
+ * Netscape line format: domain\tTRUE\tpath\tSECURE\texpires\tname\tvalue
+ * Output: name=value; name2=value2; ...
+ */
+function netscapeCookiesToHeader(netscapeStr) {
+  if (!netscapeStr) return null;
+  const parts = netscapeStr
+    .split('\n')
+    .filter(line => line && !line.startsWith('#'))
+    .map(line => {
+      const cols = line.split('\t');
+      if (cols.length < 7) return null;
+      const name = cols[5]?.trim();
+      const value = cols[6]?.trim();
+      if (!name) return null;
+      return `${name}=${value}`;
+    })
+    .filter(Boolean);
+  return parts.length > 0 ? parts.join('; ') : null;
+}
+
+/**
+ * Get the authenticated Netscape cookie string for use with youtubei.js.
+ * Returns null if no authenticated cookies are available.
+ */
+function getAuthCookieString() {
+  // OAuth2 cookies file
+  if (existsSync(OAUTH2_COOKIES_PATH)) {
+    try { return readFileSync(OAUTH2_COOKIES_PATH, 'utf8'); } catch {}
+  }
+  // Manually-refreshed cookies (from /refresh-youtube-cookies)
+  const cached = getCachedCookies();
+  if (cached) return cached;
+  // Env var fallback
+  const envCookies = process.env.YOUTUBE_COOKIES;
+  if (envCookies) return envCookies;
+  return null;
+}
+
+/**
  * Get the --cookies flag for yt-dlp.
  * Priority order:
  *   1. OAuth2 tokens file from /youtube-oauth2-init (real Google account, highest trust)
@@ -215,7 +256,18 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
     if (!videoId) throw new Error('Could not extract video ID from URL');
 
     console.log(`[youtube] Innertube: creating session for ${videoId}...`);
-    const yt = await Innertube.create({ cache: null, generate_session_locally: true });
+    const authCookieStr = getAuthCookieString();
+    const cookieHeader = authCookieStr ? netscapeCookiesToHeader(authCookieStr) : null;
+    if (cookieHeader) {
+      console.log('[youtube] Innertube: using authenticated cookie session');
+    } else {
+      console.log('[youtube] Innertube: no authenticated cookies — unauthenticated session (may hit LOGIN_REQUIRED)');
+    }
+    const yt = await Innertube.create({
+      cache: null,
+      generate_session_locally: true,
+      ...(cookieHeader && { cookie: cookieHeader }),
+    });
 
     // Use getBasicInfo() with ANDROID client — hits only the /player endpoint,
     // not the full watch page. This avoids the TwoColumnWatchNextResults /

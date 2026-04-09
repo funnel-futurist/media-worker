@@ -1,5 +1,6 @@
 import { Router } from 'express';
-import { writeFileSync } from 'fs';
+import { writeFileSync, existsSync, readFileSync } from 'fs';
+import { spawn } from 'child_process';
 import { chromium } from 'playwright';
 
 export const youtubeAuthRouter = Router();
@@ -251,4 +252,108 @@ youtubeAuthRouter.post('/refresh-youtube-cookies', async (req, res) => {
     console.error('[youtube-auth] /refresh-youtube-cookies failed:', err.message);
     res.status(500).json({ error: err.message });
   }
+});
+
+const OAUTH2_COOKIES_PATH = '/tmp/youtube-oauth2.txt';
+
+/**
+ * POST /youtube-oauth2-init
+ *
+ * Starts yt-dlp's OAuth2 device flow for YouTube.
+ * Responds with the authorization URL + code that Shannon visits on her phone.
+ * The yt-dlp process continues running in the background until authorization completes,
+ * then saves the OAuth2 tokens to memory + Railway env var.
+ *
+ * ONE-TIME SETUP: once authorized, tokens last until Google revokes them.
+ * These tokens bypass YouTube's bot detection because they're a real Google account.
+ */
+youtubeAuthRouter.post('/youtube-oauth2-init', async (req, res) => {
+  console.log('[youtube-oauth2] starting OAuth2 device flow...');
+
+  const ytdlp = spawn('yt-dlp', [
+    '--username', 'oauth2',
+    '--password', '',
+    '--cookies', OAUTH2_COOKIES_PATH,
+    '--no-download',
+    '--verbose',
+    'https://www.youtube.com/',
+  ]);
+
+  let authUrl = null;
+  let code = null;
+  let responseSent = false;
+
+  function tryRespond() {
+    if (authUrl && code && !responseSent) {
+      responseSent = true;
+      console.log(`[youtube-oauth2] auth URL: ${authUrl}, code: ${code}`);
+      res.json({
+        ok: true,
+        authUrl,
+        code,
+        instructions: `1. Open ${authUrl} on your phone or computer\n2. Enter code: ${code}\n3. Sign in with the YouTube/Google account\n4. Click Allow\nTokens will be saved automatically when authorization completes.`,
+      });
+    }
+  }
+
+  // yt-dlp writes OAuth2 prompts to stderr
+  ytdlp.stderr.on('data', (data) => {
+    const text = data.toString();
+    console.log('[youtube-oauth2]', text.trim());
+
+    const urlMatch = text.match(/https?:\/\/www\.google\.com\/device/);
+    const codeMatch = text.match(/[Cc]ode[:\s]+([A-Z0-9]{4}-[A-Z0-9]{4})/);
+
+    if (urlMatch && !authUrl) authUrl = 'https://www.google.com/device';
+    if (codeMatch && !code) code = codeMatch[1];
+
+    tryRespond();
+  });
+
+  ytdlp.stdout.on('data', (data) => {
+    const text = data.toString();
+    console.log('[youtube-oauth2-out]', text.trim());
+
+    const urlMatch = text.match(/https?:\/\/www\.google\.com\/device/);
+    const codeMatch = text.match(/[Cc]ode[:\s]+([A-Z0-9]{4}-[A-Z0-9]{4})/);
+
+    if (urlMatch && !authUrl) authUrl = 'https://www.google.com/device';
+    if (codeMatch && !code) code = codeMatch[1];
+
+    tryRespond();
+  });
+
+  ytdlp.on('exit', async (exitCode) => {
+    console.log(`[youtube-oauth2] yt-dlp exited with code ${exitCode}`);
+
+    // Check if OAuth2 cookies were written (auth success)
+    if (existsSync(OAUTH2_COOKIES_PATH)) {
+      try {
+        const cookiesStr = readFileSync(OAUTH2_COOKIES_PATH, 'utf8');
+        if (cookiesStr.includes('oauth2_access_token') || cookiesStr.trim().length > 100) {
+          _cachedCookiesStr = cookiesStr;
+          console.log('[youtube-oauth2] OAuth2 tokens saved to memory cache');
+
+          const railwayUpdated = await updateRailwayEnvVar(cookiesStr).catch(() => false);
+          console.log('[youtube-oauth2] Railway env var updated:', railwayUpdated);
+        }
+      } catch (err) {
+        console.error('[youtube-oauth2] Failed to read OAuth2 cookies:', err.message);
+      }
+    }
+
+    if (!responseSent) {
+      responseSent = true;
+      res.status(500).json({ error: 'OAuth2 flow did not produce an authorization URL. Check Railway logs.' });
+    }
+  });
+
+  // Timeout safety — respond with error if no URL found in 30s
+  setTimeout(() => {
+    if (!responseSent) {
+      responseSent = true;
+      ytdlp.kill();
+      res.status(504).json({ error: 'Timeout: yt-dlp did not output an authorization URL within 30 seconds.' });
+    }
+  }, 30000);
 });

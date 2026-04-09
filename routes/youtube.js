@@ -56,15 +56,23 @@ async function fetchAnonYoutubeCookies() {
   }
 }
 
+const OAUTH2_COOKIES_PATH = '/tmp/youtube-oauth2.txt';
+
 /**
  * Get the --cookies flag for yt-dlp.
  * Priority order:
- *   1. Manually-refreshed cookies (from /refresh-youtube-cookies, highest trust)
- *   2. Playwright-generated anonymous cookies (auto-refreshed every 30 min)
- *   3. YOUTUBE_COOKIES env var fallback
+ *   1. OAuth2 tokens file from /youtube-oauth2-init (real Google account, highest trust)
+ *   2. Manually-refreshed cookies (from /refresh-youtube-cookies)
+ *   3. Playwright-generated anonymous cookies (auto-refreshed every 30 min)
+ *   4. YOUTUBE_COOKIES env var fallback
  */
 async function getYtDlpCookiesArg() {
-  // Priority 1: Manually-provided cookies (logged-in session)
+  // Priority 1: OAuth2 tokens from yt-dlp device flow (most trusted)
+  if (existsSync(OAUTH2_COOKIES_PATH)) {
+    return `--cookies "${OAUTH2_COOKIES_PATH}"`;
+  }
+
+  // Priority 2: Manually-provided cookies (logged-in session)
   const cached = getCachedCookies();
   if (cached) {
     writeFileSync(COOKIES_PATH, cached, 'utf8');

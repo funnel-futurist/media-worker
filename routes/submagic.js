@@ -142,49 +142,102 @@ submagicRouter.post('/submagic-edit-async', async (req, res) => {
   setImmediate(async () => {
     try {
       console.log(`[submagic-async] starting job for ingestion ${ingestionId}`);
+
+      // ── Attempt 1 ─────────────────────────────────────────────────────
       const result = await runSubmagicEdit(editParams);
+      const qc1 = await runEditQc(result.videoUrl, ingestionId);
 
-      // ── Edit QC: check rendered output before marking as ready ────────
-      const qcResult = await runEditQc(result.videoUrl, ingestionId);
-
-      if (qcResult.pass) {
+      if (qc1.pass) {
+        // QC passed first time — normal delivery
         await supabasePatch('ad_ingestion', ingestionId, {
           status: 'rendered',
           file_url: result.videoUrl,
           last_error: null,
         });
-      } else {
-        // Hold for ops review — upload_captioned won't pick this up
-        const issuesSummary = qcResult.issues.join('; ');
-        await supabasePatch('ad_ingestion', ingestionId, {
-          status: 'edit_qc_review',
-          file_url: result.videoUrl,
-          last_error: `Edit QC failed: ${qcResult.note}${issuesSummary ? ` | Issues: ${issuesSummary}` : ''}`,
+        await supabaseInsertEvent(clientId, 'render_complete', {
+          ingestion_id: ingestionId,
+          final_url: result.videoUrl,
+          duration: result.duration,
+          preview_url: result.previewUrl,
+          edit_qc_pass: true,
+          edit_qc_note: qc1.note,
+          edit_qc_attempt: 1,
         });
-
-        const issueList = qcResult.issues.length
-          ? qcResult.issues.map((issue, i) => `${i + 1}. ${issue}`).join('\n')
-          : 'No specific issues listed.';
-
-        await postToSlackOps(
-          `⚠️ *Edit QC hold* — review before sending to client\n` +
-          `*Assessment:* ${qcResult.note}\n` +
-          `*Issues:*\n${issueList}\n` +
-          `*Video:* ${result.videoUrl}\n` +
-          `_Set status to \`rendered\` in Supabase to release for delivery._`
-        );
+        console.log(`[submagic-async] done (attempt 1, QC pass) for ${ingestionId}`);
+        return;
       }
+
+      // ── QC failed — auto-retry with adjusted params ───────────────────
+      console.log(`[submagic-async] QC failed attempt 1 for ${ingestionId}: ${qc1.note} — retrying`);
+
+      // If b-roll was flagged as the issue, disable all stock b-roll on retry
+      const hasBrollIssue = qc1.issues.some(issue =>
+        /b.?roll|stock footage|cutaway|irrelevant|random/i.test(issue)
+      );
+      const retryParams = {
+        ...editParams,
+        forceMagicBrolls: false, // always disable stock b-roll on retry
+        ...(hasBrollIssue && { clientBrolls: [] }), // also remove client b-rolls if b-roll flagged
+      };
+
+      console.log(`[submagic-async] retry params — forceMagicBrolls: false, hasBrollIssue: ${hasBrollIssue}`);
+      const result2 = await runSubmagicEdit(retryParams);
+      const qc2 = await runEditQc(result2.videoUrl, `${ingestionId}-retry`);
+
+      if (qc2.pass) {
+        // QC passed on retry — use the retry result
+        await supabasePatch('ad_ingestion', ingestionId, {
+          status: 'rendered',
+          file_url: result2.videoUrl,
+          last_error: null,
+        });
+        await supabaseInsertEvent(clientId, 'render_complete', {
+          ingestion_id: ingestionId,
+          final_url: result2.videoUrl,
+          duration: result2.duration,
+          preview_url: result2.previewUrl,
+          edit_qc_pass: true,
+          edit_qc_note: qc2.note,
+          edit_qc_attempt: 2,
+          edit_qc_attempt1_issues: qc1.issues,
+        });
+        console.log(`[submagic-async] done (attempt 2, QC pass) for ${ingestionId}`);
+        return;
+      }
+
+      // ── Both attempts failed — hold for manual review ─────────────────
+      const issueList1 = qc1.issues.map((i, n) => `${n + 1}. ${i}`).join('\n') || 'None listed';
+      const issueList2 = qc2.issues.map((i, n) => `${n + 1}. ${i}`).join('\n') || 'None listed';
+
+      await supabasePatch('ad_ingestion', ingestionId, {
+        status: 'edit_qc_review',
+        file_url: result2.videoUrl,
+        last_error: `Edit QC failed after 2 attempts. Attempt 2: ${qc2.note}`,
+      });
 
       await supabaseInsertEvent(clientId, 'render_complete', {
         ingestion_id: ingestionId,
-        final_url: result.videoUrl,
-        duration: result.duration,
-        preview_url: result.previewUrl,
-        edit_qc_pass: qcResult.pass,
-        edit_qc_note: qcResult.note,
+        final_url: result2.videoUrl,
+        duration: result2.duration,
+        edit_qc_pass: false,
+        edit_qc_note: qc2.note,
+        edit_qc_attempt: 2,
+        edit_qc_attempt1_issues: qc1.issues,
+        edit_qc_attempt2_issues: qc2.issues,
       });
 
-      console.log(`[submagic-async] done for ${ingestionId}: ${result.videoUrl} (QC: ${qcResult.pass ? 'pass' : 'hold'})`);
+      await postToSlackOps(
+        `🔴 *Edit QC hold — 2 attempts failed* — manual review required\n` +
+        `*Attempt 1 issues:*\n${issueList1}\n\n` +
+        `*Attempt 2 issues (b-roll disabled):*\n${issueList2}\n\n` +
+        `*Best version:* ${result2.videoUrl}\n\n` +
+        `*Options:*\n` +
+        `• Set status to \`rendered\` in Supabase to approve and deliver as-is\n` +
+        `• Ask client to re-record if the raw performance was the issue\n` +
+        `• Set status to \`rejected\` to discard`
+      );
+
+      console.log(`[submagic-async] QC failed both attempts for ${ingestionId} — held for review`);
     } catch (err) {
       const message = err?.message ?? String(err);
       console.error(`[submagic-async] failed for ${ingestionId}:`, message);

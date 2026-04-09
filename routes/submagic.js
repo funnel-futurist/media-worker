@@ -311,7 +311,8 @@ async function runSubmagicEdit({
       });
     }
 
-    const magicBrolls = forceMagicBrolls !== null ? forceMagicBrolls : items.length === 0;
+    // YouTube clips (skipHook=true) never get stock b-roll — they're already edited
+    const magicBrolls = forceMagicBrolls !== null ? forceMagicBrolls : (skipHook ? false : items.length === 0);
 
     let music = null;
     if (!skipHook) {

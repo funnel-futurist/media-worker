@@ -216,11 +216,21 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
 
     console.log(`[youtube] Innertube: creating session for ${videoId}...`);
     const yt = await Innertube.create({ cache: null, generate_session_locally: true });
-    const info = await yt.getInfo(videoId);
 
-    // Access adaptive formats from streaming data
-    const adaptiveFormats = info.streaming_data?.adaptive_formats ?? [];
-    if (adaptiveFormats.length === 0) throw new Error('No adaptive formats in streaming_data');
+    // Use getBasicInfo() with ANDROID client — hits only the /player endpoint,
+    // not the full watch page. This avoids the TwoColumnWatchNextResults /
+    // CompositeVideoPrimaryInfo parser issues that affect getInfo().
+    // ANDROID client also provides pre-deciphered format URLs.
+    let info = await yt.getBasicInfo(videoId, 'ANDROID');
+    let adaptiveFormats = info.streaming_data?.adaptive_formats ?? [];
+
+    if (adaptiveFormats.length === 0) {
+      console.log('[youtube] Innertube ANDROID: no formats, trying IOS client...');
+      info = await yt.getBasicInfo(videoId, 'IOS');
+      adaptiveFormats = info.streaming_data?.adaptive_formats ?? [];
+    }
+
+    if (adaptiveFormats.length === 0) throw new Error('No adaptive formats from ANDROID or IOS client');
 
     console.log(`[youtube] Innertube: got ${adaptiveFormats.length} adaptive formats`);
 
@@ -237,9 +247,10 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
     if (!videoFmt) throw new Error('No MP4 video format found');
     if (!audioFmt) throw new Error('No MP4 audio format found');
 
-    // Get URLs — decipher if needed
-    const videoUrl = videoFmt.url ?? videoFmt.decipher(yt.session.player);
-    const audioUrl = audioFmt.url ?? audioFmt.decipher(yt.session.player);
+    // ANDROID/IOS client URLs are pre-deciphered — f.url is available directly.
+    // Decipher fallback only if player JS was successfully loaded.
+    const videoUrl = videoFmt.url ?? (yt.session.player ? videoFmt.decipher(yt.session.player) : null);
+    const audioUrl = audioFmt.url ?? (yt.session.player ? audioFmt.decipher(yt.session.player) : null);
 
     if (!videoUrl) throw new Error('Failed to get video stream URL');
     if (!audioUrl) throw new Error('Failed to get audio stream URL');

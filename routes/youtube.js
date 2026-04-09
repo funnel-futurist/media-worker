@@ -582,6 +582,7 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
             status: 'classified',
             gemini_markup: {
               source: 'youtube',
+              clip_plan_id: clipPlanId,
               youtube_url: youtubeUrl,
               video_title: videoTitle,
               clip_title: clip.title,

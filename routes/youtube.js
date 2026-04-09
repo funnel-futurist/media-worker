@@ -433,8 +433,10 @@ async function convertToPortraitSplit(inputPath) {
       // Detect which side the speaker is on
       const { speakerSide } = await detectFace(inputPath);
 
-      // Split left/right halves — speaker goes bottom, content/guest goes top
-      // Layout: [top = guest/content] [bottom = speaker face]
+      // Split left/right halves — speaker goes TOP, content/guest goes BOTTOM.
+      // Layout: [top = speaker face] [bottom = guest/content]
+      // Reason: Submagic places animated captions in the center of the lower half.
+      // Putting the featured speaker on top keeps their face caption-free.
       const speakerCrop = speakerSide === 'left'
         ? `crop=iw/2:ih:0:0` // left half = speaker
         : `crop=iw/2:ih:iw/2:0`; // right half = speaker
@@ -442,12 +444,12 @@ async function convertToPortraitSplit(inputPath) {
         ? `crop=iw/2:ih:iw/2:0` // right half = content
         : `crop=iw/2:ih:0:0`; // left half = content
 
-      console.log(`[youtube] speaker on ${speakerSide} → speaker=bottom, content=top`);
+      console.log(`[youtube] speaker on ${speakerSide} → speaker=top, content=bottom`);
       // scale to fit (not fill) so full body stays visible — pad black bars on sides if needed
       const fitScale = `scale=1080:960:force_original_aspect_ratio=decrease,pad=1080:960:(ow-iw)/2:(oh-ih)/2`;
       await execAsync(
         `ffmpeg -i "${inputPath}" ` +
-        `-filter_complex "[0:v]${contentCrop},${fitScale}[top];[0:v]${speakerCrop},${fitScale}[bottom];[top][bottom]vstack[out]" ` +
+        `-filter_complex "[0:v]${speakerCrop},${fitScale}[top];[0:v]${contentCrop},${fitScale}[bottom];[top][bottom]vstack[out]" ` +
         `-map "[out]" -map 0:a -c:v libx264 -preset fast -crf 23 -c:a aac -movflags +faststart -y "${outputPath}"`,
         { timeout: 120000 }
       );

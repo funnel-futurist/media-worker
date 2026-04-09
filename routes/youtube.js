@@ -458,12 +458,12 @@ async function convertToPortraitSplit(inputPath) {
         : `crop=iw/2:ih:0:0`; // left half = content
 
       console.log(`[youtube] speaker on ${speakerSide} → speaker=top, content=bottom`);
-      // Top section is 840px, bottom is 1080px (total 1920px).
-      // Submagic Hormozi 2 places a secondary subtitle line at ~44% of total height = ~844px.
-      // With a 960/960 equal split that line fell inside the speaker section (covering chin/jaw).
-      // Making the top section 840px pushes the 44% mark (844px) just into the bottom section.
-      const topScale = `scale=1080:840:force_original_aspect_ratio=decrease,pad=1080:840:(ow-iw)/2:(oh-ih)/2`;
-      const bottomScale = `scale=1080:1080:force_original_aspect_ratio=decrease,pad=1080:1080:(ow-iw)/2:(oh-ih)/2`;
+      // Top section is 640px, bottom is 1280px (total 1920px).
+      // Submagic Hormozi 2 secondary subtitle sits at ~39% of frame height ≈ 749px.
+      // With 640px top the subtitle lands ~109px into the bottom section — clear of the speaker.
+      // (840px was not enough: subtitle at 749px was still inside the 840px speaker section.)
+      const topScale = `scale=1080:640:force_original_aspect_ratio=decrease,pad=1080:640:(ow-iw)/2:(oh-ih)/2`;
+      const bottomScale = `scale=1080:1280:force_original_aspect_ratio=decrease,pad=1080:1280:(ow-iw)/2:(oh-ih)/2`;
       await execAsync(
         `ffmpeg -i "${inputPath}" ` +
         `-filter_complex "[0:v]${speakerCrop},${topScale}[top];[0:v]${contentCrop},${bottomScale}[bottom];[top][bottom]vstack[out]" ` +

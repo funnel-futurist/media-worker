@@ -162,7 +162,7 @@ async function runClassification({ ingestionId, storageUrl, mimeType, filename, 
     // 4. Update ad_ingestion
     await supabaseUpdate('ad_ingestion', ingestionId, {
       asset_type: result.classification.asset_type,
-      gemini_classification: result.classification,
+      gemini_classification: { ...result.classification, performance_analysis: result.performance_analysis ?? null },
       gemini_markup: { ...(result.markup ?? {}), emotion_tags: result.emotion_tags ?? [] },
       re_record_flag: result.classification.re_record_flag ?? false,
       re_record_notes: result.classification.re_record_notes ?? null,
@@ -194,17 +194,29 @@ async function runClassification({ ingestionId, storageUrl, mimeType, filename, 
     const channel = slackChannel || process.env.SLACK_CHANNEL_OPS;
     const slackToken = process.env.SLACK_BOT_TOKEN;
     if (channel && slackToken) {
-      const reRecord = result.classification.re_record_flag ? ' ⚠️ Re-record recommended' : '';
+      const perf = result.performance_analysis;
+      const rating = perf?.overall_rating ?? null;
+      const verdictEmoji = { green: '🟢', yellow: '🟡', red: '🔴' }[rating] ?? '⚪';
+      const verdictLabel = { green: 'Green — good to go', yellow: 'Yellow — usable, not peak', red: 'Red — re-record needed' }[rating] ?? 'No performance rating';
+
+      const lines = [
+        `📥 *${clientName || 'Client'}* uploaded a video`,
+        `*File:* ${filename}`,
+        '',
+        `*${verdictEmoji} ${verdictLabel}*`,
+        perf?.performance_notes ? `*Why:* ${perf.performance_notes}` : null,
+        perf?.recommended_action ? `*Action:* ${perf.recommended_action}` : null,
+        '',
+        `_Type: \`${result.classification.asset_type}\` · Quality: ${result.classification.quality_score}/100 · Energy: ${result.classification.energy_score}/100_`,
+      ].filter(line => line !== null).join('\n');
+
       await fetch('https://slack.com/api/chat.postMessage', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${slackToken}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          channel,
-          text: `📥 *${clientName || 'Client'}* — video classified${reRecord}\n*File:* ${filename}\n*Type:* \`${result.classification.asset_type}\` (${Math.round((result.classification.confidence ?? 0) * 100)}% confidence)\n*Quality:* ${result.classification.quality_score}/100 | *Energy:* ${result.classification.energy_score}/100`,
-        }),
+        body: JSON.stringify({ channel, text: lines }),
       }).catch(err => console.error('[classify] Slack notify failed:', err.message));
     }
 

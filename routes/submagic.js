@@ -2,7 +2,7 @@ import { Router } from 'express';
 import axios from 'axios';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { writeFileSync, unlinkSync, existsSync } from 'fs';
+import { writeFileSync, unlinkSync, existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { uploadVideo } from '../lib/storage.js';
@@ -144,20 +144,47 @@ submagicRouter.post('/submagic-edit-async', async (req, res) => {
       console.log(`[submagic-async] starting job for ingestion ${ingestionId}`);
       const result = await runSubmagicEdit(editParams);
 
-      await supabasePatch('ad_ingestion', ingestionId, {
-        status: 'rendered',
-        file_url: result.videoUrl,
-        last_error: null,
-      });
+      // ── Edit QC: check rendered output before marking as ready ────────
+      const qcResult = await runEditQc(result.videoUrl, ingestionId);
+
+      if (qcResult.pass) {
+        await supabasePatch('ad_ingestion', ingestionId, {
+          status: 'rendered',
+          file_url: result.videoUrl,
+          last_error: null,
+        });
+      } else {
+        // Hold for ops review — upload_captioned won't pick this up
+        const issuesSummary = qcResult.issues.join('; ');
+        await supabasePatch('ad_ingestion', ingestionId, {
+          status: 'edit_qc_review',
+          file_url: result.videoUrl,
+          last_error: `Edit QC failed: ${qcResult.note}${issuesSummary ? ` | Issues: ${issuesSummary}` : ''}`,
+        });
+
+        const issueList = qcResult.issues.length
+          ? qcResult.issues.map((issue, i) => `${i + 1}. ${issue}`).join('\n')
+          : 'No specific issues listed.';
+
+        await postToSlackOps(
+          `⚠️ *Edit QC hold* — review before sending to client\n` +
+          `*Assessment:* ${qcResult.note}\n` +
+          `*Issues:*\n${issueList}\n` +
+          `*Video:* ${result.videoUrl}\n` +
+          `_Set status to \`rendered\` in Supabase to release for delivery._`
+        );
+      }
 
       await supabaseInsertEvent(clientId, 'render_complete', {
         ingestion_id: ingestionId,
         final_url: result.videoUrl,
         duration: result.duration,
         preview_url: result.previewUrl,
+        edit_qc_pass: qcResult.pass,
+        edit_qc_note: qcResult.note,
       });
 
-      console.log(`[submagic-async] done for ${ingestionId}: ${result.videoUrl}`);
+      console.log(`[submagic-async] done for ${ingestionId}: ${result.videoUrl} (QC: ${qcResult.pass ? 'pass' : 'hold'})`);
     } catch (err) {
       const message = err?.message ?? String(err);
       console.error(`[submagic-async] failed for ${ingestionId}:`, message);
@@ -330,6 +357,152 @@ async function convertImageToBroll(imageUrl) {
   } finally {
     if (existsSync(inputPath)) unlinkSync(inputPath);
     if (existsSync(outputPath)) unlinkSync(outputPath);
+  }
+}
+
+// ── Edit QC ───────────────────────────────────────────────────────────────
+
+async function postToSlackOps(text) {
+  const token = process.env.SLACK_BOT_TOKEN;
+  const channel = process.env.SLACK_CHANNEL_OPS;
+  if (!token || !channel) return;
+  await fetch('https://slack.com/api/chat.postMessage', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ channel, text }),
+  }).catch(err => console.error('[submagic-qc] Slack notify failed:', err.message));
+}
+
+async function uploadToGeminiFiles(buffer, mimeType, displayName) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error('GEMINI_API_KEY not set');
+
+  const initRes = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${apiKey}`, {
+    method: 'POST',
+    headers: {
+      'X-Goog-Upload-Protocol': 'resumable',
+      'X-Goog-Upload-Command': 'start',
+      'X-Goog-Upload-Header-Content-Length': String(buffer.length),
+      'X-Goog-Upload-Header-Content-Type': mimeType,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ file: { display_name: displayName } }),
+  });
+
+  const uploadUrl = initRes.headers.get('X-Goog-Upload-URL');
+  if (!uploadUrl) throw new Error('Failed to get Gemini upload URL');
+
+  const uploadRes = await fetch(uploadUrl, {
+    method: 'PUT',
+    headers: {
+      'X-Goog-Upload-Command': 'upload, finalize',
+      'X-Goog-Upload-Offset': '0',
+      'Content-Length': String(buffer.length),
+    },
+    body: new Uint8Array(buffer),
+  });
+
+  if (!uploadRes.ok) throw new Error(`Gemini file upload failed: ${await uploadRes.text()}`);
+
+  const fileData = await uploadRes.json();
+  let fileState = fileData.file.state;
+  const fileName = fileData.file.name;
+
+  const deadline = Date.now() + 120_000;
+  while (fileState === 'PROCESSING') {
+    if (Date.now() > deadline) throw new Error('Gemini file processing timed out');
+    await new Promise(r => setTimeout(r, 5000));
+    const checkRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${apiKey}`);
+    const checkData = await checkRes.json();
+    fileState = checkData.state;
+    if (fileState === 'ACTIVE') return checkData.uri;
+    if (fileState === 'FAILED' || fileState === 'ERROR') throw new Error(`Gemini file processing failed: ${fileState}`);
+  }
+
+  return fileData.file.uri;
+}
+
+/**
+ * Run a lightweight Gemini QC check on the rendered/edited video.
+ * Checks captions, b-roll context, edit quality, and overall client-readiness.
+ * Returns { pass, issues, note }.
+ * Defaults to pass=true on error so Gemini failures never block delivery.
+ */
+async function runEditQc(videoUrl, ingestionId) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    console.warn('[submagic-qc] GEMINI_API_KEY not set, skipping QC');
+    return { pass: true, issues: [], note: 'QC skipped (no API key)' };
+  }
+
+  const tmpId = randomUUID();
+  const inputPath = join('/tmp', `${tmpId}_qc_in.mp4`);
+  const trimPath = join('/tmp', `${tmpId}_qc_trim.mp4`);
+
+  try {
+    console.log(`[submagic-qc] running edit QC for ${ingestionId}`);
+
+    const { data } = await axios.get(videoUrl, { responseType: 'arraybuffer' });
+    writeFileSync(inputPath, Buffer.from(data));
+
+    // Trim to 90s max — enough to assess quality without uploading a huge file
+    await execAsync(
+      `ffmpeg -i "${inputPath}" -t 90 -c copy -y "${trimPath}"`,
+      { timeout: 60000 }
+    ).catch(() => execAsync(`cp "${inputPath}" "${trimPath}"`));
+
+    const qcPath = existsSync(trimPath) ? trimPath : inputPath;
+    const fileBuffer = readFileSync(qcPath);
+    const fileUri = await uploadToGeminiFiles(fileBuffer, 'video/mp4', `qc-${ingestionId}.mp4`);
+
+    const prompt = `You are doing quality control on an AI-edited social media short-form video before it is sent to a client for review.
+
+Analyze this video across 4 criteria:
+1. CAPTIONS — Readable? Well-positioned? Not covering the speaker's face? Timing feels natural?
+2. B-ROLL — Does the b-roll make contextual sense for what the speaker is saying, or is it random/jarring/irrelevant?
+3. EDIT QUALITY — Are cuts smooth? Does the pacing feel natural? No abrupt jumps or dead air?
+4. CLIENT-READY — Is this polished enough to present to a paying client as a finished product?
+
+Be strict but fair. Minor imperfections are fine. Fail only if there is a clear problem that would embarrass the team or confuse the client.
+
+Return valid JSON only:
+{
+  "pass": true|false,
+  "issues": ["specific issue if any", "another issue if any"],
+  "note": "one sentence overall assessment"
+}`;
+
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [
+            { file_data: { mime_type: 'video/mp4', file_uri: fileUri } },
+            { text: prompt },
+          ]}],
+          generationConfig: { responseMimeType: 'application/json', temperature: 0.1 },
+        }),
+      }
+    );
+
+    if (!res.ok) throw new Error(`Gemini QC API error: ${await res.text()}`);
+
+    const geminiData = await res.json();
+    const text = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) throw new Error('Empty QC response from Gemini');
+
+    const result = JSON.parse(text);
+    console.log(`[submagic-qc] ${ingestionId}: pass=${result.pass} — ${result.note}`);
+    return result;
+  } catch (err) {
+    console.error(`[submagic-qc] failed for ${ingestionId}:`, err.message);
+    // Default to pass on error — never block delivery due to a Gemini failure
+    return { pass: true, issues: [], note: `QC check errored: ${err.message}` };
+  } finally {
+    if (existsSync(inputPath)) unlinkSync(inputPath);
+    if (existsSync(trimPath)) unlinkSync(trimPath);
   }
 }
 

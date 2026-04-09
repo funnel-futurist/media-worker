@@ -257,8 +257,8 @@ function secondsToAssTime(s) {
 function parseVttToAssEvents(vttText, startSec, endSec) {
   if (!vttText) return [];
 
-  const events = [];
-  const seenTexts = new Set(); // dedup rolling captions
+  const raw = [];
+  const seenTexts = new Set();
 
   // Split into cue blocks by double newline
   const blocks = vttText.split(/\n{2,}/);
@@ -296,7 +296,23 @@ function parseVttToAssEvents(vttText, startSec, endSec) {
     const adjEnd = Math.min(endSec - startSec, cueEnd - startSec);
     if (adjEnd <= adjStart) continue;
 
-    events.push({ start: adjStart, end: adjEnd, text });
+    raw.push({ start: adjStart, end: adjEnd, text });
+  }
+
+  // Remove overlapping cues — YouTube rolling captions generate 2-3 cues per phrase.
+  // libass collision detection moves the second simultaneous cue to the default
+  // bottom position when two \pos cues overlap in time, breaking our seam placement.
+  // Fix: trim each cue to end where the next one starts, ensuring no two are active
+  // at the same time.
+  raw.sort((a, b) => a.start - b.start);
+  const events = [];
+  for (const cur of raw) {
+    if (events.length > 0) {
+      const prev = events[events.length - 1];
+      if (prev.end > cur.start) prev.end = cur.start;
+      if (prev.end <= prev.start) { events.pop(); }
+    }
+    events.push({ ...cur });
   }
 
   return events;
@@ -316,7 +332,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Seam,Arial,72,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,6,2,5,20,20,0,1
+Style: Seam,Arial,80,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,6,3,5,20,20,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

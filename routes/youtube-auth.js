@@ -282,6 +282,7 @@ youtubeAuthRouter.post('/youtube-oauth2-init', async (req, res) => {
   let authUrl = null;
   let code = null;
   let responseSent = false;
+  const allOutput = [];
 
   function tryRespond() {
     if (authUrl && code && !responseSent) {
@@ -291,36 +292,36 @@ youtubeAuthRouter.post('/youtube-oauth2-init', async (req, res) => {
         ok: true,
         authUrl,
         code,
-        instructions: `1. Open ${authUrl} on your phone or computer\n2. Enter code: ${code}\n3. Sign in with the YouTube/Google account\n4. Click Allow\nTokens will be saved automatically when authorization completes.`,
+        instructions: `1. Open ${authUrl} on your phone\n2. Enter code: ${code}\n3. Sign in & click Allow\nTokens save automatically.`,
       });
     }
   }
 
-  // yt-dlp writes OAuth2 prompts to stderr
+  function parseOutput(text) {
+    allOutput.push(text);
+    // Match any google.com/device URL
+    const urlMatch = text.match(/(https?:\/\/[^\s]*google\.com\/device[^\s]*)/i);
+    // Match codes like ABCD-EFGH or ABCD1234 or similar patterns
+    const codeMatch = text.match(/(?:code|Code|CODE)[:\s=]+([A-Z0-9]{4}[-\s][A-Z0-9]{4})/i)
+      || text.match(/\b([A-Z]{4}-[A-Z0-9]{4})\b/)
+      || text.match(/\b([A-Z0-9]{4}-[A-Z0-9]{4})\b/);
+
+    if (urlMatch && !authUrl) authUrl = urlMatch[1];
+    if (codeMatch && !code) code = codeMatch[1].replace(/\s+/, '-');
+
+    tryRespond();
+  }
+
   ytdlp.stderr.on('data', (data) => {
     const text = data.toString();
     console.log('[youtube-oauth2]', text.trim());
-
-    const urlMatch = text.match(/https?:\/\/www\.google\.com\/device/);
-    const codeMatch = text.match(/[Cc]ode[:\s]+([A-Z0-9]{4}-[A-Z0-9]{4})/);
-
-    if (urlMatch && !authUrl) authUrl = 'https://www.google.com/device';
-    if (codeMatch && !code) code = codeMatch[1];
-
-    tryRespond();
+    parseOutput(text);
   });
 
   ytdlp.stdout.on('data', (data) => {
     const text = data.toString();
     console.log('[youtube-oauth2-out]', text.trim());
-
-    const urlMatch = text.match(/https?:\/\/www\.google\.com\/device/);
-    const codeMatch = text.match(/[Cc]ode[:\s]+([A-Z0-9]{4}-[A-Z0-9]{4})/);
-
-    if (urlMatch && !authUrl) authUrl = 'https://www.google.com/device';
-    if (codeMatch && !code) code = codeMatch[1];
-
-    tryRespond();
+    parseOutput(text);
   });
 
   ytdlp.on('exit', async (exitCode) => {
@@ -348,12 +349,15 @@ youtubeAuthRouter.post('/youtube-oauth2-init', async (req, res) => {
     }
   });
 
-  // Timeout safety — respond with error if no URL found in 30s
+  // Timeout safety — respond with raw output if no URL found in 30s (for debugging)
   setTimeout(() => {
     if (!responseSent) {
       responseSent = true;
       ytdlp.kill();
-      res.status(504).json({ error: 'Timeout: yt-dlp did not output an authorization URL within 30 seconds.' });
+      res.status(504).json({
+        error: 'Timeout: yt-dlp did not output a recognizable authorization URL within 30 seconds.',
+        rawOutput: allOutput.join('').substring(0, 2000),
+      });
     }
   }, 30000);
 });

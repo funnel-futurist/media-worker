@@ -5,6 +5,7 @@ import { unlinkSync, existsSync, readFileSync, createReadStream, statSync, write
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { chromium } from 'playwright';
+import { Innertube } from 'youtubei.js';
 import { getCachedCookies } from './youtube-auth.js';
 
 const execAsync = promisify(exec);
@@ -186,6 +187,18 @@ function tsToSeconds(ts) {
  * Download a time-ranged clip from a YouTube video using yt-dlp.
  * Returns path to the downloaded mp4 file.
  */
+/**
+ * Extract the YouTube video ID from any YouTube URL format.
+ */
+function extractVideoId(url) {
+  return url.match(/(?:v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/)?.[1] ?? null;
+}
+
+/**
+ * Download a time-ranged clip from YouTube using youtubei.js (Innertube API).
+ * Uses YouTube's internal mobile app API — bypasses bot detection without cookies.
+ * Falls back to yt-dlp if Innertube fails.
+ */
 async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
   const startSec = tsToSeconds(startTs);
   const endSec = tsToSeconds(endTs);
@@ -193,9 +206,63 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
 
   if (duration <= 0) throw new Error(`Invalid time range: ${startTs} → ${endTs}`);
 
-  // Get cookies — Playwright anonymous session takes priority over expired env var cookies
-  const cookiesArg = await getYtDlpCookiesArg();
+  console.log(`[youtube] downloading clip ${startTs}→${endTs} (${duration}s)`);
 
+  // ── Attempt 1: Innertube (youtubei.js) ─────────────────────────────────
+  // Uses YouTube's internal mobile client API — works from any IP without cookies.
+  try {
+    const videoId = extractVideoId(youtubeUrl);
+    if (!videoId) throw new Error('Could not extract video ID from URL');
+
+    const yt = await Innertube.create({ cache: null, generate_session_locally: true });
+    const info = await yt.getBasicInfo(videoId, 'ANDROID');
+
+    // Get best video format (up to 1080p, MP4)
+    const videoFormat = info.chooseFormat({
+      quality: '1080p',
+      type: 'video',
+      format: 'mp4',
+    });
+    const audioFormat = info.chooseFormat({
+      type: 'audio',
+      format: 'mp4',
+    });
+
+    if (!videoFormat || !audioFormat) throw new Error('No suitable format found');
+
+    const videoUrl = videoFormat.decipher(yt.session.player);
+    const audioUrl = audioFormat.decipher(yt.session.player);
+
+    console.log(`[youtube] Innertube stream URLs obtained — using ffmpeg to extract ${startTs}→${endTs}`);
+
+    // Use ffmpeg to download only the needed time range from the stream URLs
+    const tmpVideo = outputPath.replace('.mp4', '_v.mp4');
+    const tmpAudio = outputPath.replace('.mp4', '_a.m4a');
+
+    await execAsync(
+      `ffmpeg -ss ${startSec} -t ${duration} -i "${videoUrl}" -c:v copy -y "${tmpVideo}"`,
+      { timeout: 300000 }
+    );
+    await execAsync(
+      `ffmpeg -ss ${startSec} -t ${duration} -i "${audioUrl}" -c:a aac -y "${tmpAudio}"`,
+      { timeout: 120000 }
+    );
+    await execAsync(
+      `ffmpeg -i "${tmpVideo}" -i "${tmpAudio}" -c:v copy -c:a copy -y "${outputPath}"`,
+      { timeout: 60000 }
+    );
+
+    if (existsSync(tmpVideo)) unlinkSync(tmpVideo);
+    if (existsSync(tmpAudio)) unlinkSync(tmpAudio);
+
+    console.log(`[youtube] Innertube download complete: ${outputPath}`);
+    return;
+  } catch (innertubeErr) {
+    console.warn(`[youtube] Innertube failed: ${innertubeErr.message.split('\n')[0]} — falling back to yt-dlp`);
+  }
+
+  // ── Attempt 2: yt-dlp fallback (still useful for private/restricted videos) ──
+  const cookiesArg = await getYtDlpCookiesArg();
   const buildCmd = (playerClient) => [
     'yt-dlp',
     cookiesArg,
@@ -209,17 +276,12 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
     `"${youtubeUrl}"`,
   ].filter(Boolean).join(' ');
 
-  console.log(`[youtube] downloading clip ${startTs}→${endTs} (${duration}s)`);
-
-  // Attempt 1: iOS client + Playwright cookies
   try {
     await execAsync(buildCmd('ios'), { timeout: 300000 });
     return;
-  } catch (iosErr) {
-    console.warn(`[youtube] iOS client failed: ${iosErr.message.split('\n')[0]} — retrying with web_creator`);
+  } catch {
+    // fall through to web_creator
   }
-
-  // Attempt 2: web_creator client + same cookies
   await execAsync(buildCmd('web_creator'), { timeout: 300000 });
 }
 

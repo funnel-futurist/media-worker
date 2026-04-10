@@ -585,6 +585,7 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
   const cookiesArg = await getYtDlpCookiesArg();
   const baseArgs = [
     `--download-sections "*${startTs}-${endTs}"`,
+    '--force-keyframes-at-cuts', // re-encode at section boundaries for frame-accurate start time
     '-f "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best"',
     '--merge-output-format mp4',
     '--no-playlist',

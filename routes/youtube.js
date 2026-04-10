@@ -257,15 +257,19 @@ function secondsToAssTime(s) {
 function parseVttToAssEvents(vttText, startSec, endSec) {
   if (!vttText) return [];
 
+  // Normalize line endings — Railway may write \r\n which breaks \n{2,} block splitting
+  const normalized = vttText.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
   const raw = [];
   const seenTexts = new Set();
 
   // Split into cue blocks by double newline
-  const blocks = vttText.split(/\n{2,}/);
-  console.log(`[youtube] VTT parse: ${blocks.length} blocks, range ${startSec}s-${endSec}s, first timestamp line: ${blocks.slice(0,10).map(b=>b.trim().split('\n').find(l=>l.includes('-->'))??'').filter(Boolean)[0] ?? 'none'}`);
+  const blocks = normalized.split(/\n{2,}/);
+  const firstTs = blocks.slice(0, 20).map(b => b.trim().split('\n').find(l => l.includes('-->')) ?? '').filter(Boolean)[0] ?? 'none';
+  console.log(`[youtube] VTT parse: ${blocks.length} blocks, range ${startSec}s-${endSec}s, first timestamp: ${firstTs}`);
 
   for (const block of blocks) {
-    const lines = block.trim().split('\n');
+    const lines = block.trim().split('\n');  // already \n-normalized
     const tsLine = lines.find(l => l.includes('-->'));
     if (!tsLine) continue;
 

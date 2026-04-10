@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { unlinkSync, existsSync, readFileSync, createReadStream, statSync, writeFileSync } from 'fs';
+import { unlinkSync, existsSync, readFileSync, readdirSync, createReadStream, statSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { chromium } from 'playwright';
@@ -655,34 +655,45 @@ async function convertToPortraitSplit(inputPath) {
 
 /**
  * Download transcript (auto-generated captions) from a YouTube video.
- * Returns the raw VTT text, or null if unavailable.
+ * Tries multiple yt-dlp clients in order. Returns the raw VTT text or null.
+ * yt-dlp names subtitle files like: base.en.vtt, base.en-US.vtt, base.a.en.vtt —
+ * we scan the tmpDir for any .vtt file rather than hardcoding the language suffix.
  */
 async function downloadTranscript(youtubeUrl, tmpDir) {
   const cookiesArg = await getYtDlpCookiesArg();
-  const vttPath = join(tmpDir, 'transcript.en.vtt');
+  const base = 'transcript';
+  const subArgs = `--write-auto-subs --sub-langs "en.*" --sub-format vtt --skip-download --no-playlist -o "${tmpDir}/${base}"`;
 
-  // Try iOS client with Playwright cookies
-  try {
-    await execAsync(
-      `yt-dlp ${cookiesArg} --extractor-args "youtube:player_client=ios" --write-auto-subs --sub-langs en --sub-format vtt --skip-download --no-playlist -o "${tmpDir}/transcript" "${youtubeUrl}"`,
-      { timeout: 60000 }
-    );
-    if (existsSync(vttPath)) return readFileSync(vttPath, 'utf8');
-  } catch {
-    // fall through
+  const attempts = [
+    // web + EJS: most reliable, bypasses bot detection with Botguard token
+    `yt-dlp --js-runtimes node --remote-components ejs:github ${cookiesArg} --extractor-args "youtube:player_client=web" ${subArgs} "${youtubeUrl}"`,
+    // web_creator: avoids SABR enrollment issues
+    `yt-dlp ${cookiesArg} --extractor-args "youtube:player_client=web_creator" ${subArgs} "${youtubeUrl}"`,
+    // ios: lightweight, no challenge solving needed
+    `yt-dlp ${cookiesArg} --extractor-args "youtube:player_client=ios" ${subArgs} "${youtubeUrl}"`,
+    // android: last resort, no auth needed
+    `yt-dlp --extractor-args "youtube:player_client=android" ${subArgs} "${youtubeUrl}"`,
+  ];
+
+  for (const cmd of attempts) {
+    try {
+      console.log(`[youtube] transcript attempt: ${cmd.slice(0, 80)}...`);
+      await execAsync(cmd, { timeout: 60000 });
+      // Scan for any .vtt file yt-dlp wrote (lang suffix varies: en, en-US, a.en, etc.)
+      const files = readdirSync(tmpDir);
+      const vtt = files.find(f => f.startsWith(base) && f.endsWith('.vtt'));
+      if (vtt) {
+        const content = readFileSync(join(tmpDir, vtt), 'utf8');
+        console.log(`[youtube] transcript downloaded: ${vtt} (${content.length} chars)`);
+        return content;
+      }
+    } catch (err) {
+      console.warn(`[youtube] transcript attempt failed: ${err.message?.split('\n')[0]}`);
+    }
   }
 
-  // Fall back to web_creator
-  try {
-    await execAsync(
-      `yt-dlp ${cookiesArg} --extractor-args "youtube:player_client=web_creator" --write-auto-subs --sub-langs en --sub-format vtt --skip-download --no-playlist -o "${tmpDir}/transcript" "${youtubeUrl}"`,
-      { timeout: 60000 }
-    );
-    if (existsSync(vttPath)) return readFileSync(vttPath, 'utf8');
-    return null;
-  } catch {
-    return null;
-  }
+  console.warn('[youtube] all transcript attempts failed — captions will be skipped');
+  return null;
 }
 
 /**

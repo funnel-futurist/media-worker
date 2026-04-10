@@ -541,7 +541,10 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
       TV_EMBEDDED: 'Mozilla/5.0 (SMART-TV; Linux; Tizen 5.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/5.0 NativeTVAds Safari/538.1',
     };
     const userAgent = clientUserAgents[successClient] ?? clientUserAgents.ANDROID;
-    const ffmpegHeaders = `-headers "User-Agent: ${userAgent}\r\n"`;
+    // \\r\\n → literal \r\n text in the shell → ffmpeg interprets as HTTP header separator.
+    // Using real \r\n (JS escape) creates an actual newline in the command string which
+    // breaks shell parsing and sends a malformed HTTP header → YouTube returns 403.
+    const ffmpegHeaders = `-headers "User-Agent: ${userAgent}\\r\\n"`;
 
     const tmpVideo = outputPath.replace('.mp4', '_v.mp4');
     const tmpAudio = outputPath.replace('.mp4', '_a.m4a');

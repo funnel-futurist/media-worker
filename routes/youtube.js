@@ -528,8 +528,13 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
     const tmpAudio = outputPath.replace('.mp4', '_a.m4a');
 
     try {
+      // Double-seek for frame-accurate clip without decoding from zero:
+      // Fast seek to 5s before start, then accurate seek the remaining offset.
+      // This ensures the clip starts exactly at startSec so VTT captions stay in sync.
+      const preSec = Math.max(0, startSec - 5);
+      const accurateOffset = startSec - preSec;
       await execAsync(
-        `ffmpeg -ss ${startSec} -t ${duration} -i "${videoUrl}" -c:v copy -y "${tmpVideo}"`,
+        `ffmpeg -ss ${preSec} -i "${videoUrl}" -ss ${accurateOffset} -t ${duration} -c:v libx264 -preset ultrafast -crf 23 -y "${tmpVideo}"`,
         { timeout: 300000 }
       );
       await execAsync(

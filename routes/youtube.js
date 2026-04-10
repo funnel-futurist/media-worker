@@ -483,6 +483,7 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
     ];
     let info = null;
     let adaptiveFormats = [];
+    let successClient = null;
 
     for (const { client, session } of clientsToTry) {
       try {
@@ -494,6 +495,7 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
         if (fmts.length > 0) {
           info = clientInfo;
           adaptiveFormats = fmts;
+          successClient = client;
           break;
         }
       } catch (clientErr) {
@@ -523,7 +525,18 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
     if (!videoUrl) throw new Error('Failed to get video stream URL');
     if (!audioUrl) throw new Error('Failed to get audio stream URL');
 
-    console.log(`[youtube] Innertube: stream URLs ready — extracting ${startTs}→${endTs} via ffmpeg`);
+    console.log(`[youtube] Innertube: stream URLs ready (client=${successClient}) — extracting ${startTs}→${endTs} via ffmpeg`);
+
+    // User-agent must match the Innertube client that generated the stream URL.
+    // YouTube IP-locks stream URLs and rejects downloads with mismatched UAs (403).
+    const clientUserAgents = {
+      ANDROID: 'com.google.android.youtube/17.31.35 (Linux; U; Android 11) gzip',
+      IOS: 'com.google.ios.youtube/17.33.2 (iPhone14,3; U; CPU iOS 15_6 like Mac OS X)',
+      WEB: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      TV_EMBEDDED: 'Mozilla/5.0 (SMART-TV; Linux; Tizen 5.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/5.0 NativeTVAds Safari/538.1',
+    };
+    const userAgent = clientUserAgents[successClient] ?? clientUserAgents.ANDROID;
+    const ffmpegHeaders = `-headers "User-Agent: ${userAgent}\r\n"`;
 
     const tmpVideo = outputPath.replace('.mp4', '_v.mp4');
     const tmpAudio = outputPath.replace('.mp4', '_a.m4a');
@@ -535,11 +548,11 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
       const preSec = Math.max(0, startSec - 5);
       const accurateOffset = startSec - preSec;
       await execAsync(
-        `ffmpeg -ss ${preSec} -i "${videoUrl}" -ss ${accurateOffset} -t ${duration} -c:v libx264 -preset ultrafast -crf 23 -y "${tmpVideo}"`,
+        `ffmpeg ${ffmpegHeaders} -ss ${preSec} -i "${videoUrl}" -ss ${accurateOffset} -t ${duration} -c:v libx264 -preset ultrafast -crf 23 -y "${tmpVideo}"`,
         { timeout: 300000 }
       );
       await execAsync(
-        `ffmpeg -ss ${startSec} -t ${duration} -i "${audioUrl}" -c:a aac -y "${tmpAudio}"`,
+        `ffmpeg ${ffmpegHeaders} -ss ${startSec} -t ${duration} -i "${audioUrl}" -c:a aac -y "${tmpAudio}"`,
         { timeout: 120000 }
       );
       await execAsync(

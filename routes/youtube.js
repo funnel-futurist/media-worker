@@ -338,25 +338,45 @@ Style: Seam,Arial,80,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
-  const eventLines = events.map(e => {
-    // All-caps, wrap at ~28 chars per line for legibility in portrait
+  // Each VTT cue may have many words — split into max-2-line chunks so text
+  // doesn't flood the screen. Each chunk gets an equal share of the cue duration.
+  const maxCharsPerLine = 20;
+  const maxLinesPerChunk = 2;
+  const allLines = [];
+
+  for (const e of events) {
     const words = e.text.toUpperCase().split(' ');
-    const maxCharsPerLine = 28;
-    const wrapped = [];
+    const lines = [];
     let line = '';
     for (const word of words) {
       if (line.length + word.length + 1 > maxCharsPerLine && line.length > 0) {
-        wrapped.push(line.trim());
+        lines.push(line.trim());
         line = word + ' ';
       } else {
         line += word + ' ';
       }
     }
-    if (line.trim()) wrapped.push(line.trim());
-    const assText = wrapped.join('\\N');
-    // \an5 = center-center alignment; \pos(540,960) = centered at the seam
-    return `Dialogue: 0,${secondsToAssTime(e.start)},${secondsToAssTime(e.end)},Seam,,0,0,0,,{\\an5\\pos(540,960)}${assText}`;
-  });
+    if (line.trim()) lines.push(line.trim());
+
+    // Split into chunks of maxLinesPerChunk
+    const chunks = [];
+    for (let i = 0; i < lines.length; i += maxLinesPerChunk) {
+      chunks.push(lines.slice(i, i + maxLinesPerChunk).join('\\N'));
+    }
+
+    const chunkDur = (e.end - e.start) / chunks.length;
+    chunks.forEach((text, idx) => {
+      allLines.push({
+        start: e.start + idx * chunkDur,
+        end: e.start + (idx + 1) * chunkDur,
+        text,
+      });
+    });
+  }
+
+  const eventLines = allLines.map(e =>
+    `Dialogue: 0,${secondsToAssTime(e.start)},${secondsToAssTime(e.end)},Seam,,0,0,0,,{\\an5\\pos(540,960)}${e.text}`
+  );
 
   return header + eventLines.join('\n') + '\n';
 }
@@ -632,10 +652,10 @@ async function convertToPortraitSplit(inputPath) {
         : `crop=iw/2:ih:0:0`; // left half = content
 
       console.log(`[youtube] speaker on ${speakerSide} → speaker=top, content=bottom`);
-      // Equal 960/960 split (50/50). Captions are burned separately at y=960
-      // (the seam) by burnCaptionsAtSeam() — no Submagic involvement for YouTube clips.
-      const topScale = `scale=1080:960:force_original_aspect_ratio=decrease,pad=1080:960:(ow-iw)/2:(oh-ih)/2`;
-      const bottomScale = `scale=1080:960:force_original_aspect_ratio=decrease,pad=1080:960:(ow-iw)/2:(oh-ih)/2`;
+      // Scale each half to fill 1080x960 exactly — scale up to cover then crop center.
+      // Using increase+crop (not decrease+pad) to avoid black bars on the sides.
+      const topScale = `scale=1080:960:force_original_aspect_ratio=increase,crop=1080:960`;
+      const bottomScale = `scale=1080:960:force_original_aspect_ratio=increase,crop=1080:960`;
       await execAsync(
         `ffmpeg -i "${inputPath}" ` +
         `-filter_complex "[0:v]${speakerCrop},${topScale}[top];[0:v]${contentCrop},${bottomScale}[bottom];[top][bottom]vstack[out]" ` +

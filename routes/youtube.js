@@ -470,15 +470,16 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
     const ytAnon = await Innertube.create({ cache: null, generate_session_locally: true });
 
     // Try clients in priority order.
-    // WEB (anon): avoids SABR enrollment, usually has direct stream URLs.
-    // TV_EMBEDDED: not subject to SABR, but geo-restricted from Railway IPs.
-    // ANDROID/IOS (auth): cookie auth works, but 400s if cookies are SABR-enrolled.
+    // ANDROID/IOS (anon): mobile clients don't support cookie auth — passing cookies causes 400.
+    //   Use anonymous sessions. Mobile clients bypass SABR and work from datacenter IPs.
+    // WEB (anon): avoids SABR enrollment but datacenter IPs may get LOGIN_REQUIRED.
+    // TV_EMBEDDED (anon): not subject to SABR, but sometimes geo-restricted.
     // NOTE: youtubei.js v15+ requires { client: 'TYPE' } object, not a plain string.
     const clientsToTry = [
+      { client: 'ANDROID', session: ytAnon },
+      { client: 'IOS', session: ytAnon },
       { client: 'WEB', session: ytAnon },
-      { client: 'TV_EMBEDDED', session: yt },
-      { client: 'ANDROID', session: yt },
-      { client: 'IOS', session: yt },
+      { client: 'TV_EMBEDDED', session: ytAnon },
     ];
     let info = null;
     let adaptiveFormats = [];

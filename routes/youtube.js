@@ -262,6 +262,7 @@ function parseVttToAssEvents(vttText, startSec, endSec) {
 
   // Split into cue blocks by double newline
   const blocks = vttText.split(/\n{2,}/);
+  console.log(`[youtube] VTT parse: ${blocks.length} blocks, range ${startSec}s-${endSec}s, first timestamp line: ${blocks.slice(0,10).map(b=>b.trim().split('\n').find(l=>l.includes('-->'))??'').filter(Boolean)[0] ?? 'none'}`);
 
   for (const block of blocks) {
     const lines = block.trim().split('\n');

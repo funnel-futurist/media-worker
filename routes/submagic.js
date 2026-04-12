@@ -347,14 +347,14 @@ async function fitToVertical(videoUrl) {
   const outputPath = join('/tmp', `${tmpId}_broll_fit.mp4`);
 
   try {
-    console.log(`[submagic] fitting ${w}x${h} b-roll to 1080x1920 with padding (no crop)`);
+    console.log(`[submagic] fitting ${w}x${h} b-roll to 1080x1920 with crop-to-fill`);
     const { data } = await axios.get(videoUrl, { responseType: 'arraybuffer' });
     writeFileSync(inputPath, Buffer.from(data));
 
-    // Scale to fit within 1080x1920, pad remaining space with black
+    // Scale to fill 1080x1920 then crop center — b-roll must be full-screen, no black bars
     await execAsync(
       `ffmpeg -i "${inputPath}" ` +
-      `-vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black" ` +
+      `-vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" ` +
       `-c:v libx264 -preset fast -crf 23 -c:a aac -movflags +faststart -y "${outputPath}"`,
       { timeout: 180000 }
     );

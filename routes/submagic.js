@@ -578,7 +578,7 @@ async function runSubmagicEdit({
   clientBrolls = [],
   emotionTags = [],
   skipHook = false,
-  forceMagicBrolls = null,  // null = auto (true when no client brolls), false = always off
+  forceMagicBrolls = null,  // null = auto (true unless skipHook), false = always off
   captionsPosition = null,  // reserved — Submagic API has no caption position field; ignored for now
 }) {
     // ── Step 0: Ensure H.264 — Submagic rejects H.265 with "Virus scan failed" ──
@@ -612,8 +612,9 @@ async function runSubmagicEdit({
       });
     }
 
-    // YouTube clips (skipHook=true) never get stock b-roll — they're already edited
-    const magicBrolls = forceMagicBrolls !== null ? forceMagicBrolls : (skipHook ? false : items.length === 0);
+    // YouTube clips (skipHook=true) never get stock b-roll — they're already edited.
+    // Otherwise always enable magicBrolls so stock b-roll fills gaps alongside any client b-rolls.
+    const magicBrolls = forceMagicBrolls !== null ? forceMagicBrolls : !skipHook;
 
     let music = null;
     if (!skipHook) {

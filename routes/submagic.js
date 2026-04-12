@@ -584,9 +584,8 @@ async function runSubmagicEdit({
     // ── Step 0: Ensure H.264 — Submagic rejects H.265 with "Virus scan failed" ──
     videoUrl = await ensureH264(videoUrl);
 
-    // ── Step 1: Register client b-roll clips (if any) ─────────────────────
-    const items = [];
-    for (const broll of clientBrolls) {
+    // ── Step 1: Register client b-roll clips in parallel ─────────────────
+    const items = await Promise.all(clientBrolls.map(async (broll) => {
       // Photos must be converted to short video clips — Submagic /user-media rejects images.
       // Check both URL extension and asset_type (existing photos were stored with .mp4 extension by mistake).
       const isPhoto = isImageUrl(broll.url) || (broll.assetType ?? '').toLowerCase().includes('photo');
@@ -603,14 +602,14 @@ async function runSubmagicEdit({
         { url: brollVideoUrl },
         { headers: headers() }
       );
-      items.push({
+      return {
         type: 'user-media',
         userMediaId: mediaData.userMediaId,
         startTime: broll.startTime,
         endTime: broll.endTime,
         layout: 'cover',
-      });
-    }
+      };
+    }));
 
     // YouTube clips (skipHook=true) never get stock b-roll — they're already edited.
     // Otherwise always enable magicBrolls so stock b-roll fills gaps alongside any client b-rolls.

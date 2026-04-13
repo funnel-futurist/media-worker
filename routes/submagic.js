@@ -605,9 +605,9 @@ async function runSubmagicEdit({
       };
     }));
 
-    // Stock b-roll (magicBrolls) always renders as split-screen in Submagic — never full-screen.
-    // Disabled entirely. Client b-rolls (items) play full-screen at their timestamps.
-    const magicBrolls = forceMagicBrolls === true ? true : false;
+    // Stock b-roll enabled for all non-YouTube clips — full-screen, not split-screen.
+    // Split-screen was caused by hookTitle: { template: 'steph' }, not magicBrolls.
+    const magicBrolls = forceMagicBrolls !== null ? forceMagicBrolls : !skipHook;
 
     let music = null;
     if (!skipHook) {

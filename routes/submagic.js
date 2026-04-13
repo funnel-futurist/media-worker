@@ -72,7 +72,7 @@ async function pollProject(projectId, targetStatus, intervalMs = 10000, maxMs = 
  * Body: {
  *   videoUrl: string          — direct-download public URL (MP4/MOV, max 2 GB)
  *   language?: string         — transcription language code (default: "en")
- *   templateName?: string     — caption style (default: "Hormozi 2")
+ *   templateName?: string     — caption style preset name (default: "Phil April")
  *   removeSilencePace?: string — "natural" | "fast" | "extra-fast" (default: "natural")
  *   removeBadTakes?: boolean  — AI removes bad takes (default: true)
  *   clientBrolls?: Array<{ url: string, startTime: number, endTime: number }>
@@ -566,7 +566,7 @@ Return valid JSON only:
 async function runSubmagicEdit({
   videoUrl,
   language = 'en',
-  templateName = 'Hormozi 2',
+  templateName = 'Phil April',
   removeSilencePace = 'natural',
   removeBadTakes = true,
   clientBrolls = [],
@@ -628,7 +628,7 @@ async function runSubmagicEdit({
       // NOTE: Submagic API has no top-level caption position field.
       // 'top' only exists inside hookTitle (hook text position), not for regular captions.
       // captionsPosition param is accepted by our API but silently ignored until Submagic adds support.
-      ...(!skipHook && { hookTitle: { template: 'steph' } }),
+      // hookTitle removed — caused unintended animated overlay on talking head reels
       ...(items.length > 0 && { items }),
       ...(music && { music }),
     };

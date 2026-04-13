@@ -72,7 +72,7 @@ async function pollProject(projectId, targetStatus, intervalMs = 10000, maxMs = 
  * Body: {
  *   videoUrl: string          — direct-download public URL (MP4/MOV, max 2 GB)
  *   language?: string         — transcription language code (default: "en")
- *   templateName?: string     — caption style (default: "Hormozi 1")
+ *   templateName?: string     — caption style (default: "Hormozi 2")
  *   removeSilencePace?: string — "natural" | "fast" | "extra-fast" (default: "natural")
  *   removeBadTakes?: boolean  — AI removes bad takes (default: true)
  *   clientBrolls?: Array<{ url: string, startTime: number, endTime: number }>
@@ -566,7 +566,7 @@ Return valid JSON only:
 async function runSubmagicEdit({
   videoUrl,
   language = 'en',
-  templateName = 'Hormozi 1',
+  templateName = 'Hormozi 2',
   removeSilencePace = 'natural',
   removeBadTakes = true,
   clientBrolls = [],
@@ -605,9 +605,9 @@ async function runSubmagicEdit({
       };
     }));
 
-    // YouTube clips (skipHook=true) never get stock b-roll — they're already edited.
-    // Otherwise always enable magicBrolls so stock b-roll fills gaps alongside any client b-rolls.
-    const magicBrolls = forceMagicBrolls !== null ? forceMagicBrolls : !skipHook;
+    // Stock b-roll (magicBrolls) always renders as split-screen in Submagic — never full-screen.
+    // Disabled entirely. Client b-rolls (items) play full-screen at their timestamps.
+    const magicBrolls = forceMagicBrolls === true ? true : false;
 
     let music = null;
     if (!skipHook) {

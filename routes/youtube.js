@@ -776,22 +776,6 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
     try {
       console.log(`[youtube] starting extraction for plan ${clipPlanId} (${clips.length} clips)`);
 
-      // Download VTT transcript once for the whole plan — burned at the seam (y=960)
-      // between the two speakers in the split-screen layout. Submagic is bypassed for
-      // YouTube clips: its caption positions are template-locked and land on speakers' faces.
-      let planVttText = null;
-      try {
-        console.log('[youtube] downloading VTT transcript for caption burn...');
-        planVttText = await downloadTranscript(youtubeUrl, tmpDir);
-        if (planVttText) {
-          console.log('[youtube] transcript downloaded successfully');
-        } else {
-          console.log('[youtube] transcript unavailable — clips will be delivered without captions');
-        }
-      } catch (transcriptErr) {
-        console.warn('[youtube] transcript download error:', transcriptErr.message);
-      }
-
       const extractedClips = [];
 
       for (let i = 0; i < clips.length; i++) {
@@ -806,25 +790,14 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
             continue;
           }
 
-          // Convert landscape to portrait split-screen (speaker top, guest/content bottom).
-          // Face detection determines which side the speaker is on.
-          await convertToPortraitSplit(clipPath);
-
-          // Burn VTT captions at the seam (y=960) — bold, white, thick outline.
-          // Positioned at the center divider so it doesn't cover either speaker's face.
-          const startSec = tsToSeconds(clip.startTimestamp);
-          const endSec = tsToSeconds(clip.endTimestamp);
-          await burnCaptionsAtSeam(clipPath, planVttText, startSec, endSec);
-
-          // Upload captioned split-screen clip to Supabase Storage
+          // Upload landscape clip to Supabase Storage — no portrait conversion.
+          // Submagic handles captions via the classified → washed → rendering pipeline.
           const date = new Date().toISOString().split('T')[0];
           const safeFilename = (clip.title ?? `clip_${i}`).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 60);
           const storagePath = `youtube-clips/${clientId}/${date}/${randomUUID()}_${safeFilename}.mp4`;
           const clipUrl = await uploadToSupabaseStorage(clipPath, storagePath);
           console.log(`[youtube] clip ${i} uploaded: ${clipUrl}`);
 
-          // Mark as 'rendered' — captions are already burned; upload_captioned
-          // will deliver directly to the client's Drive Edited folder.
           const safeTitle = clip.title?.slice(0, 100) ?? `Clip ${i + 1}`;
           const filename = `${safeTitle}.mp4`;
 
@@ -836,7 +809,7 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
             format: 'video',
             file_url: clipUrl,
             original_filename: filename,
-            status: 'rendered',
+            status: 'classified',
             gemini_markup: {
               source: 'youtube',
               clip_plan_id: clipPlanId,

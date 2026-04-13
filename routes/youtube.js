@@ -776,12 +776,12 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
     try {
       console.log(`[youtube] starting extraction for plan ${clipPlanId} (${clips.length} clips)`);
 
-      // Download VTT transcript once for the whole plan — used to burn captions at the
-      // seam (y=960) ourselves. Submagic is bypassed for YouTube clips because its
-      // template caption positions can't be overridden and always land on speakers' faces.
+      // Download VTT transcript once for the whole plan — burned at the seam (y=960)
+      // between the two speakers in the split-screen layout. Submagic is bypassed for
+      // YouTube clips: its caption positions are template-locked and land on speakers' faces.
       let planVttText = null;
       try {
-        console.log('[youtube] downloading VTT transcript for caption generation...');
+        console.log('[youtube] downloading VTT transcript for caption burn...');
         planVttText = await downloadTranscript(youtubeUrl, tmpDir);
         if (planVttText) {
           console.log('[youtube] transcript downloaded successfully');
@@ -806,26 +806,25 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
             continue;
           }
 
-          // Convert landscape to portrait split-screen (host bottom, guest top)
+          // Convert landscape to portrait split-screen (speaker top, guest/content bottom).
+          // Face detection determines which side the speaker is on.
           await convertToPortraitSplit(clipPath);
 
-          // Burn captions at the seam (y=960) from the YouTube VTT transcript.
-          // This bypasses Submagic's caption rendering — Submagic templates always
-          // place captions at fixed positions that land on speakers' faces in split-screen.
+          // Burn VTT captions at the seam (y=960) — bold, white, thick outline.
+          // Positioned at the center divider so it doesn't cover either speaker's face.
           const startSec = tsToSeconds(clip.startTimestamp);
           const endSec = tsToSeconds(clip.endTimestamp);
           await burnCaptionsAtSeam(clipPath, planVttText, startSec, endSec);
 
-          // Upload to Supabase Storage
+          // Upload captioned split-screen clip to Supabase Storage
           const date = new Date().toISOString().split('T')[0];
           const safeFilename = (clip.title ?? `clip_${i}`).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 60);
           const storagePath = `youtube-clips/${clientId}/${date}/${randomUUID()}_${safeFilename}.mp4`;
           const clipUrl = await uploadToSupabaseStorage(clipPath, storagePath);
           console.log(`[youtube] clip ${i} uploaded: ${clipUrl}`);
 
-          // Create ad_ingestion row — mark as 'rendered' to skip Submagic.
-          // Captions are already burned at the seam above. upload_captioned will
-          // pick up 'rendered' rows and deliver directly to client Drive.
+          // Mark as 'rendered' — captions are already burned; upload_captioned
+          // will deliver directly to the client's Drive Edited folder.
           const safeTitle = clip.title?.slice(0, 100) ?? `Clip ${i + 1}`;
           const filename = `${safeTitle}.mp4`;
 

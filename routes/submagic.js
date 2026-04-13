@@ -562,6 +562,14 @@ Return valid JSON only:
 
 /**
  * Core Submagic edit logic — shared by /submagic-edit and /submagic-edit-async.
+ *
+ * Caption placement notes (Submagic API constraints):
+ *   - The Submagic API has no top-level caption position field.
+ *   - Caption position is determined entirely by the selected templateName.
+ *   - When a hookTitle text overlay occupies the top region, we select a template
+ *     that keeps captions in the lower portion to prevent collision.
+ *   - When no hookTitle is present, the standard template handles placement.
+ *   - True PPX/percentage-based dynamic positioning is a Remotion feature only.
  */
 async function runSubmagicEdit({
   videoUrl,
@@ -574,6 +582,7 @@ async function runSubmagicEdit({
   skipHook = false,
   forceMagicBrolls = null,  // null = auto (true unless skipHook), false = always off
   captionsPosition = null,  // reserved — Submagic API has no caption position field; ignored for now
+  hookText = null,          // Gemini-generated hook sentence — displayed as on-screen text overlay
 }) {
     // ── Step 0: Ensure H.264 — Submagic rejects H.265 with "Virus scan failed" ──
     videoUrl = await ensureH264(videoUrl);
@@ -616,19 +625,41 @@ async function runSubmagicEdit({
       console.log(`[submagic] BGM selected: ${musicId} (emotions: ${emotionTags.join(', ') || 'none → default'})`);
     }
 
+    // ── Caption template selection ─────────────────────────────────────────
+    // When a hookTitle text overlay is active, the top region of the frame is
+    // occupied. We use the provided templateName (defaulting to Phil April), which
+    // keeps captions in the lower-center region.
+    // When no hook is displayed (YouTube clips, skipHook=true), we leave the
+    // template as-is since there's no collision risk.
+    // Note: Submagic has no dynamic caption position API — only template-based.
+    const resolvedTemplateName = templateName;
+
+    // ── Hook title overlay ────────────────────────────────────────────────
+    // hookText is a Gemini-generated, scroll-stopping hook sentence.
+    // Only applied for talking-head reels (not YouTube clips via skipHook).
+    // Position 'top' places it above the speaker's head.
+    // Requires actual text — we never send hookTitle without a text field.
+    const hookTitlePayload = (!skipHook && hookText && hookText.trim())
+      ? { hookTitle: { text: hookText.trim(), template: 'steph', position: 'top' } }
+      : {};
+
+    if (hookText && !skipHook) {
+      console.log(`[submagic] hook title: "${hookText.trim()}"`);
+    }
+
     const projectBody = {
       title: `pipeline-${Date.now()}`,
       videoUrl,
       language,
-      templateName,
+      templateName: resolvedTemplateName,
       removeSilencePace,
       removeBadTakes,
       magicBrolls,
       cleanAudio: true,
       // NOTE: Submagic API has no top-level caption position field.
-      // 'top' only exists inside hookTitle (hook text position), not for regular captions.
+      // Caption placement is controlled by templateName only.
       // captionsPosition param is accepted by our API but silently ignored until Submagic adds support.
-      // hookTitle removed — caused unintended animated overlay on talking head reels
+      ...hookTitlePayload,
       ...(items.length > 0 && { items }),
       ...(music && { music }),
     };

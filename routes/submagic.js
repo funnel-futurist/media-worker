@@ -563,16 +563,10 @@ Return valid JSON only:
 /**
  * Core Submagic edit logic — shared by /submagic-edit and /submagic-edit-async.
  */
-// "Phil April" preset — Tayo style with emojis removed, clean professional captions.
-// This UUID is passed as templateName; Submagic accepts preset IDs in this field.
-// All other processing (BGM, silence removal, b-roll, bad takes) is unaffected —
-// those are controlled by separate fields (music, removeSilencePace, removeBadTakes, magicBrolls).
-const CAPTION_PRESET_ID = '1fbcd868-290e-45da-8495-f87de0f0fc8a';
-
 async function runSubmagicEdit({
   videoUrl,
   language = 'en',
-  templateName = CAPTION_PRESET_ID,
+  templateName = 'Hormozi 1',
   removeSilencePace = 'natural',
   removeBadTakes = true,
   clientBrolls = [],

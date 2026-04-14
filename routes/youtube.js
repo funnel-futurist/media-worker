@@ -236,6 +236,83 @@ function vttTimeToSeconds(ts) {
 }
 
 /**
+ * Probe the duration of a local video file in seconds.
+ * Returns 0 on error so callers can fall back gracefully.
+ */
+async function probeClipDurationSec(clipPath) {
+  try {
+    const { stdout } = await execAsync(
+      `ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${clipPath}"`,
+      { timeout: 15000 }
+    );
+    return parseFloat(stdout.trim()) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Check if a clip has burned-in (hardcoded) subtitle text by analyzing a
+ * frame with Gemini vision. Burned-in subtitles = text rendered into the
+ * video pixels, NOT a separate subtitle track.
+ *
+ * Returns true if burned-in subtitles are detected, false otherwise.
+ * Defaults to false on any error so we never block delivery.
+ */
+async function detectHardcodedSubtitles(clipPath) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return false;
+
+  const framePath = clipPath.replace('.mp4', '_sub_check.jpg');
+  try {
+    // Extract a frame from 3s in — early enough to catch subtitle style
+    await execAsync(`ffmpeg -ss 3 -i "${clipPath}" -frames:v 1 -q:v 2 -y "${framePath}"`, { timeout: 15000 });
+    if (!existsSync(framePath)) return false;
+
+    const base64 = readFileSync(framePath).toString('base64');
+
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { inline_data: { mime_type: 'image/jpeg', data: base64 } },
+              {
+                text: 'Does this video frame contain burned-in or hardcoded subtitle text? ' +
+                  'Look for text overlaid at the bottom of the frame (not title cards, logos, or UI). ' +
+                  'Respond with JSON only: {"has_subtitles": true|false, "confidence": "high|medium|low"}'
+              },
+            ]
+          }],
+          generationConfig: { responseMimeType: 'application/json', temperature: 0 },
+        }),
+      }
+    );
+
+    if (!res.ok) return false;
+    const data = await res.json();
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) return false;
+    const result = JSON.parse(text);
+    const detected = result.has_subtitles === true;
+    console.log(`[youtube] subtitle detection: ${detected} (confidence: ${result.confidence ?? 'unknown'})`);
+    return detected;
+  } catch (err) {
+    console.warn('[youtube] subtitle detection failed — assuming no subtitles:', err.message);
+    return false;
+  } finally {
+    if (existsSync(framePath)) unlinkSync(framePath);
+  }
+}
+
+// Clips ≤ this duration (seconds) are treated as short-form reels.
+// Clips above are long-form YouTube highlights — no editing, no captions.
+const SHORT_FORM_MAX_SEC = 180;
+
+/**
  * Convert seconds to ASS timestamp format (H:MM:SS.cs — centiseconds).
  */
 function secondsToAssTime(s) {
@@ -778,6 +855,10 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
 
       const extractedClips = [];
 
+      // Detect burned-in subtitles once using the first successfully downloaded clip.
+      // YouTube source videos are consistent: if one clip has burned-in subs, all do.
+      let hasBurnedSubtitles = null; // null = not yet checked
+
       for (let i = 0; i < clips.length; i++) {
         const clip = clips[i];
         const clipPath = join(tmpDir, `clip_${i}.mp4`);
@@ -790,8 +871,24 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
             continue;
           }
 
-          // Upload landscape clip to Supabase Storage — no portrait conversion.
-          // Submagic handles captions via the classified → washed → rendering pipeline.
+          // ── Duration-based routing ─────────────────────────────────────
+          // Short form (≤ 3 min): full editing pipeline — hook, silence removal, captions if needed
+          // Long form (> 3 min): clip only, no editing, no captions, deliver as-is
+          const durationSec = await probeClipDurationSec(clipPath);
+          const isLongForm = durationSec > SHORT_FORM_MAX_SEC;
+          const youtubeContentType = isLongForm ? 'long_form' : 'short_form';
+          console.log(`[youtube] clip ${i}: ${durationSec.toFixed(1)}s → ${youtubeContentType}`);
+
+          // ── Subtitle detection (once per extraction job) ───────────────
+          // Only matters for short-form (long-form skips Submagic entirely).
+          if (!isLongForm && hasBurnedSubtitles === null) {
+            console.log('[youtube] checking for burned-in subtitles...');
+            hasBurnedSubtitles = await detectHardcodedSubtitles(clipPath);
+            console.log(`[youtube] burned subtitles: ${hasBurnedSubtitles}`);
+          }
+          const clipHasBurnedSubs = hasBurnedSubtitles === true;
+
+          // ── Upload to Supabase Storage ─────────────────────────────────
           const date = new Date().toISOString().split('T')[0];
           const safeFilename = (clip.title ?? `clip_${i}`).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 60);
           const storagePath = `youtube-clips/${clientId}/${date}/${randomUUID()}_${safeFilename}.mp4`;
@@ -801,17 +898,26 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
           const safeTitle = clip.title?.slice(0, 100) ?? `Clip ${i + 1}`;
           const filename = `${safeTitle}.mp4`;
 
+          // ── Route by content type ──────────────────────────────────────
+          // Long form: skip the render pipeline entirely — deliver the raw clip.
+          // Short form: classify → washed → Submagic (unless subtitles already present).
+          const ingestionStatus = isLongForm ? 'rendered' : 'classified';
+          const assetType = isLongForm ? 'youtube_longform' : 'reel_raw';
+
           await supabaseInsert('ad_ingestion', {
             client_id: clientId,
             uploaded_by: clientId,
             upload_source: 'youtube_clip',
-            asset_type: 'reel_raw',
+            asset_type: assetType,
             format: 'video',
             file_url: clipUrl,
             original_filename: filename,
-            status: 'classified',
+            status: ingestionStatus,
             gemini_markup: {
               source: 'youtube',
+              youtube_content_type: youtubeContentType,
+              has_burned_subtitles: clipHasBurnedSubs,
+              hook_text: clip.hookText ?? null,
               clip_plan_id: clipPlanId,
               youtube_url: youtubeUrl,
               video_title: videoTitle,

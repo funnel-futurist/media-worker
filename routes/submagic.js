@@ -571,10 +571,17 @@ Return valid JSON only:
  *   - When no hookTitle is present, the standard template handles placement.
  *   - True PPX/percentage-based dynamic positioning is a Remotion feature only.
  */
+// Caption template defaults by content type:
+//   Talking head reels → 'Phil April' (custom clean preset, no emoji)
+//   YouTube clips      → 'Sara'       (built-in, smaller/cleaner, works without a custom preset)
+// Callers can override either by passing templateName explicitly.
+const TEMPLATE_TALKING_HEAD = 'Phil April';
+const TEMPLATE_YOUTUBE      = 'Sara';
+
 async function runSubmagicEdit({
   videoUrl,
   language = 'en',
-  templateName = 'Phil April',
+  templateName = null,       // null → auto-pick from TEMPLATE_* constants based on skipHook
   removeSilencePace = 'natural',
   removeBadTakes = true,
   clientBrolls = [],
@@ -626,13 +633,12 @@ async function runSubmagicEdit({
     }
 
     // ── Caption template selection ─────────────────────────────────────────
-    // When a hookTitle text overlay is active, the top region of the frame is
-    // occupied. We use the provided templateName (defaulting to Phil April), which
-    // keeps captions in the lower-center region.
-    // When no hook is displayed (YouTube clips, skipHook=true), we leave the
-    // template as-is since there's no collision risk.
-    // Note: Submagic has no dynamic caption position API — only template-based.
-    const resolvedTemplateName = templateName;
+    // Auto-pick based on content type when no explicit template is given.
+    // YouTube clips use 'Sara' — cleaner, smaller text, built-in (no custom preset required).
+    // Talking head reels use 'Phil April' — custom clean preset without emoji.
+    // Explicit templateName (from client_content_config.submagic_preset_id) always wins.
+    const resolvedTemplateName = templateName ?? (skipHook ? TEMPLATE_YOUTUBE : TEMPLATE_TALKING_HEAD);
+    console.log(`[submagic] template: ${resolvedTemplateName} (${skipHook ? 'youtube' : 'talking-head'})`);
 
     // ── Hook title overlay ────────────────────────────────────────────────
     // hookText is a Gemini-generated, scroll-stopping hook sentence.

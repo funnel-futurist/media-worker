@@ -72,7 +72,7 @@ async function pollProject(projectId, targetStatus, intervalMs = 10000, maxMs = 
  * Body: {
  *   videoUrl: string          — direct-download public URL (MP4/MOV, max 2 GB)
  *   language?: string         — transcription language code (default: "en")
- *   templateName?: string     — caption style preset name (default: "Phil April")
+ *   templateName?: string     — caption style preset name (default: "Hormozi 2")
  *   removeSilencePace?: string — "natural" | "fast" | "extra-fast" (default: "natural")
  *   removeBadTakes?: boolean  — AI removes bad takes (default: true)
  *   clientBrolls?: Array<{ url: string, startTime: number, endTime: number }>
@@ -574,12 +574,13 @@ Return valid JSON only:
 async function runSubmagicEdit({
   videoUrl,
   language = 'en',
-  templateName = 'Phil April',
+  templateName = 'Hormozi 2',
   removeSilencePace = 'natural',
   removeBadTakes = true,
   clientBrolls = [],
   emotionTags = [],
   skipHook = false,
+  skipCaptions = false,     // true = video already has burned-in subtitles — don't add new ones
   forceMagicBrolls = null,  // null = auto (true unless skipHook), false = always off
   captionsPosition = null,  // reserved — Submagic API has no caption position field; ignored for now
   hookText = null,          // Gemini-generated hook sentence — displayed as on-screen text overlay
@@ -627,12 +628,16 @@ async function runSubmagicEdit({
 
     // ── Caption template selection ─────────────────────────────────────────
     // When a hookTitle text overlay is active, the top region of the frame is
-    // occupied. We use the provided templateName (defaulting to Phil April), which
+    // occupied. We use the provided templateName (defaulting to Hormozi 2), which
     // keeps captions in the lower-center region.
     // When no hook is displayed (YouTube clips, skipHook=true), we leave the
     // template as-is since there's no collision risk.
     // Note: Submagic has no dynamic caption position API — only template-based.
-    const resolvedTemplateName = templateName;
+    // When video already has burned-in subtitles, skip adding captions entirely
+    if (skipCaptions) {
+      console.log(`[submagic] skipping captions — video has existing subtitles`);
+    }
+    const resolvedTemplateName = skipCaptions ? null : templateName;
 
     // ── Hook title overlay ────────────────────────────────────────────────
     // hookText is a Gemini-generated, scroll-stopping hook sentence.
@@ -651,7 +656,7 @@ async function runSubmagicEdit({
       title: `pipeline-${Date.now()}`,
       videoUrl,
       language,
-      templateName: resolvedTemplateName,
+      ...(resolvedTemplateName && { templateName: resolvedTemplateName }),
       removeSilencePace,
       removeBadTakes,
       magicBrolls,

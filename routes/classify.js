@@ -158,21 +158,30 @@ async function runClassification({ ingestionId, storageUrl, mimeType, filename, 
       console.log(`[classify] Drive download complete: ${Math.round(buffer.length / 1024 / 1024)}MB`);
 
       // Upload to Supabase Storage so ad_ingestion.file_url becomes a stable URL
+      // Use axios (not fetch) — native fetch silently fails for large buffers (100MB+).
+      // maxBodyLength/maxContentLength: Infinity required for 100-500MB video files.
       const supabaseUrl = process.env.SUPABASE_URL;
       const supabaseKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
       if (supabaseUrl && supabaseKey) {
         const datePrefix = new Date().toISOString().split('T')[0];
         const storagePath = `raw-intake/${clientId}/${datePrefix}/${encodeURIComponent(filename)}`;
-        const uploadRes = await fetch(
-          `${supabaseUrl}/storage/v1/object/video-modules/${storagePath}`,
-          { method: 'POST', headers: { Authorization: `Bearer ${supabaseKey}`, 'Content-Type': mimeType, 'x-upsert': 'true' }, body: buffer }
-        );
-        if (uploadRes.ok) {
+        try {
+          await axios.post(
+            `${supabaseUrl}/storage/v1/object/video-modules/${storagePath}`,
+            buffer,
+            {
+              headers: { Authorization: `Bearer ${supabaseKey}`, 'Content-Type': mimeType, 'x-upsert': 'true' },
+              maxBodyLength: Infinity,
+              maxContentLength: Infinity,
+            }
+          );
           const publicUrl = `${supabaseUrl}/storage/v1/object/public/video-modules/${storagePath}`;
           await supabaseUpdate('ad_ingestion', ingestionId, { file_url: publicUrl });
           console.log(`[classify] uploaded to Supabase Storage: ${storagePath}`);
-        } else {
-          console.warn(`[classify] Supabase Storage upload failed: ${await uploadRes.text()}`);
+        } catch (uploadErr) {
+          const detail = uploadErr.response?.data ? JSON.stringify(uploadErr.response.data) : uploadErr.message;
+          console.error(`[classify] Supabase Storage upload failed: ${detail}`);
+          throw new Error(`Supabase Storage upload failed: ${detail}`);
         }
       }
     } else {

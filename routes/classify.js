@@ -142,14 +142,45 @@ Focus all tokens on accurate classification, quality scores, pipeline routing, b
   return JSON.parse(text);
 }
 
-async function runClassification({ ingestionId, storageUrl, mimeType, filename, clientId, prompt, slackChannel, clientName }) {
+async function runClassification({ ingestionId, storageUrl, mimeType, filename, clientId, prompt, slackChannel, clientName, driveFileId, driveToken }) {
   try {
     console.log(`[classify] starting: ${ingestionId} (${filename})`);
 
-    // 1. Download from Supabase Storage
-    const { data: fileData } = await axios.get(storageUrl, { responseType: 'arraybuffer' });
-    const buffer = Buffer.from(fileData);
-    console.log(`[classify] downloaded ${Math.round(buffer.length / 1024 / 1024)}MB`);
+    let buffer;
+    if (driveFileId && driveToken) {
+      // Download directly from Google Drive (avoids Vercel serverless memory limits)
+      console.log(`[classify] downloading from Drive: ${driveFileId}`);
+      const driveRes = await axios.get(
+        `https://www.googleapis.com/drive/v3/files/${driveFileId}?alt=media`,
+        { responseType: 'arraybuffer', headers: { Authorization: `Bearer ${driveToken}` } }
+      );
+      buffer = Buffer.from(driveRes.data);
+      console.log(`[classify] Drive download complete: ${Math.round(buffer.length / 1024 / 1024)}MB`);
+
+      // Upload to Supabase Storage so ad_ingestion.file_url becomes a stable URL
+      const supabaseUrl = process.env.SUPABASE_URL;
+      const supabaseKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+      if (supabaseUrl && supabaseKey) {
+        const datePrefix = new Date().toISOString().split('T')[0];
+        const storagePath = `raw-intake/${clientId}/${datePrefix}/${encodeURIComponent(filename)}`;
+        const uploadRes = await fetch(
+          `${supabaseUrl}/storage/v1/object/video-modules/${storagePath}`,
+          { method: 'POST', headers: { Authorization: `Bearer ${supabaseKey}`, 'Content-Type': mimeType, 'x-upsert': 'true' }, body: buffer }
+        );
+        if (uploadRes.ok) {
+          const publicUrl = `${supabaseUrl}/storage/v1/object/public/video-modules/${storagePath}`;
+          await supabaseUpdate('ad_ingestion', ingestionId, { file_url: publicUrl });
+          console.log(`[classify] uploaded to Supabase Storage: ${storagePath}`);
+        } else {
+          console.warn(`[classify] Supabase Storage upload failed: ${await uploadRes.text()}`);
+        }
+      }
+    } else {
+      // Download from Supabase Storage (legacy path)
+      const { data: fileData } = await axios.get(storageUrl, { responseType: 'arraybuffer' });
+      buffer = Buffer.from(fileData);
+      console.log(`[classify] downloaded ${Math.round(buffer.length / 1024 / 1024)}MB`);
+    }
 
     // 2. Upload to Gemini Files API
     const fileUri = await uploadToGeminiFiles(buffer, mimeType, filename);
@@ -247,18 +278,18 @@ async function runClassification({ ingestionId, storageUrl, mimeType, filename, 
 // Classification runs in the background on Railway (no timeout).
 classifyRouter.post('/classify-async', async (req, res, next) => {
   try {
-    const { ingestionId, storageUrl, mimeType, filename, clientId, prompt, slackChannel, clientName } = req.body;
+    const { ingestionId, storageUrl, mimeType, filename, clientId, prompt, slackChannel, clientName, driveFileId, driveToken } = req.body;
 
-    if (!ingestionId || !storageUrl || !mimeType || !prompt) {
+    if (!ingestionId || !mimeType || !prompt) {
       return res.status(400).json({
-        error: 'Missing required fields: ingestionId, storageUrl, mimeType, prompt',
+        error: 'Missing required fields: ingestionId, mimeType, prompt',
       });
     }
 
     // ACK immediately — Railway classifies in the background
     res.json({ started: true, ingestionId });
 
-    runClassification({ ingestionId, storageUrl, mimeType, filename, clientId, prompt, slackChannel, clientName })
+    runClassification({ ingestionId, storageUrl, mimeType, filename, clientId, prompt, slackChannel, clientName, driveFileId, driveToken })
       .catch(err => console.error('[classify-async] unhandled:', err.message));
 
   } catch (err) {

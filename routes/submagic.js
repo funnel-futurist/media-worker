@@ -641,15 +641,17 @@ async function runSubmagicEdit({
     console.log(`[submagic] template: ${resolvedTemplateName} (${skipHook ? 'youtube' : 'talking-head'})`);
 
     // ── Hook title overlay ────────────────────────────────────────────────
-    // hookText is a Gemini-generated, scroll-stopping hook sentence.
-    // NOTE: hookTitle is currently disabled — Submagic returns 400 for any
-    // hookTitle payload (both 'steph' template and position-only variants).
-    // Root cause unknown without Submagic API docs; disabling unblocks renders.
-    // Re-enable once correct hookTitle schema is confirmed with Submagic support.
-    const hookTitlePayload = {};
+    // hookText is a Gemini-generated hook sentence displayed as an animated opening caption.
+    // API schema: { text (max 100 chars), template? (default: 'tiktok'), top?: 0-80, size?: 0-80 }
+    // Previously used 'steph' custom preset (deleted) and 'position: top' (wrong field name) — both 400'd.
+    // Correct field is 'top' (number), template defaults to 'tiktok' (built-in, no custom preset needed).
+    // Pass hookTitle: true to let Submagic AI generate the text instead of using our Gemini text.
+    const hookTitlePayload = (hookText && !skipHook)
+      ? { hookTitle: { text: hookText.trim().slice(0, 100) } }
+      : {};
 
     if (hookText && !skipHook) {
-      console.log(`[submagic] hook title: "${hookText.trim()}"`);
+      console.log(`[submagic] hook title: "${hookText.trim().slice(0, 100)}"`);
     }
 
     const projectBody = {

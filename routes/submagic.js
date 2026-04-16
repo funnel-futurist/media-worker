@@ -645,8 +645,10 @@ async function runSubmagicEdit({
     // Only applied for talking-head reels (not YouTube clips via skipHook).
     // Position 'top' places it above the speaker's head.
     // Requires actual text — we never send hookTitle without a text field.
+    // NOTE: 'steph' template was removed from Submagic account (caused 400).
+    // Omitting template lets Submagic use its account default hookTitle style.
     const hookTitlePayload = (!skipHook && hookText && hookText.trim())
-      ? { hookTitle: { text: hookText.trim(), template: 'steph', position: 'top' } }
+      ? { hookTitle: { text: hookText.trim(), position: 'top' } }
       : {};
 
     if (hookText && !skipHook) {

@@ -622,7 +622,7 @@ async function runSubmagicEdit({
     }));
 
     // Stock b-roll enabled for all non-YouTube clips — full-screen, not split-screen.
-    // Split-screen was caused by hookTitle: { template: 'steph' }, not magicBrolls.
+    // Split-screen was caused by hookTitle with a template field, not magicBrolls.
     const magicBrolls = forceMagicBrolls !== null ? forceMagicBrolls : !skipHook;
 
     let music = null;
@@ -645,8 +645,10 @@ async function runSubmagicEdit({
     // Only applied for talking-head reels (not YouTube clips via skipHook).
     // Position 'top' places it above the speaker's head.
     // Requires actual text — we never send hookTitle without a text field.
+    // NOTE: 'steph' template was removed from Submagic account (caused 400).
+    // Omitting template lets Submagic use its account default hookTitle style.
     const hookTitlePayload = (!skipHook && hookText && hookText.trim())
-      ? { hookTitle: { text: hookText.trim(), template: 'steph', position: 'top' } }
+      ? { hookTitle: { text: hookText.trim(), position: 'top' } }
       : {};
 
     if (hookText && !skipHook) {

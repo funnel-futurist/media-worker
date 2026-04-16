@@ -72,7 +72,7 @@ async function pollProject(projectId, targetStatus, intervalMs = 10000, maxMs = 
  * Body: {
  *   videoUrl: string          — direct-download public URL (MP4/MOV, max 2 GB)
  *   language?: string         — transcription language code (default: "en")
- *   templateName?: string     — caption style preset name (default: "Phil April")
+ *   templateName?: string     — caption style preset name (default: "Sara")
  *   removeSilencePace?: string — "natural" | "fast" | "extra-fast" (default: "natural")
  *   removeBadTakes?: boolean  — AI removes bad takes (default: true)
  *   clientBrolls?: Array<{ url: string, startTime: number, endTime: number }>
@@ -572,10 +572,10 @@ Return valid JSON only:
  *   - True PPX/percentage-based dynamic positioning is a Remotion feature only.
  */
 // Caption template defaults by content type:
-//   Talking head reels → 'Phil April' (custom clean preset, no emoji)
-//   YouTube clips      → 'Sara'       (built-in, smaller/cleaner, works without a custom preset)
+//   Talking head reels → 'Sara' (built-in, confirmed working; 'Phil April' custom preset was removed from account)
+//   YouTube clips      → 'Sara' (built-in, smaller/cleaner, works without a custom preset)
 // Callers can override either by passing templateName explicitly.
-const TEMPLATE_TALKING_HEAD = 'Phil April';
+const TEMPLATE_TALKING_HEAD = 'Sara';
 const TEMPLATE_YOUTUBE      = 'Sara';
 
 async function runSubmagicEdit({
@@ -634,8 +634,8 @@ async function runSubmagicEdit({
 
     // ── Caption template selection ─────────────────────────────────────────
     // Auto-pick based on content type when no explicit template is given.
-    // YouTube clips use 'Sara' — cleaner, smaller text, built-in (no custom preset required).
-    // Talking head reels use 'Phil April' — custom clean preset without emoji.
+    // Both types now default to 'Sara' — built-in, confirmed working.
+    // 'Phil April' was a custom preset that was removed from the Submagic account (caused 400).
     // Explicit templateName (from client_content_config.submagic_preset_id) always wins.
     const resolvedTemplateName = templateName ?? (skipHook ? TEMPLATE_YOUTUBE : TEMPLATE_TALKING_HEAD);
     console.log(`[submagic] template: ${resolvedTemplateName} (${skipHook ? 'youtube' : 'talking-head'})`);

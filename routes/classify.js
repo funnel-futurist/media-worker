@@ -164,7 +164,14 @@ async function runClassification({ ingestionId, storageUrl, mimeType, filename, 
       const supabaseKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
       if (supabaseUrl && supabaseKey) {
         const datePrefix = new Date().toISOString().split('T')[0];
-        const storagePath = `raw-intake/${clientId}/${datePrefix}/${encodeURIComponent(filename)}`;
+        // Sanitize filename for Supabase Storage — replace em-dashes, smart quotes,
+        // and other non-ASCII characters that cause InvalidKey errors
+        const safeFilename = filename
+          .replace(/[\u2014\u2013]/g, '-')   // em-dash, en-dash → hyphen
+          .replace(/[\u2018\u2019\u201C\u201D]/g, "'")  // smart quotes → straight
+          .replace(/[^\x20-\x7E]/g, '_')     // any remaining non-ASCII → underscore
+          .replace(/\s+/g, '_');              // spaces → underscores
+        const storagePath = `raw-intake/${clientId}/${datePrefix}/${safeFilename}`;
         try {
           await axios.post(
             `${supabaseUrl}/storage/v1/object/video-modules/${storagePath}`,

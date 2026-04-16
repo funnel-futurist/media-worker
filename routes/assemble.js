@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { writeFileSync, mkdirSync, rmSync, existsSync } from 'fs';
+import { writeFileSync, readFileSync, mkdirSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import axios from 'axios';
@@ -9,6 +9,33 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 
 const execAsync = promisify(exec);
+
+/**
+ * Upload trimmed video to Supabase Storage instead of Cloudinary.
+ * Returns a public URL. Used by wash step to avoid Cloudinary corruption.
+ */
+async function uploadToSupabase(filePath, clientId) {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !supabaseKey) throw new Error('Supabase env vars not set for storage upload');
+
+  const datePrefix = new Date().toISOString().split('T')[0];
+  const filename = `washed_${randomUUID()}.mp4`;
+  const storagePath = `washed/${clientId || 'unknown'}/${datePrefix}/${filename}`;
+  const buffer = readFileSync(filePath);
+
+  const res = await axios.post(
+    `${supabaseUrl}/storage/v1/object/video-modules/${storagePath}`,
+    buffer,
+    {
+      headers: { Authorization: `Bearer ${supabaseKey}`, 'Content-Type': 'video/mp4', 'x-upsert': 'true' },
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+    }
+  );
+
+  return `${supabaseUrl}/storage/v1/object/public/video-modules/${storagePath}`;
+}
 
 export const assembleRouter = Router();
 
@@ -28,7 +55,7 @@ export const assembleRouter = Router();
 assembleRouter.post('/video-assembly', async (req, res, next) => {
   const tmpDir = join('/tmp', `asm-${randomUUID()}`);
   try {
-    const { clips = [], outputFormat = 'mp4' } = req.body;
+    const { clips = [], outputFormat = 'mp4', uploadTo = 'cloudinary', clientId = null } = req.body;
     if (!clips.length) return res.status(400).json({ error: 'clips array is required' });
 
     mkdirSync(tmpDir, { recursive: true });
@@ -116,9 +143,15 @@ assembleRouter.post('/video-assembly', async (req, res, next) => {
       throw new Error(`ffmpeg concat produced no output file`);
     }
     const duration = await getDuration(outputPath);
-    const folder = outputFormat === 'mp3' ? 'audit-voiceovers/assembled' : 'audit-videos/assembled';
-    const upload = outputFormat === 'mp3' ? uploadAudio : uploadVideo;
-    const { url: videoUrl } = await upload(outputPath, folder);
+    let videoUrl;
+    if (uploadTo === 'supabase' && outputFormat === 'mp4') {
+      videoUrl = await uploadToSupabase(outputPath, clientId);
+    } else {
+      const folder = outputFormat === 'mp3' ? 'audit-voiceovers/assembled' : 'audit-videos/assembled';
+      const upload = outputFormat === 'mp3' ? uploadAudio : uploadVideo;
+      const result = await upload(outputPath, folder);
+      videoUrl = result.url;
+    }
 
     res.json({ videoUrl, duration, clipCount: clips.length });
   } catch (err) {

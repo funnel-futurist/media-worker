@@ -642,14 +642,11 @@ async function runSubmagicEdit({
 
     // ── Hook title overlay ────────────────────────────────────────────────
     // hookText is a Gemini-generated, scroll-stopping hook sentence.
-    // Only applied for talking-head reels (not YouTube clips via skipHook).
-    // Position 'top' places it above the speaker's head.
-    // Requires actual text — we never send hookTitle without a text field.
-    // NOTE: 'steph' template was removed from Submagic account (caused 400).
-    // Omitting template lets Submagic use its account default hookTitle style.
-    const hookTitlePayload = (!skipHook && hookText && hookText.trim())
-      ? { hookTitle: { text: hookText.trim(), position: 'top' } }
-      : {};
+    // NOTE: hookTitle is currently disabled — Submagic returns 400 for any
+    // hookTitle payload (both 'steph' template and position-only variants).
+    // Root cause unknown without Submagic API docs; disabling unblocks renders.
+    // Re-enable once correct hookTitle schema is confirmed with Submagic support.
+    const hookTitlePayload = {};
 
     if (hookText && !skipHook) {
       console.log(`[submagic] hook title: "${hookText.trim()}"`);

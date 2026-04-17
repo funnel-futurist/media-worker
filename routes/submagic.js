@@ -575,8 +575,8 @@ Return valid JSON only:
 //   Talking head reels → 'Sara' (built-in, confirmed working; 'Phil April' custom preset was removed from account)
 //   YouTube clips      → 'Sara' (built-in, smaller/cleaner, works without a custom preset)
 // Callers can override either by passing templateName explicitly.
-const TEMPLATE_TALKING_HEAD = 'Jack';
-const TEMPLATE_YOUTUBE      = 'Jack';
+const TEMPLATE_TALKING_HEAD = 'Sara';
+const TEMPLATE_YOUTUBE      = 'Sara';
 
 async function runSubmagicEdit({
   videoUrl,
@@ -644,11 +644,11 @@ async function runSubmagicEdit({
     // ── Hook title overlay ────────────────────────────────────────────────
     // hookText is a Gemini-generated hook sentence displayed as an animated opening caption.
     // API schema: { text (max 100 chars), template? (default: 'tiktok'), top?: 0-80, size?: 0-80 }
+    // Valid hookTitle templates: tiktok, laura, steph, kevin, kelly, mark, logan, enrico, mike, devin, hormozi, masi, ali
+    // 'subtitle' is NOT a valid template — causes 400. 'hormozi' = white text + shadow, no colored background.
     // Previously used 'steph' custom preset (deleted) and 'position: top' (wrong field name) — both 400'd.
-    // Correct field is 'top' (number), template defaults to 'tiktok' (built-in, no custom preset needed).
-    // Pass hookTitle: true to let Submagic AI generate the text instead of using our Gemini text.
     const hookTitlePayload = (hookText && !skipHook)
-      ? { hookTitle: { text: hookText.trim().slice(0, 100), top: 5, template: 'subtitle' } }
+      ? { hookTitle: { text: hookText.trim().slice(0, 100), top: 5, template: 'hormozi' } }
       : {};
 
     if (hookText && !skipHook) {

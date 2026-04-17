@@ -648,7 +648,7 @@ async function runSubmagicEdit({
     // Correct field is 'top' (number), template defaults to 'tiktok' (built-in, no custom preset needed).
     // Pass hookTitle: true to let Submagic AI generate the text instead of using our Gemini text.
     const hookTitlePayload = (hookText && !skipHook)
-      ? { hookTitle: { text: hookText.trim().slice(0, 100), top: 5 } }
+      ? { hookTitle: { text: hookText.trim().slice(0, 100), top: 5, template: 'subtitle' } }
       : {};
 
     if (hookText && !skipHook) {

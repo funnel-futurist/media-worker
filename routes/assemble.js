@@ -70,25 +70,41 @@ assembleRouter.post('/video-assembly', async (req, res, next) => {
       const clip = clips[i];
 
       // Download + normalise to H.264 once per unique URL.
-      // iPhone/Mac recordings are HEVC (H.265) — decoding them N times concurrently
-      // exhausts Railway's container RAM. One transcode pass up-front lets every
-      // subsequent trim use -c copy (stream copy, no decode).
+      // HEVC (H.265) from iPhone/Mac must be transcoded — Submagic rejects it and Railway
+      // OOMs if we decode it N times. H.264 can be stream-copied directly (no re-encode).
+      // Probe codec from the saved file; if already H.264 skip the expensive transcode.
       if (!urlToPath.has(clip.url)) {
         const rawPath = join(tmpDir, `raw_${urlToPath.size}.${ext}`);
         const response = await axios.get(clip.url, { responseType: 'arraybuffer' });
         writeFileSync(rawPath, Buffer.from(response.data));
 
         if (outputFormat !== 'mp3') {
-          // Normalise to H.264 at a fixed 1500 kbps so the washed video stays small
-          // (under ~25 MB for a 2-min clip) regardless of the source codec or bitrate.
-          // ultrafast+CRF produced files 10-20x too large for high-bitrate HEVC input.
-          const normPath = join(tmpDir, `src_${urlToPath.size}.mp4`);
-          await execAsync(
-            `ffmpeg -i "${rawPath}" -c:v libx264 -preset veryfast -b:v 1500k -c:a aac -b:a 128k -movflags +faststart -y "${normPath}"`,
-            { timeout: 300000 }
-          );
-          rmSync(rawPath, { force: true });
-          urlToPath.set(clip.url, normPath);
+          // Probe codec — only re-encode if HEVC. H.264 passes through as-is.
+          // This avoids the full-file transcode OOM that corrupted wash for large H.264 files.
+          let srcCodec = 'unknown';
+          try {
+            const { stdout: codecOut } = await execAsync(
+              `ffprobe -v quiet -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "${rawPath}"`,
+              { timeout: 30000 }
+            );
+            srcCodec = codecOut.trim().toLowerCase();
+          } catch { /* probe failed — treat as H.264, skip transcode */ }
+
+          console.log(`[assemble] codec detected: ${srcCodec}`);
+
+          if (srcCodec === 'hevc' || srcCodec === 'h265') {
+            // Normalise HEVC to H.264 at a fixed 1500 kbps so the washed video stays small.
+            const normPath = join(tmpDir, `src_${urlToPath.size}.mp4`);
+            await execAsync(
+              `ffmpeg -i "${rawPath}" -c:v libx264 -preset veryfast -b:v 1500k -c:a aac -b:a 128k -movflags +faststart -y "${normPath}"`,
+              { timeout: 300000 }
+            );
+            rmSync(rawPath, { force: true });
+            urlToPath.set(clip.url, normPath);
+          } else {
+            // Already H.264 (or unknown) — use raw file; stream-copy trim will be fast.
+            urlToPath.set(clip.url, rawPath);
+          }
         } else {
           urlToPath.set(clip.url, rawPath);
         }

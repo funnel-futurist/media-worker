@@ -621,9 +621,10 @@ async function runSubmagicEdit({
       };
     }));
 
-    // Stock b-roll enabled for all non-YouTube clips — full-screen, not split-screen.
-    // Split-screen was caused by hookTitle with a template field, not magicBrolls.
-    const magicBrolls = forceMagicBrolls !== null ? forceMagicBrolls : !skipHook;
+    // Stock b-roll disabled by default — Submagic's AI picks contextually irrelevant footage
+    // (random screen recordings, unrelated visuals). Client b-roll is handled via items[].
+    // forceMagicBrolls can still override this explicitly (e.g. for future opt-in).
+    const magicBrolls = forceMagicBrolls !== null ? forceMagicBrolls : false;
 
     let music = null;
     if (!skipHook) {
@@ -647,7 +648,7 @@ async function runSubmagicEdit({
     // Correct field is 'top' (number), template defaults to 'tiktok' (built-in, no custom preset needed).
     // Pass hookTitle: true to let Submagic AI generate the text instead of using our Gemini text.
     const hookTitlePayload = (hookText && !skipHook)
-      ? { hookTitle: { text: hookText.trim().slice(0, 100) } }
+      ? { hookTitle: { text: hookText.trim().slice(0, 100), top: 5 } }
       : {};
 
     if (hookText && !skipHook) {

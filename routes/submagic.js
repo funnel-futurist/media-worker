@@ -575,8 +575,8 @@ Return valid JSON only:
 //   Talking head reels → 'Sara' (built-in, confirmed working; 'Phil April' custom preset was removed from account)
 //   YouTube clips      → 'Sara' (built-in, smaller/cleaner, works without a custom preset)
 // Callers can override either by passing templateName explicitly.
-const TEMPLATE_TALKING_HEAD = 'Sara';
-const TEMPLATE_YOUTUBE      = 'Sara';
+const TEMPLATE_TALKING_HEAD = 'Jack';
+const TEMPLATE_YOUTUBE      = 'Jack';
 
 async function runSubmagicEdit({
   videoUrl,

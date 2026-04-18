@@ -244,7 +244,7 @@ submagicRouter.post('/submagic-edit-async', async (req, res) => {
       console.error(`[submagic-async] failed for ${ingestionId}:`, message, responseBody ? `| Submagic response: ${responseBody}` : '');
 
       await supabasePatch('ad_ingestion', ingestionId, {
-        status: 'classified',
+        status: 'washed',
         last_error: message,
       }).catch(e => console.error('[submagic-async] failed to revert status:', e));
 

@@ -1,5 +1,12 @@
 import { Router } from 'express';
 import axios from 'axios';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import { writeFileSync, readFileSync, unlinkSync, existsSync } from 'fs';
+import { join } from 'path';
+import { randomUUID } from 'crypto';
+
+const execAsync = promisify(exec);
 
 export const classifyRouter = Router();
 
@@ -201,15 +208,36 @@ async function runClassification({ ingestionId, storageUrl, mimeType, filename, 
       console.log(`[classify] downloaded ${Math.round(buffer.length / 1024 / 1024)}MB`);
     }
 
-    // 2. Upload to Gemini Files API
-    const fileUri = await uploadToGeminiFiles(buffer, mimeType, filename);
+    // 2. Trim to 3 min for Gemini — full 150-200MB videos cause Gemini init failures
+    //    (rate limit / payload size). Classification only needs a representative sample.
+    //    broll_cues up to 180s are still accurate; hook/emotion/quality unaffected.
+    const CLASSIFY_MAX_SECONDS = 180;
+    const rawPath = join('/tmp', `${randomUUID()}_classify_raw.mp4`);
+    const trimPath = join('/tmp', `${randomUUID()}_classify_trim.mp4`);
+    let geminiBuffer = buffer;
+    try {
+      writeFileSync(rawPath, buffer);
+      await execAsync(`ffmpeg -i "${rawPath}" -t ${CLASSIFY_MAX_SECONDS} -c copy -y "${trimPath}"`, { timeout: 60000 });
+      if (existsSync(trimPath)) {
+        geminiBuffer = readFileSync(trimPath);
+        console.log(`[classify] trimmed to ${CLASSIFY_MAX_SECONDS}s for Gemini: ${Math.round(geminiBuffer.length / 1024 / 1024)}MB`);
+      }
+    } catch (trimErr) {
+      console.warn(`[classify] ffmpeg trim failed, using full buffer: ${trimErr.message}`);
+    } finally {
+      if (existsSync(rawPath)) unlinkSync(rawPath);
+      if (existsSync(trimPath)) unlinkSync(trimPath);
+    }
+
+    // 3. Upload to Gemini Files API
+    const fileUri = await uploadToGeminiFiles(geminiBuffer, mimeType, filename);
     console.log(`[classify] Gemini file ready: ${fileUri}`);
 
-    // 3. Call Gemini
+    // 4. Call Gemini
     const result = await callGemini(fileUri, mimeType, prompt);
     console.log(`[classify] classified: ${result.classification?.asset_type} (${result.classification?.confidence})`);
 
-    // 4. Update ad_ingestion
+    // 5. Update ad_ingestion
     await supabaseUpdate('ad_ingestion', ingestionId, {
       asset_type: result.classification.asset_type,
       gemini_classification: { ...result.classification, performance_analysis: result.performance_analysis ?? null },
@@ -224,7 +252,7 @@ async function runClassification({ ingestionId, storageUrl, mimeType, filename, 
       last_error: null,
     });
 
-    // 5. Log classification_complete event
+    // 6. Log classification_complete event
     await supabaseInsert('content_pipeline_events', {
       client_id: clientId,
       event_type: 'classification_complete',
@@ -240,7 +268,7 @@ async function runClassification({ ingestionId, storageUrl, mimeType, filename, 
       },
     });
 
-    // 6. Slack notification — classification always goes to internal ops channel only
+    // 7. Slack notification — classification always goes to internal ops channel only
     const channel = process.env.SLACK_CHANNEL_OPS || slackChannel;
     const slackToken = process.env.SLACK_BOT_TOKEN;
     if (channel && slackToken) {

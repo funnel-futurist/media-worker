@@ -267,16 +267,33 @@ async function ensureCloudinaryUrl(videoUrl) {
 
   const tmpId = randomUUID();
   const inputPath = join('/tmp', `${tmpId}_supabase_relay.mp4`);
+  const normalizedPath = join('/tmp', `${tmpId}_normalized.mp4`);
 
   try {
     console.log('[submagic] Supabase URL detected — relaying through Cloudinary for Submagic access');
     const { data } = await axios.get(videoUrl, { responseType: 'arraybuffer', timeout: 120000 });
     writeFileSync(inputPath, Buffer.from(data));
-    const { url } = await uploadVideo(inputPath, 'submagic-intake');
+
+    // Normalize speaker audio to EBU R128 standard (-16 LUFS integrated loudness).
+    // Ensures consistent, clear speaker volume regardless of recording conditions.
+    // Falls back to original file if ffmpeg fails — never blocks delivery.
+    try {
+      await execAsync(
+        `ffmpeg -i "${inputPath}" -af "loudnorm=I=-16:TP=-1.5:LRA=11" -c:v copy -c:a aac -b:a 192k -y "${normalizedPath}"`,
+        { timeout: 120000 }
+      );
+      console.log('[submagic] audio normalized (EBU R128 loudnorm)');
+    } catch (normErr) {
+      console.warn(`[submagic] audio normalization failed, using original: ${normErr.message}`);
+    }
+
+    const processedPath = existsSync(normalizedPath) ? normalizedPath : inputPath;
+    const { url } = await uploadVideo(processedPath, 'submagic-intake');
     console.log(`[submagic] Cloudinary relay URL: ${url}`);
     return url;
   } finally {
     if (existsSync(inputPath)) unlinkSync(inputPath);
+    if (existsSync(normalizedPath)) unlinkSync(normalizedPath);
   }
 }
 
@@ -605,15 +622,16 @@ const TEMPLATE_YOUTUBE      = 'Jack';
 async function runSubmagicEdit({
   videoUrl,
   language = 'en',
-  templateName = null,       // null → auto-pick from TEMPLATE_* constants based on skipHook
+  templateName = null,          // null → auto-pick from TEMPLATE_* constants based on skipHook
   removeSilencePace = 'natural',
   removeBadTakes = true,
   clientBrolls = [],
   emotionTags = [],
   skipHook = false,
-  forceMagicBrolls = null,  // null = auto (true unless skipHook), false = always off
-  captionsPosition = null,  // reserved — Submagic API has no caption position field; ignored for now
-  hookText = null,          // Gemini-generated hook sentence — displayed as on-screen text overlay
+  forceMagicBrolls = null,      // null = auto (true by default), false = always off (used on QC retry)
+  magicBrollsPercentage = 35,   // % of video to fill with Submagic stock b-roll when magicBrolls=true
+  captionsPosition = null,      // reserved — Submagic API has no caption position field; ignored for now
+  hookText = null,              // Gemini-generated hook sentence — displayed as on-screen text overlay
 }) {
     // ── Step 0a: Relay Supabase URLs through Cloudinary ──────────────────
     // Submagic's ingest pipeline cannot reach Supabase Storage URLs — the project
@@ -651,10 +669,10 @@ async function runSubmagicEdit({
       };
     }));
 
-    // Stock b-roll disabled by default — Submagic's AI picks contextually irrelevant footage
-    // (random screen recordings, unrelated visuals). Client b-roll is handled via items[].
-    // forceMagicBrolls can still override this explicitly (e.g. for future opt-in).
-    const magicBrolls = forceMagicBrolls !== null ? forceMagicBrolls : false;
+    // Stock b-roll enabled by default — combines Submagic's library with client b-rolls (items[])
+    // for a more cohesive visual flow. forceMagicBrolls=false disables it (used on QC retry
+    // when b-roll was flagged as the issue). magicBrollsPercentage caps coverage to avoid overuse.
+    const magicBrolls = forceMagicBrolls !== null ? forceMagicBrolls : true;
 
     let music = null;
     if (!skipHook) {
@@ -693,6 +711,7 @@ async function runSubmagicEdit({
       removeSilencePace,
       removeBadTakes,
       magicBrolls,
+      ...(magicBrolls && { magicBrollsPercentage }),
       cleanAudio: true,
       // NOTE: Submagic API has no top-level caption position field.
       // Caption placement is controlled by templateName only.

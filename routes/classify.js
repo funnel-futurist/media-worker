@@ -123,7 +123,7 @@ CRITICAL OUTPUT CONSTRAINT (token limit):
 - silence_map → EMPTY ARRAY []
 - bad_take_flags → EMPTY ARRAY []
 - timestamps → EMPTY ARRAY []
-- broll_cues → REQUIRED: pick 3-5 natural moments where a cutaway would work. Format EXACTLY: [{"time_seconds": 5, "duration_seconds": 4}] — integer seconds only, no other fields
+- broll_cues → REQUIRED: pick 3-5 natural moments where a cutaway would work. Format EXACTLY: [{"time_seconds": 5, "duration_seconds": 4, "cue": "one-line visual description grounded in what the speaker is saying at this exact moment — used for b-roll library matching, so be specific (e.g. 'team member at computer', 'speaker pointing at whiteboard', 'close-up of product', not generic labels)"}] — integer seconds only
 - transcript → ONE sentence only (max 30 words)
 - emotion_tags → REQUIRED: 1-2 tags based on delivery tone
 

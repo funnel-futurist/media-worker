@@ -65,7 +65,10 @@ async function uploadToGeminiFiles(buffer, mimeType, displayName) {
   });
 
   const uploadUrl = initRes.headers.get('X-Goog-Upload-URL');
-  if (!uploadUrl) throw new Error('Failed to get Gemini upload URL');
+  if (!uploadUrl) {
+    const body = await initRes.text().catch(() => '(unreadable)');
+    throw new Error(`Failed to get Gemini upload URL (HTTP ${initRes.status}): ${body.slice(0, 300)}`);
+  }
 
   const uploadRes = await fetch(uploadUrl, {
     method: 'PUT',

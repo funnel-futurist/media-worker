@@ -257,6 +257,30 @@ submagicRouter.post('/submagic-edit-async', async (req, res) => {
 });
 
 /**
+ * If the URL is a Supabase Storage URL, download it from Railway and re-upload to
+ * Cloudinary so Submagic's ingest pipeline can reach it.
+ * Supabase Storage public URLs are not reliably accessible from Submagic's servers
+ * (Submagic's project stays stuck in "processing" forever when given one).
+ */
+async function ensureCloudinaryUrl(videoUrl) {
+  if (!videoUrl.includes('/storage/v1/object/')) return videoUrl;
+
+  const tmpId = randomUUID();
+  const inputPath = join('/tmp', `${tmpId}_supabase_relay.mp4`);
+
+  try {
+    console.log('[submagic] Supabase URL detected — relaying through Cloudinary for Submagic access');
+    const { data } = await axios.get(videoUrl, { responseType: 'arraybuffer', timeout: 120000 });
+    writeFileSync(inputPath, Buffer.from(data));
+    const { url } = await uploadVideo(inputPath, 'submagic-intake');
+    console.log(`[submagic] Cloudinary relay URL: ${url}`);
+    return url;
+  } finally {
+    if (existsSync(inputPath)) unlinkSync(inputPath);
+  }
+}
+
+/**
  * If the video is H.265/HEVC, transcode to H.264 and upload to Cloudinary.
  * Submagic's ingest pipeline rejects H.265 with "Virus scan failed".
  * Returns the original URL if already H.264, or a new Cloudinary URL if transcoded.
@@ -591,7 +615,13 @@ async function runSubmagicEdit({
   captionsPosition = null,  // reserved — Submagic API has no caption position field; ignored for now
   hookText = null,          // Gemini-generated hook sentence — displayed as on-screen text overlay
 }) {
-    // ── Step 0: Ensure H.264 — Submagic rejects H.265 with "Virus scan failed" ──
+    // ── Step 0a: Relay Supabase URLs through Cloudinary ──────────────────
+    // Submagic's ingest pipeline cannot reach Supabase Storage URLs — the project
+    // gets created but stays stuck in "processing" until timeout. Download from
+    // Supabase on Railway (which CAN reach it) and re-upload to Cloudinary first.
+    videoUrl = await ensureCloudinaryUrl(videoUrl);
+
+    // ── Step 0b: Ensure H.264 — Submagic rejects H.265 with "Virus scan failed" ──
     videoUrl = await ensureH264(videoUrl);
 
     // ── Step 1: Register client b-roll clips in parallel ─────────────────

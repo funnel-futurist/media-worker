@@ -598,11 +598,12 @@ async function runEditQc(videoUrl, ingestionId) {
 
     const prompt = `You are doing quality control on an AI-edited social media short-form video before it is sent to a client for review.
 
-Analyze this video across 4 criteria:
+Analyze this video across 5 criteria:
 1. CAPTIONS — Readable? Well-positioned? Not covering the speaker's face? Timing feels natural?
-2. B-ROLL — Does the b-roll make contextual sense for what the speaker is saying, or is it random/jarring/irrelevant?
-3. EDIT QUALITY — Are cuts smooth? Does the pacing feel natural? No abrupt jumps or dead air?
-4. CLIENT-READY — Is this polished enough to present to a paying client as a finished product?
+2. HOOK TITLE — If there is a text overlay at the top of the screen in the first few seconds: Is it readable? Good contrast against the background? Not overlapping the speaker's face? Large enough to read on a phone screen? Visible long enough to actually read? If there is no hook title overlay, mark this as pass.
+3. B-ROLL — Does the b-roll make contextual sense for what the speaker is saying, or is it random/jarring/irrelevant?
+4. EDIT QUALITY — Are cuts smooth? Does the pacing feel natural? No abrupt jumps or dead air?
+5. CLIENT-READY — Is this polished enough to present to a paying client as a finished product?
 
 Be strict but fair. Minor imperfections are fine. Fail only if there is a clear problem that would embarrass the team or confuse the client.
 

@@ -452,7 +452,7 @@ async function postToSlackOps(text) {
 }
 
 async function uploadToGeminiFiles(buffer, mimeType, displayName) {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  const apiKey = process.env.GEMINI_API_KEY?.replace(/\\n/g, '').trim();
   if (!apiKey) throw new Error('GEMINI_API_KEY not set');
 
   const initRes = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${apiKey}`, {
@@ -507,7 +507,7 @@ async function uploadToGeminiFiles(buffer, mimeType, displayName) {
  * Defaults to pass=true on error so Gemini failures never block delivery.
  */
 async function runEditQc(videoUrl, ingestionId) {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  const apiKey = process.env.GEMINI_API_KEY?.replace(/\\n/g, '').trim();
   if (!apiKey) {
     console.warn('[submagic-qc] GEMINI_API_KEY not set, skipping QC');
     return { pass: true, issues: [], note: 'QC skipped (no API key)' };

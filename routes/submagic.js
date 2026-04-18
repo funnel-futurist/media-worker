@@ -257,26 +257,89 @@ submagicRouter.post('/submagic-edit-async', async (req, res) => {
 });
 
 /**
- * If the URL is a Supabase Storage URL, download it from Railway and re-upload to
- * Cloudinary so Submagic's ingest pipeline can reach it.
- * Supabase Storage public URLs are not reliably accessible from Submagic's servers
- * (Submagic's project stays stuck in "processing" forever when given one).
+ * Download a video from any URL, apply EBU R128 audio normalization (-16 LUFS),
+ * upload to Supabase Storage, and return a 24-hour signed URL that Submagic can access.
+ *
+ * Runs for EVERY video regardless of source (Supabase, Drive CDN, Cloudinary, etc.)
+ * so normalization is never skipped due to URL type.
+ *
+ * Falls back to the original URL if any step fails — never blocks delivery.
  */
-async function ensureCloudinaryUrl(videoUrl) {
-  if (!videoUrl.includes('/storage/v1/object/')) return videoUrl;
-
+async function prepareForSubmagic(videoUrl) {
   const tmpId = randomUUID();
-  const inputPath = join('/tmp', `${tmpId}_supabase_relay.mp4`);
+  const inputPath = join('/tmp', `${tmpId}_prep_in.mp4`);
+  const normalizedPath = join('/tmp', `${tmpId}_prep_norm.mp4`);
+
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !supabaseKey) {
+    console.warn('[submagic] prepareForSubmagic: Supabase env vars missing — skipping');
+    return videoUrl;
+  }
 
   try {
-    console.log('[submagic] Supabase URL detected — relaying through Cloudinary for Submagic access');
-    const { data } = await axios.get(videoUrl, { responseType: 'arraybuffer', timeout: 120000 });
+    console.log('[submagic] prepareForSubmagic: downloading for normalization + relay');
+    const { data } = await axios.get(videoUrl, {
+      responseType: 'arraybuffer',
+      timeout: 180000,
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+    });
     writeFileSync(inputPath, Buffer.from(data));
-    const { url } = await uploadVideo(inputPath, 'submagic-intake');
-    console.log(`[submagic] Cloudinary relay URL: ${url}`);
-    return url;
+
+    // Normalize speaker audio to EBU R128 standard (-16 LUFS integrated loudness).
+    // Falls back to original file if ffmpeg fails — never blocks delivery.
+    try {
+      await execAsync(
+        `ffmpeg -i "${inputPath}" -af "loudnorm=I=-16:TP=-1.5:LRA=11" -c:v copy -c:a aac -b:a 192k -y "${normalizedPath}"`,
+        { timeout: 120000 }
+      );
+      console.log('[submagic] audio normalized (EBU R128 loudnorm -16 LUFS)');
+    } catch (normErr) {
+      console.warn(`[submagic] audio normalization failed, using original: ${normErr.message}`);
+    }
+
+    const processedPath = existsSync(normalizedPath) ? normalizedPath : inputPath;
+    const fileBuffer = readFileSync(processedPath);
+    const storagePath = `submagic-intake/${tmpId}.mp4`;
+
+    // Upload to Supabase Storage so Submagic can fetch a signed URL
+    await axios.post(
+      `${supabaseUrl}/storage/v1/object/video-modules/${storagePath}`,
+      fileBuffer,
+      {
+        headers: {
+          Authorization: `Bearer ${supabaseKey}`,
+          'Content-Type': 'video/mp4',
+          'x-upsert': 'true',
+        },
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+      }
+    );
+
+    // Create a 24-hour signed URL — publicly accessible, no auth required by Submagic
+    const signRes = await fetch(
+      `${supabaseUrl}/storage/v1/object/sign/video-modules/${storagePath}`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${supabaseKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expiresIn: 86400 }),
+      }
+    );
+    const signData = await signRes.json();
+    const signedUrl = signData.signedURL
+      ? `${supabaseUrl}${signData.signedURL}`
+      : `${supabaseUrl}/storage/v1/object/public/video-modules/${storagePath}`;
+
+    console.log(`[submagic] prepared for Submagic (normalized + signed URL): ${signedUrl}`);
+    return signedUrl;
+  } catch (err) {
+    console.warn(`[submagic] prepareForSubmagic failed, using original URL: ${err.message}`);
+    return videoUrl;
   } finally {
     if (existsSync(inputPath)) unlinkSync(inputPath);
+    if (existsSync(normalizedPath)) unlinkSync(normalizedPath);
   }
 }
 
@@ -535,11 +598,12 @@ async function runEditQc(videoUrl, ingestionId) {
 
     const prompt = `You are doing quality control on an AI-edited social media short-form video before it is sent to a client for review.
 
-Analyze this video across 4 criteria:
+Analyze this video across 5 criteria:
 1. CAPTIONS — Readable? Well-positioned? Not covering the speaker's face? Timing feels natural?
-2. B-ROLL — Does the b-roll make contextual sense for what the speaker is saying, or is it random/jarring/irrelevant?
-3. EDIT QUALITY — Are cuts smooth? Does the pacing feel natural? No abrupt jumps or dead air?
-4. CLIENT-READY — Is this polished enough to present to a paying client as a finished product?
+2. HOOK TITLE — If there is a text overlay at the top of the screen in the first few seconds: Is it readable? Good contrast against the background? Not overlapping the speaker's face? Large enough to read on a phone screen? Visible long enough to actually read? If there is no hook title overlay, mark this as pass.
+3. B-ROLL — Does the b-roll make contextual sense for what the speaker is saying, or is it random/jarring/irrelevant?
+4. EDIT QUALITY — Are cuts smooth? Does the pacing feel natural? No abrupt jumps or dead air?
+5. CLIENT-READY — Is this polished enough to present to a paying client as a finished product?
 
 Be strict but fair. Minor imperfections are fine. Fail only if there is a clear problem that would embarrass the team or confuse the client.
 
@@ -605,21 +669,22 @@ const TEMPLATE_YOUTUBE      = 'Jack';
 async function runSubmagicEdit({
   videoUrl,
   language = 'en',
-  templateName = null,       // null → auto-pick from TEMPLATE_* constants based on skipHook
+  templateName = null,          // null → auto-pick from TEMPLATE_* constants based on skipHook
   removeSilencePace = 'natural',
   removeBadTakes = true,
   clientBrolls = [],
   emotionTags = [],
   skipHook = false,
-  forceMagicBrolls = null,  // null = auto (true unless skipHook), false = always off
-  captionsPosition = null,  // reserved — Submagic API has no caption position field; ignored for now
-  hookText = null,          // Gemini-generated hook sentence — displayed as on-screen text overlay
+  forceMagicBrolls = null,      // null = auto (true by default), false = always off (used on QC retry)
+  magicBrollsPercentage = 35,   // % of video to fill with Submagic stock b-roll when magicBrolls=true
+  captionsPosition = null,      // reserved — Submagic API has no caption position field; ignored for now
+  hookText = null,              // Gemini-generated hook sentence — displayed as on-screen text overlay
 }) {
-    // ── Step 0a: Relay Supabase URLs through Cloudinary ──────────────────
-    // Submagic's ingest pipeline cannot reach Supabase Storage URLs — the project
-    // gets created but stays stuck in "processing" until timeout. Download from
-    // Supabase on Railway (which CAN reach it) and re-upload to Cloudinary first.
-    videoUrl = await ensureCloudinaryUrl(videoUrl);
+    // ── Step 0a: Normalize audio + relay to Supabase signed URL ─────────
+    // Always runs regardless of URL source (Supabase, Drive CDN, etc.).
+    // Applies EBU R128 loudnorm (-16 LUFS) and uploads to Supabase Storage,
+    // returning a 24h signed URL that Submagic can access directly.
+    videoUrl = await prepareForSubmagic(videoUrl);
 
     // ── Step 0b: Ensure H.264 — Submagic rejects H.265 with "Virus scan failed" ──
     videoUrl = await ensureH264(videoUrl);
@@ -651,10 +716,10 @@ async function runSubmagicEdit({
       };
     }));
 
-    // Stock b-roll disabled by default — Submagic's AI picks contextually irrelevant footage
-    // (random screen recordings, unrelated visuals). Client b-roll is handled via items[].
-    // forceMagicBrolls can still override this explicitly (e.g. for future opt-in).
-    const magicBrolls = forceMagicBrolls !== null ? forceMagicBrolls : false;
+    // Stock b-roll enabled by default — combines Submagic's library with client b-rolls (items[])
+    // for a more cohesive visual flow. forceMagicBrolls=false disables it (used on QC retry
+    // when b-roll was flagged as the issue). magicBrollsPercentage caps coverage to avoid overuse.
+    const magicBrolls = forceMagicBrolls !== null ? forceMagicBrolls : true;
 
     let music = null;
     if (!skipHook) {
@@ -693,6 +758,7 @@ async function runSubmagicEdit({
       removeSilencePace,
       removeBadTakes,
       magicBrolls,
+      ...(magicBrolls && { magicBrollsPercentage }),
       cleanAudio: true,
       // NOTE: Submagic API has no top-level caption position field.
       // Caption placement is controlled by templateName only.

@@ -15,7 +15,7 @@ const GEMINI_UPLOAD_URL = 'https://generativelanguage.googleapis.com/upload/v1be
 const MODEL = 'gemini-2.0-flash';
 
 function getGeminiKey() {
-  const key = process.env.GEMINI_API_KEY?.trim();
+  const key = process.env.GEMINI_API_KEY?.replace(/\\n/g, '').trim();
   if (!key) throw new Error('GEMINI_API_KEY is not set in Railway env vars');
   return key;
 }

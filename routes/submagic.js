@@ -329,7 +329,7 @@ async function prepareForSubmagic(videoUrl) {
     );
     const signData = await signRes.json();
     const signedUrl = signData.signedURL
-      ? `${supabaseUrl}${signData.signedURL}`
+      ? `${supabaseUrl}/storage/v1${signData.signedURL}`
       : `${supabaseUrl}/storage/v1/object/public/video-modules/${storagePath}`;
 
     console.log(`[submagic] prepared for Submagic (normalized + signed URL): ${signedUrl}`);

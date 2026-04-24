@@ -1,10 +1,29 @@
 # Base: Microsoft Playwright image (Node 20 + Chromium + all deps pre-installed)
 FROM mcr.microsoft.com/playwright:v1.59.1-noble
 
-# Install ffmpeg, yt-dlp, Python + OpenCV for face detection + yt-dlp oauth2 plugin
-RUN apt-get update && apt-get install -y ffmpeg wget python3 python3-pip && \
+# Install system deps: ffmpeg (audio/video processing), yt-dlp (YouTube extraction),
+# Python + OpenCV (face detection), and build tools for whisper.cpp (used by
+# `npx hyperframes transcribe` via the Hyperframes short-form pipeline).
+RUN apt-get update && apt-get install -y \
+      ffmpeg wget git \
+      python3 python3-pip \
+      build-essential cmake && \
     pip3 install --break-system-packages opencv-python-headless yt-dlp && \
     rm -rf /var/lib/apt/lists/*
+
+# Build whisper.cpp and expose the `whisper-cpp` binary on PATH.
+# Hyperframes' `transcribe` command spawns `whisper-cpp`. Without this the
+# short-form render pipeline fails at the prep step.
+# The small.en model (~466MB) is baked in so we don't download on every render.
+RUN git clone --depth 1 https://github.com/ggml-org/whisper.cpp /opt/whisper.cpp && \
+    cd /opt/whisper.cpp && \
+    cmake -B build -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build build -j --config Release && \
+    ln -s /opt/whisper.cpp/build/bin/whisper-cli /usr/local/bin/whisper-cpp && \
+    bash ./models/download-ggml-model.sh small.en
+
+# Let Hyperframes find the bundled model without re-downloading.
+ENV WHISPER_MODEL_DIR=/opt/whisper.cpp/models
 
 # Tell yt-dlp to use Node.js (already present via Playwright image) for JS challenge solving
 ENV YT_DLP_JS_RUNTIMES=node

@@ -15,12 +15,32 @@ RUN apt-get update && apt-get install -y \
 # Hyperframes' `transcribe` command spawns `whisper-cpp`. Without this the
 # short-form render pipeline fails at the prep step.
 # The small.en model (~466MB) is baked in so we don't download on every render.
-RUN git clone --depth 1 https://github.com/ggml-org/whisper.cpp /opt/whisper.cpp && \
+#
+# Uses a `set -euo pipefail` guard + `find` + explicit binary verification so
+# that a missing binary FAILS THE BUILD instead of silently creating a dangling
+# symlink (which would produce "whisper-cpp not found" at runtime).
+RUN set -euxo pipefail && \
+    git clone --depth 1 https://github.com/ggml-org/whisper.cpp /opt/whisper.cpp && \
     cd /opt/whisper.cpp && \
     cmake -B build -DCMAKE_BUILD_TYPE=Release && \
     cmake --build build -j --config Release && \
-    ln -s /opt/whisper.cpp/build/bin/whisper-cli /usr/local/bin/whisper-cpp && \
-    bash ./models/download-ggml-model.sh small.en
+    echo "=== Searching for whisper binary ===" && \
+    WHISPER_BIN="$(find /opt/whisper.cpp/build/bin /opt/whisper.cpp -maxdepth 3 -type f -executable \
+                     \( -name 'whisper-cli' -o -name 'whisper' -o -name 'main' \) 2>/dev/null | head -1)" && \
+    if [ -z "$WHISPER_BIN" ]; then \
+      echo "FATAL: no whisper binary found after cmake build" && \
+      ls -laR /opt/whisper.cpp/build/bin 2>/dev/null || true && \
+      exit 1; \
+    fi && \
+    echo "Using whisper binary: $WHISPER_BIN" && \
+    cp "$WHISPER_BIN" /usr/local/bin/whisper-cpp && \
+    chmod +x /usr/local/bin/whisper-cpp && \
+    echo "=== Verifying whisper-cpp runs ===" && \
+    whisper-cpp --help > /tmp/whisper-help.txt 2>&1 || (cat /tmp/whisper-help.txt && exit 1) && \
+    echo "whisper-cpp verified ✓" && \
+    echo "=== Downloading small.en model ===" && \
+    bash ./models/download-ggml-model.sh small.en && \
+    ls -la /opt/whisper.cpp/models/ggml-small.en.bin
 
 # Let Hyperframes find the bundled model without re-downloading.
 ENV WHISPER_MODEL_DIR=/opt/whisper.cpp/models

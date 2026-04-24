@@ -48,6 +48,28 @@ ENV WHISPER_MODEL_DIR=/opt/whisper.cpp/models
 # Tell yt-dlp to use Node.js (already present via Playwright image) for JS challenge solving
 ENV YT_DLP_JS_RUNTIMES=node
 
+# Hyperframes Chromium tuning for Railway's constrained container.
+# Root cause: on the previous render attempt Chromium's GPU subprocess crashed
+# with `pthread_create: Resource temporarily unavailable (11)` — the container
+# hit its thread limit when Chromium tried to spawn the GPU + network + renderer
+# helper processes. Even with --workers 1 (a single capture worker), a *single*
+# Chromium instance still spawns multiple helper processes per frame.
+#
+# These env vars are read by hyperframes' producer/browserManager.ts:
+#   PRODUCER_DISABLE_GPU=true        → adds --disable-gpu; skips GPU subprocess
+#                                      entirely (the one that was crashing).
+#   PRODUCER_FORCE_SCREENSHOT=true   → uses screenshot capture mode instead of
+#                                      HeadlessExperimental.beginFrame, which
+#                                      avoids the compositor/GPU-heavy flags
+#                                      (--run-all-compositor-stages-before-draw
+#                                      etc.) that also spawn helpers.
+#   PRODUCER_ENABLE_BROWSER_POOL=true → reuses one Chromium instance across all
+#                                      frame captures in a render, instead of
+#                                      launching a fresh browser per frame.
+ENV PRODUCER_DISABLE_GPU=true
+ENV PRODUCER_FORCE_SCREENSHOT=true
+ENV PRODUCER_ENABLE_BROWSER_POOL=true
+
 WORKDIR /app
 
 # Don't re-download browsers — they're already in the image

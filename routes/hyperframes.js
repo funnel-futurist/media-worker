@@ -224,6 +224,25 @@ async function runHyperframesJob({
     // 5. Write script.txt
     writeFileSync(join(workspace, 'assets', 'script.txt'), script || '', 'utf8');
 
+    // 5b. If no music, strip the <audio id="music-bg"> tag from index.html so
+    //     Chromium doesn't hang trying to load a nonexistent file — that's
+    //     what was causing "video metadata not ready" timeouts during render.
+    if (!musicUrl) {
+      const indexPath = join(workspace, 'index.html');
+      try {
+        let html = readFileSync(indexPath, 'utf8');
+        // Remove the full <audio id="music-bg" ... src="assets/music.mp3"></audio> block
+        html = html.replace(
+          /<!--\s*Background music\s*-->[\s\S]*?<audio\s+id=["']music-bg["'][\s\S]*?<\/audio>/i,
+          '<!-- Background music removed — no music URL provided -->'
+        );
+        writeFileSync(indexPath, html, 'utf8');
+        console.log('[hf] stripped music-bg audio tag (no music URL)');
+      } catch (err) {
+        console.warn(`[hf] couldn't strip music tag: ${err.message}`);
+      }
+    }
+
     // 6. Override brand tokens
     const brandTokensCss = `
 :root {
@@ -255,13 +274,15 @@ async function runHyperframesJob({
     await runCommand('node', ['scripts/prep.js', 'assets/raw-edit.mp4'], workspace, 'prep');
 
     // 8. Run hyperframes render
-    // --workers 2: Railway's container can't handle the default 6 parallel
-    // Chromium capture workers — they time out waiting for video metadata.
-    // Lowering concurrency trades wall-clock time for reliability.
-    console.log(`[hf] running hyperframes render...`);
+    // --workers 1: truly serial Chromium capture. Railway's 4-core container
+    // times out Chromium workers (Runtime.callFunctionOn, video metadata not
+    // ready) when more than one worker is running. Trade wall-clock for
+    // reliability until we either upgrade the container or ship a producer
+    // server. --quiet keeps stdout smaller so the process isn't I/O bound.
+    console.log(`[hf] running hyperframes render (serial)...`);
     await runCommand(
       'npx',
-      ['hyperframes', 'render', '--quality', 'draft', '--workers', '2'],
+      ['hyperframes', 'render', '--quality', 'draft', '--workers', '1', '--quiet'],
       workspace,
       'render'
     );

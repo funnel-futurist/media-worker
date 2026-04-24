@@ -104,6 +104,15 @@ if (!SKIP_TRANS) {
   console.log(DIVIDER);
   console.log('STEP 2 — Transcribe (Whisper ' + WHISPER_MODEL + ')');
   run('npx', ['hyperframes', 'transcribe', TRIMMED, '--model', WHISPER_MODEL, '--json']);
+
+  // Hyperframes CLI writes transcript.json to CWD; prep.js pipeline expects it
+  // at assets/transcript.json. Move it there if needed.
+  const cwdTranscript = path.resolve('transcript.json');
+  if (!fs.existsSync(TRANSCRIPT) && fs.existsSync(cwdTranscript)) {
+    fs.mkdirSync(path.dirname(TRANSCRIPT), { recursive: true });
+    fs.renameSync(cwdTranscript, TRANSCRIPT);
+    console.log(`  Moved transcript → ${TRANSCRIPT}`);
+  }
 } else {
   console.log('\n[--skip-transcribe] Using existing:', TRANSCRIPT);
   if (!fs.existsSync(TRANSCRIPT)) {

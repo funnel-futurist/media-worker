@@ -1,0 +1,27 @@
+:root {
+  /* FF brand — swap hex values to match your actual palette */
+  --ff-bg: #07121c;
+  --ff-surface: #0d2031;
+  --ff-surface-2: #1a2e3d;
+  --ff-border: #252d33;
+  --ff-accent: #37bdf8;       /* TODO: replace with FF brand accent */
+  --ff-accent-glow: #0307ff;
+  --ff-warn: #f09025;
+  --ff-text: #ffffff;
+  --ff-text-dim: #96a2b6;
+  --font-mono: "Roboto Mono", ui-monospace, Menlo, monospace;
+  --font-display: "Montserrat", system-ui, sans-serif;
+  --font-display-slam: "Space Grotesk", system-ui, sans-serif;
+  --font-caption: "Outfit", "Montserrat", sans-serif;
+
+  /* Keep AIS aliases so the copied compositions still resolve until you do the full swap */
+  --ais-bg: var(--ff-bg);
+  --ais-surface: var(--ff-surface);
+  --ais-surface-2: var(--ff-surface-2);
+  --ais-border: var(--ff-border);
+  --ais-accent: var(--ff-accent);
+  --ais-accent-glow: var(--ff-accent-glow);
+  --ais-warn: var(--ff-warn);
+  --ais-text: var(--ff-text);
+  --ais-text-dim: var(--ff-text-dim);
+}

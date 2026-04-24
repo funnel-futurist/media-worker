@@ -1,0 +1,454 @@
+<template id="captions-template">
+  <div
+    data-composition-id="captions"
+    data-start="0"
+    data-width="1080"
+    data-height="1920"
+    data-duration="73.30"
+  >
+    <div class="cap-stage" id="cap-stage"></div>
+
+    <style>
+      [data-composition-id="captions"] {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+      }
+      [data-composition-id="captions"] .cap-stage {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 140px;
+        height: 0;
+        pointer-events: none;
+      }
+      [data-composition-id="captions"] .cap-line-wrap {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        display: flex;
+        justify-content: center;
+        padding: 0 60px;
+        opacity: 0;
+        visibility: hidden;
+      }
+      [data-composition-id="captions"] .cap-line {
+        display: inline-block;
+        max-width: 860px;
+        background: rgba(0, 0, 0, 0.45);
+        border-radius: 8px;
+        padding: 8px 20px;
+        text-align: center;
+        font-family: "Outfit", "Montserrat", sans-serif;
+        font-weight: 700;
+        font-size: 52px;
+        line-height: 1.18;
+        letter-spacing: -0.01em;
+        color: #ffffff;
+        text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+        white-space: normal;
+      }
+      [data-composition-id="captions"] .cap-word {
+        display: inline-block;
+        transform-origin: center center;
+        will-change: transform, color;
+      }
+    </style>
+
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script>
+      (function () {
+        // Timestamps from raw-trim-v2.mp4 (silence-cut, starts at 2.88s in source).
+        // Whisper errors corrected: BA→VA, "Go-ha level"→GHL, "started with BA steps"→step,
+        // "strong bust"→STRONG BASE, "bust"→BASE, "deployment right"→deployment ready,
+        // "metric flow"→Metricool, "crumbs"→plans, "cap"→gap, "cell"→claim.
+        const SEGMENTS = [
+          {
+            words: [
+              { word: "Before", start: 0.00, end: 0.38 },
+              { word: "I", start: 0.38, end: 0.50 },
+              { word: "step", start: 0.50, end: 0.86 },
+              { word: "into", start: 1.61, end: 1.81 },
+              { word: "any", start: 1.81, end: 2.00 },
+              { word: "founder's", start: 2.00, end: 2.46 },
+              { word: "business —", start: 2.56, end: 3.16 },
+            ],
+          },
+          {
+            words: [
+              { word: "this", start: 3.16, end: 3.36 },
+              { word: "non-negotiable:", start: 3.46, end: 4.16 },
+              { word: "she", start: 4.76, end: 4.96 },
+              { word: "has", start: 4.96, end: 5.14 },
+              { word: "to", start: 5.26, end: 5.29 },
+              { word: "be", start: 5.29, end: 5.42 },
+              { word: "CERTIFIED.", start: 5.42, end: 6.08 },
+            ],
+          },
+          {
+            words: [
+              { word: "Again —", start: 6.08, end: 6.42 },
+              { word: "not", start: 6.42, end: 6.46 },
+              { word: "just", start: 6.57, end: 6.77 },
+              { word: "familiar", start: 6.77, end: 7.16 },
+              { word: "with.", start: 7.16, end: 7.48 },
+            ],
+          },
+          {
+            words: [
+              { word: "CERTIFIED.", start: 7.69, end: 8.32 },
+            ],
+          },
+          {
+            words: [
+              { word: "First", start: 8.32, end: 8.58 },
+              { word: "is", start: 8.58, end: 8.68 },
+              { word: "the", start: 8.68, end: 8.84 },
+              { word: "baseline", start: 8.84, end: 9.27 },
+              { word: "stack.", start: 9.27, end: 9.72 },
+            ],
+          },
+          {
+            words: [
+              { word: "GHL,", start: 10.52, end: 11.60 },
+              { word: "Slack,", start: 11.60, end: 12.19 },
+              { word: "Google", start: 12.28, end: 12.48 },
+              { word: "Sheets,", start: 12.85, end: 13.20 },
+              { word: "Notion.", start: 13.20, end: 13.82 },
+            ],
+          },
+          {
+            words: [
+              { word: "Certified", start: 15.01, end: 15.56 },
+              { word: "on", start: 15.56, end: 15.61 },
+              { word: "all", start: 15.74, end: 15.89 },
+              { word: "five —", start: 15.89, end: 16.16 },
+              { word: "before", start: 16.16, end: 16.57 },
+              { word: "she", start: 16.57, end: 16.75 },
+              { word: "arrives.", start: 16.87, end: 17.44 },
+            ],
+          },
+          {
+            words: [
+              { word: "These", start: 17.66, end: 17.82 },
+              { word: "are", start: 17.82, end: 17.86 },
+              { word: "the", start: 17.98, end: 18.12 },
+              { word: "minimum.", start: 18.12, end: 18.48 },
+            ],
+          },
+          {
+            words: [
+              { word: "If", start: 18.66, end: 18.74 },
+              { word: "she", start: 18.74, end: 18.86 },
+              { word: "can't", start: 18.98, end: 19.14 },
+              { word: "operate", start: 19.14, end: 19.57 },
+              { word: "this", start: 19.59, end: 19.88 },
+              { word: "fluently —", start: 19.91, end: 20.48 },
+            ],
+          },
+          {
+            words: [
+              { word: "she's", start: 20.66, end: 20.83 },
+              { word: "NOT", start: 20.83, end: 20.86 },
+              { word: "deployment", start: 20.98, end: 21.44 },
+              { word: "ready.", start: 21.44, end: 21.57 },
+            ],
+          },
+          {
+            words: [
+              { word: "Then", start: 21.60, end: 21.82 },
+              { word: "there's", start: 21.82, end: 22.21 },
+              { word: "what", start: 22.21, end: 22.43 },
+              { word: "I", start: 22.43, end: 22.46 },
+              { word: "call", start: 22.48, end: 22.69 },
+              { word: "the", start: 22.72, end: 22.79 },
+              { word: "STRONG", start: 22.91, end: 23.15 },
+              { word: "BASE.", start: 23.21, end: 23.84 },
+            ],
+          },
+          {
+            words: [
+              { word: "These", start: 24.04, end: 24.18 },
+              { word: "are", start: 24.18, end: 24.24 },
+              { word: "the", start: 24.36, end: 24.46 },
+              { word: "tools", start: 24.46, end: 24.70 },
+              { word: "to", start: 24.70, end: 24.79 },
+              { word: "separate", start: 24.79, end: 25.05 },
+              { word: "a", start: 25.17, end: 25.26 },
+              { word: "capable", start: 25.29, end: 26.07 },
+              { word: "VA", start: 26.23, end: 26.33 },
+              { word: "from", start: 26.40, end: 26.64 },
+              { word: "a", start: 26.64, end: 26.70 },
+              { word: "high-leverage", start: 26.70, end: 27.41 },
+              { word: "one.", start: 27.41, end: 27.60 },
+            ],
+          },
+          {
+            words: [
+              { word: "Workflow", start: 29.47, end: 29.81 },
+              { word: "automation,", start: 29.97, end: 30.64 },
+            ],
+          },
+          {
+            words: [
+              { word: "ChatGPT", start: 30.64, end: 31.02 },
+              { word: "for", start: 31.14, end: 31.33 },
+              { word: "content", start: 31.33, end: 31.73 },
+              { word: "and", start: 31.73, end: 31.83 },
+              { word: "process", start: 31.95, end: 32.28 },
+              { word: "support,", start: 32.37, end: 32.72 },
+            ],
+          },
+          {
+            words: [
+              { word: "Super", start: 32.72, end: 33.09 },
+              { word: "Whisper", start: 33.09, end: 33.58 },
+              { word: "for", start: 33.60, end: 33.81 },
+              { word: "audio", start: 33.81, end: 34.18 },
+              { word: "to", start: 34.18, end: 34.33 },
+              { word: "text,", start: 34.33, end: 34.60 },
+            ],
+          },
+          {
+            words: [
+              { word: "Metricool", start: 35.50, end: 36.02 },
+              { word: "for", start: 36.13, end: 36.23 },
+              { word: "content", start: 36.23, end: 36.51 },
+              { word: "scheduling", start: 36.63, end: 37.21 },
+              { word: "and", start: 37.29, end: 37.32 },
+              { word: "analysis.", start: 37.32, end: 37.56 },
+            ],
+          },
+          {
+            words: [
+              { word: "The", start: 37.64, end: 37.69 },
+              { word: "difference", start: 37.82, end: 38.26 },
+              { word: "between", start: 38.26, end: 38.60 },
+              { word: "baseline", start: 38.60, end: 39.00 },
+              { word: "and", start: 39.00, end: 39.19 },
+              { word: "STRONG", start: 39.25, end: 39.64 },
+              { word: "BASE", start: 39.64, end: 39.88 },
+            ],
+          },
+          {
+            words: [
+              { word: "is", start: 39.94, end: 39.99 },
+              { word: "a", start: 41.13, end: 41.25 },
+              { word: "VA", start: 41.25, end: 41.34 },
+              { word: "who", start: 41.37, end: 41.49 },
+              { word: "can", start: 41.55, end: 41.57 },
+              { word: "KEEP", start: 41.67, end: 41.82 },
+              { word: "UP", start: 41.91, end: 41.96 },
+              { word: "vs", start: 41.96, end: 42.14 },
+              { word: "a", start: 42.14, end: 42.21 },
+              { word: "VA", start: 42.21, end: 42.34 },
+              { word: "who", start: 42.34, end: 42.47 },
+              { word: "can", start: 42.47, end: 42.66 },
+              { word: "BUILD", start: 42.66, end: 42.76 },
+              { word: "AHEAD.", start: 42.76, end: 43.05 },
+            ],
+          },
+          {
+            words: [
+              { word: "Most", start: 43.08, end: 43.37 },
+              { word: "VA", start: 43.37, end: 43.46 },
+              { word: "placements", start: 43.58, end: 44.23 },
+              { word: "arrive", start: 44.23, end: 44.56 },
+              { word: "with", start: 44.61, end: 44.84 },
+              { word: "experience", start: 44.84, end: 45.68 },
+              { word: "in", start: 45.68, end: 45.73 },
+              { word: "a", start: 45.73, end: 45.86 },
+              { word: "few", start: 45.86, end: 45.94 },
+              { word: "of", start: 45.94, end: 46.03 },
+              { word: "these", start: 46.03, end: 46.26 },
+              { word: "tools.", start: 46.26, end: 46.52 },
+            ],
+          },
+          {
+            words: [
+              { word: "It's", start: 49.20, end: 49.40 },
+              { word: "not", start: 49.40, end: 49.55 },
+              { word: "the", start: 49.55, end: 49.58 },
+              { word: "same", start: 49.69, end: 49.90 },
+              { word: "as", start: 49.90, end: 50.00 },
+              { word: "knowing", start: 50.00, end: 50.39 },
+              { word: "how", start: 50.39, end: 50.67 },
+              { word: "to", start: 50.67, end: 50.83 },
+              { word: "build", start: 50.93, end: 51.29 },
+              { word: "a", start: 51.31, end: 51.38 },
+              { word: "workflow,", start: 51.39, end: 52.12 },
+            ],
+          },
+          {
+            words: [
+              { word: "manage", start: 52.12, end: 52.64 },
+              { word: "a", start: 52.64, end: 52.72 },
+              { word: "pipeline,", start: 52.72, end: 53.52 },
+              { word: "or", start: 53.55, end: 53.60 },
+              { word: "set", start: 53.64, end: 53.76 },
+              { word: "up", start: 53.85, end: 53.88 },
+              { word: "an", start: 53.88, end: 54.00 },
+              { word: "automation", start: 54.00, end: 54.55 },
+              { word: "without", start: 55.24, end: 55.54 },
+              { word: "supervision.", start: 55.58, end: 56.20 },
+            ],
+          },
+          {
+            words: [
+              { word: "We", start: 56.20, end: 56.25 },
+              { word: "built", start: 56.38, end: 56.58 },
+              { word: "the", start: 56.69, end: 56.89 },
+              { word: "incubator", start: 56.89, end: 57.39 },
+              { word: "to", start: 57.51, end: 57.64 },
+              { word: "plug", start: 57.64, end: 57.83 },
+              { word: "exactly", start: 57.93, end: 58.41 },
+              { word: "that", start: 58.43, end: 58.67 },
+              { word: "gap.", start: 58.76, end: 58.92 },
+            ],
+          },
+          {
+            words: [
+              { word: "So", start: 58.92, end: 58.97 },
+              { word: "that", start: 59.10, end: 59.30 },
+              { word: "CERTIFIED", start: 59.42, end: 59.97 },
+              { word: "is", start: 59.97, end: 60.11 },
+              { word: "a", start: 60.11, end: 60.12 },
+              { word: "verifiable", start: 60.23, end: 60.80 },
+              { word: "thing —", start: 60.88, end: 61.15 },
+            ],
+          },
+          {
+            words: [
+              { word: "not", start: 61.48, end: 61.66 },
+              { word: "a", start: 61.66, end: 61.71 },
+              { word: "claim.", start: 61.71, end: 61.92 },
+              { word: "The", start: 61.92, end: 62.12 },
+              { word: "tech", start: 62.12, end: 62.30 },
+              { word: "stack", start: 62.41, end: 62.73 },
+              { word: "is", start: 62.73, end: 62.86 },
+              { word: "the", start: 62.86, end: 63.05 },
+              { word: "foundation.", start: 63.05, end: 63.76 },
+            ],
+          },
+          {
+            words: [
+              { word: "Spend", start: 65.49, end: 65.64 },
+              { word: "the", start: 65.73, end: 65.81 },
+              { word: "first", start: 65.81, end: 66.00 },
+              { word: "30", start: 66.13, end: 66.50 },
+              { word: "days", start: 66.51, end: 66.59 },
+              { word: "filling", start: 66.84, end: 67.22 },
+              { word: "a", start: 67.34, end: 67.40 },
+              { word: "skills", start: 67.40, end: 67.82 },
+              { word: "gap", start: 67.82, end: 68.03 },
+              { word: "that", start: 68.03, end: 68.04 },
+              { word: "should've", start: 68.15, end: 68.39 },
+              { word: "been", start: 68.45, end: 68.60 },
+              { word: "filled", start: 68.60, end: 68.95 },
+              { word: "BEFORE", start: 68.96, end: 69.29 },
+              { word: "DAY", start: 69.29, end: 69.34 },
+              { word: "ONE.", start: 69.46, end: 73.30 },
+            ],
+          },
+        ];
+
+        const COMP_DURATION = 73.30;
+        const DIM = "rgba(255,255,255,0.65)";
+        const ACTIVE = "#37bdf8";
+        const SPOKEN = "#ffffff";
+        const ACTIVE_SCALE = 1.14;
+
+        const stage = document.querySelector('[data-composition-id="captions"] #cap-stage');
+        if (!stage) return;
+
+        SEGMENTS.forEach(function (seg, segIdx) {
+          const wrap = document.createElement("div");
+          wrap.className = "cap-line-wrap";
+          wrap.id = "cap-seg-" + segIdx;
+
+          const line = document.createElement("div");
+          line.className = "cap-line";
+
+          seg.words.forEach(function (w, wIdx) {
+            const span = document.createElement("span");
+            span.className = "cap-word";
+            span.id = "cap-w-" + segIdx + "-" + wIdx;
+            span.textContent = w.word;
+            line.appendChild(span);
+            if (wIdx < seg.words.length - 1) {
+              line.appendChild(document.createTextNode(" "));
+            }
+          });
+
+          wrap.appendChild(line);
+          stage.appendChild(wrap);
+        });
+
+        const tl = gsap.timeline({ paused: true });
+
+        // Captions stay at lower third throughout — no position switching.
+        tl.set(stage, { bottom: 140 }, 0);
+
+        const FADE_IN = 0.18;
+        const FADE_OUT = 0.18;
+        const PRE_ROLL = 0.12;
+        const POST_HOLD = 0.12;
+
+        SEGMENTS.forEach(function (seg, segIdx) {
+          const wrapSel = '[data-composition-id="captions"] #cap-seg-' + segIdx;
+          const segStart = seg.words[0].start;
+          const segEnd = seg.words[seg.words.length - 1].end;
+
+          const fadeInAt = Math.max(segStart - PRE_ROLL, 0);
+          const fadeOutAt = segEnd + POST_HOLD;
+          const hideAt = fadeOutAt + FADE_OUT + 0.05;
+
+          seg.words.forEach(function (w, wIdx) {
+            const wordSel = '[data-composition-id="captions"] #cap-w-' + segIdx + "-" + wIdx;
+            tl.set(wordSel, { color: DIM, scale: 1.0 }, fadeInAt);
+          });
+
+          tl.set(wrapSel, { visibility: "visible" }, fadeInAt);
+          tl.fromTo(
+            wrapSel,
+            { opacity: 0, y: 8 },
+            { opacity: 1, y: 0, duration: FADE_IN, ease: "power2.out" },
+            fadeInAt,
+          );
+
+          seg.words.forEach(function (w, wIdx) {
+            const wordSel = '[data-composition-id="captions"] #cap-w-' + segIdx + "-" + wIdx;
+            tl.to(wordSel, { color: ACTIVE, scale: ACTIVE_SCALE, duration: 0.08, ease: "back.out(3)" }, w.start);
+            tl.to(wordSel, { color: SPOKEN, scale: 1.0, duration: 0.12, ease: "power2.out" }, w.end);
+          });
+
+          tl.to(wrapSel, { opacity: 0, duration: FADE_OUT, ease: "power2.in" }, fadeOutAt);
+          tl.set(wrapSel, { visibility: "hidden" }, hideAt);
+        });
+
+        // Caption suppression — hide the entire cap-stage during duplicate hook-text beats.
+        // HARD SWITCH via tl.set() on both opacity AND visibility — no soft fades.
+        // Parent opacity/visibility overrides per-segment animations in the loop above.
+        // One entry per duplicate hook/caption beat (start, end in absolute seconds).
+        const CAPTION_SUPPRESSION_WINDOWS = [
+          { start: 7.69,  end: 8.32,  note: '"CERTIFIED." caption before slam' },
+          { start: 18.12, end: 19.50, note: '"the minimum" caption + slam hook' },
+          { start: 22.91, end: 24.65, note: '"STRONG BASE" caption + slam hook' },
+          { start: 41.50, end: 43.15, note: '"KEEP UP...BUILD AHEAD" caption echo' },
+          { start: 56.80, end: 58.50, note: '"incubator" caption + slam hook' },
+          { start: 68.90, end: 69.85, note: '"BEFORE DAY ONE" caption during slam' },
+        ];
+
+        CAPTION_SUPPRESSION_WINDOWS.forEach(function (win) {
+          tl.set(stage, { opacity: 0, visibility: "hidden" },  win.start);
+          tl.set(stage, { opacity: 1, visibility: "visible" }, win.end);
+        });
+
+        tl.set({}, {}, COMP_DURATION);
+        window.__timelines = window.__timelines || {};
+        window.__timelines["captions"] = tl;
+      })();
+    </script>
+  </div>
+</template>

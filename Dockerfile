@@ -1,6 +1,13 @@
 # Base: Microsoft Playwright image (Node 20 + Chromium + all deps pre-installed)
 FROM mcr.microsoft.com/playwright:v1.59.1-noble
 
+# Use bash for RUN commands. Default /bin/sh on Ubuntu is dash, which doesn't
+# support `set -o pipefail` — our whisper.cpp build step uses pipefail for
+# fail-fast safety, so this SHELL directive is what makes that valid.
+# (Without this, every GitHub auto-deploy since PR #72 silently failed at
+#  `/bin/sh: set: Illegal option -o pipefail` — production was stuck on #71.)
+SHELL ["/bin/bash", "-c"]
+
 # Install system deps: ffmpeg (audio/video processing), yt-dlp (YouTube extraction),
 # Python + OpenCV (face detection), and build tools for whisper.cpp (used by
 # `npx hyperframes transcribe` via the Hyperframes short-form pipeline).

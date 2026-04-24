@@ -6,6 +6,7 @@ import { randomUUID } from 'crypto';
 import { createWriteStream } from 'fs';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
+import { rewriteScenesWithScript } from '../lib/scene_rewriter.js';
 
 export const hyperframesRouter = Router();
 
@@ -231,7 +232,18 @@ async function runHyperframesJob({
 `;
     writeFileSync(join(workspace, 'assets', 'brand-tokens.css'), brandTokensCss.trim() + '\n', 'utf8');
 
-    // 7. Run prep pipeline (silence cut + transcribe + caption align + audio QC)
+    // 7a. Rewrite scene text slots with Gemini so motion graphics match the
+    //     CURRENT client's script, not Phoenix's baked-in pilot content.
+    //     Safe fallback: if rewrite fails, the original template renders unchanged.
+    console.log(`[hf] rewriting scenes with Gemini...`);
+    try {
+      const result = await rewriteScenesWithScript(workspace, script, { clientSlug });
+      console.log(`[hf] scene rewriter result:`, JSON.stringify(result));
+    } catch (err) {
+      console.warn(`[hf] scene rewriter threw (continuing with original template): ${err.message}`);
+    }
+
+    // 7b. Run prep pipeline (silence cut + transcribe + caption align + audio QC)
     console.log(`[hf] running prep.js...`);
     await runCommand('node', ['scripts/prep.js', 'assets/raw-edit.mp4'], workspace, 'prep');
 

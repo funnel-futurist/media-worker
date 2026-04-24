@@ -255,8 +255,16 @@ async function runHyperframesJob({
     await runCommand('node', ['scripts/prep.js', 'assets/raw-edit.mp4'], workspace, 'prep');
 
     // 8. Run hyperframes render
+    // --workers 2: Railway's container can't handle the default 6 parallel
+    // Chromium capture workers — they time out waiting for video metadata.
+    // Lowering concurrency trades wall-clock time for reliability.
     console.log(`[hf] running hyperframes render...`);
-    await runCommand('npx', ['hyperframes', 'render', '--quality', 'draft'], workspace, 'render');
+    await runCommand(
+      'npx',
+      ['hyperframes', 'render', '--quality', 'draft', '--workers', '2'],
+      workspace,
+      'render'
+    );
 
     // 9. Find the output MP4
     const rendersDir = join(workspace, 'renders');

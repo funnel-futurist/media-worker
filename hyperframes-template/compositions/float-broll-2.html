@@ -1,0 +1,92 @@
+<template id="float-broll-2-template">
+  <div
+    data-composition-id="float-broll-2"
+    data-start="0"
+    data-width="1080"
+    data-height="1920"
+    data-duration="4.00"
+  >
+    <div class="fa-context-note">(A VA who builds this workflow once saves 30+ hours a month.)</div>
+    <div class="fa-container">
+      <img class="fa-img" src="assets/visuals/broll-2.png" alt="" />
+    </div>
+
+    <style>
+      [data-composition-id="float-broll-2"] { position: absolute; inset: 0; pointer-events: none; }
+
+      [data-composition-id="float-broll-2"] .fa-context-note {
+        position: absolute;
+        left: 50%;
+        bottom: 800px;
+        transform: translateX(-50%);
+        width: calc(100% - 80px);
+        max-width: 960px;
+        padding: 10px 24px;
+        font-family: "Roboto Mono", monospace;
+        font-size: 30px;
+        font-weight: 500;
+        color: #37bdf8;
+        font-style: italic;
+        letter-spacing: 0.01em;
+        text-align: center;
+        line-height: 1.22;
+        opacity: 0;
+        text-shadow: 0 2px 8px rgba(0,0,0,0.6);
+      }
+
+      [data-composition-id="float-broll-2"] .fa-container {
+        position: absolute;
+        left: 30px;
+        right: 30px;
+        top: 1140px;
+        height: 500px;
+        opacity: 0;
+        border-radius: 18px;
+        overflow: hidden;
+        isolation: isolate;
+        background: rgba(7, 18, 28, 0.94);
+        box-shadow:
+          0 14px 44px rgba(0,0,0,0.6),
+          0 0 0 1.5px rgba(55,189,248,0.3);
+      }
+      [data-composition-id="float-broll-2"] .fa-container::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: rgba(7, 18, 28, 0.72);
+        backdrop-filter: blur(18px);
+        -webkit-backdrop-filter: blur(18px);
+        z-index: 0;
+      }
+      [data-composition-id="float-broll-2"] .fa-img {
+        position: relative;
+        z-index: 1;
+        width: 100%; height: 100%;
+        object-fit: contain;
+        background: transparent;
+        display: block;
+      }
+    </style>
+
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script>
+      (function () {
+        const scope = '[data-composition-id="float-broll-2"] ';
+        const tl = gsap.timeline({ paused: true });
+        tl.fromTo(scope + '.fa-container',
+          { y: 24, opacity: 0, scale: 0.97 },
+          { y: 0, opacity: 1, scale: 1, duration: 0.4, ease: 'expo.out' }, 0.05);
+        tl.fromTo(scope + '.fa-context-note',
+          { y: 14, opacity: 0 },
+          { y: 0, opacity: 1, duration: 0.4, ease: 'expo.out' }, 0.15);
+        tl.to(scope + '.fa-container',
+          { y: 28, opacity: 0, scale: 0.97, duration: 0.3, ease: 'power2.in' }, 3.1);
+        tl.to(scope + '.fa-context-note',
+          { y: 18, opacity: 0, duration: 0.3, ease: 'power2.in' }, 3.1);
+        tl.set({}, {}, 4.0);
+        window.__timelines = window.__timelines || {};
+        window.__timelines['float-broll-2'] = tl;
+      })();
+    </script>
+  </div>
+</template>

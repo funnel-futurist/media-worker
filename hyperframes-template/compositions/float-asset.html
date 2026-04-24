@@ -1,0 +1,229 @@
+<template id="float-asset-template">
+  <!--
+    Floating asset overlay. Drop images or video clips onto the video timeline.
+
+    SINGLE-INSTANCE ONLY: the script's wrapper lookup uses
+    document.querySelector('[data-composition-src="compositions/float-asset.html"]')
+    which returns the FIRST match. For multiple floating assets in one project,
+    use bespoke composition files (see float-broll-*.html) — each owns its own
+    composition-id and timeline registration. Multi-instance support would require
+    refactoring the wrapper lookup to scope per-instance; out of scope until then.
+
+    Usage in index.html:
+      data-composition-src="compositions/float-asset.html"
+      data-asset-src="assets/visuals/your-screenshot.png"
+      data-asset-type="image"            (image | video)
+      data-position="face-panel"         (face-panel | left | right | bottom-third | fullscreen-insert)
+      data-asset-fit="contain"           (contain | cover) — contain for screenshots, cover for lifestyle
+      data-context-note="(Short parenthetical explaining why this image matters.)"
+      data-start="29.0"
+      data-duration="4.0"
+      data-track-index="7"
+
+    Tier A (face-panel) = primary proof — screenshot replaces the face rectangle cleanly.
+    Tier B (left / right) = rare side-card companion when the top panel IS the feature.
+    Tier C (bottom-third / fullscreen-insert) = special cases.
+
+    Legacy aliases pos-top-half / pos-feature-panel map onto pos-face-panel — kept for
+    backward compatibility, but prefer pos-face-panel going forward.
+  -->
+  <div
+    data-composition-id="float-asset"
+    data-start="0"
+    data-width="1080"
+    data-height="1920"
+    data-duration="4.00"
+  >
+    <div class="fa-context-note" id="fa-context-note"></div>
+    <div class="fa-container" id="fa-container">
+      <img class="fa-img" id="fa-img" src="" alt="" />
+      <video class="fa-video" id="fa-video" muted playsinline loop></video>
+    </div>
+
+    <style>
+      [data-composition-id="float-asset"] {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+      }
+      [data-composition-id="float-asset"] .fa-container {
+        position: absolute;
+        opacity: 0;
+        border-radius: 18px;
+        overflow: hidden;
+        isolation: isolate;
+        background: rgba(7, 18, 28, 0.94);
+      }
+      [data-composition-id="float-asset"] .fa-container::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: rgba(7, 18, 28, 0.72);
+        backdrop-filter: blur(18px);
+        -webkit-backdrop-filter: blur(18px);
+        z-index: 0;
+      }
+      /* Tier A — face-panel (canonical) + legacy aliases */
+      [data-composition-id="float-asset"] .fa-container.pos-face-panel,
+      [data-composition-id="float-asset"] .fa-container.pos-top-half,
+      [data-composition-id="float-asset"] .fa-container.pos-feature-panel {
+        left: 30px;
+        right: 30px;
+        top: 1140px;
+        height: 500px;
+        box-shadow:
+          0 14px 44px rgba(0, 0, 0, 0.6),
+          0 0 0 1.5px rgba(55, 189, 248, 0.3);
+      }
+      /* Tier B — side cards (rare — only when top panel is already the feature) */
+      [data-composition-id="float-asset"] .fa-container.pos-right {
+        right: 32px;
+        top: 240px;
+        width: 560px;
+        height: 315px;
+        box-shadow:
+          0 8px 32px rgba(0, 0, 0, 0.6),
+          0 0 0 1.5px rgba(55, 189, 248, 0.25);
+      }
+      [data-composition-id="float-asset"] .fa-container.pos-left {
+        left: 32px;
+        top: 240px;
+        width: 560px;
+        height: 315px;
+        box-shadow:
+          0 8px 32px rgba(0, 0, 0, 0.6),
+          0 0 0 1.5px rgba(55, 189, 248, 0.25);
+      }
+      /* Tier C — special cases */
+      [data-composition-id="float-asset"] .fa-container.pos-bottom-third {
+        left: 40px;
+        right: 40px;
+        bottom: 240px;
+        height: 300px;
+      }
+      [data-composition-id="float-asset"] .fa-container.pos-fullscreen-insert {
+        inset: 0;
+        border-radius: 0;
+      }
+      [data-composition-id="float-asset"] .fa-img,
+      [data-composition-id="float-asset"] .fa-video {
+        position: relative;
+        z-index: 1;
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      [data-composition-id="float-asset"] .fa-img.fit-contain,
+      [data-composition-id="float-asset"] .fa-video.fit-contain {
+        object-fit: contain;
+        background: transparent;
+      }
+      [data-composition-id="float-asset"] .fa-img.fit-cover,
+      [data-composition-id="float-asset"] .fa-video.fit-cover {
+        object-fit: cover;
+      }
+      /* Contextual parenthetical note — sits ABOVE the image, not on it.
+         Positioned relative to canvas so it stays in the face-panel zone but
+         above the image rectangle. */
+      [data-composition-id="float-asset"] .fa-context-note {
+        position: absolute;
+        left: 50%;
+        bottom: 800px;
+        transform: translateX(-50%);
+        width: calc(100% - 80px);
+        max-width: 960px;
+        padding: 10px 24px;
+        font-family: "Roboto Mono", monospace;
+        font-size: 30px;
+        font-weight: 500;
+        color: #37bdf8;
+        font-style: italic;
+        letter-spacing: 0.01em;
+        text-align: center;
+        line-height: 1.22;
+        opacity: 0;
+        text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+      }
+      [data-composition-id="float-asset"] .fa-context-note:empty {
+        display: none;
+      }
+    </style>
+
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script>
+      (function () {
+        const scope = '[data-composition-id="float-asset"] ';
+
+        const wrapper = document.querySelector('[data-composition-src="compositions/float-asset.html"]');
+        const assetSrc   = wrapper ? wrapper.getAttribute('data-asset-src')    : '';
+        const assetType  = wrapper ? wrapper.getAttribute('data-asset-type')   : 'image';
+        const position   = wrapper ? wrapper.getAttribute('data-position')     : 'face-panel';
+        const assetFit   = wrapper ? wrapper.getAttribute('data-asset-fit')    : 'contain';
+        const contextNote= wrapper ? wrapper.getAttribute('data-context-note') : '';
+        const duration   = parseFloat(wrapper ? wrapper.getAttribute('data-duration') : '4.0') || 4.0;
+
+        const container = document.querySelector(scope + '#fa-container');
+        const img       = document.querySelector(scope + '#fa-img');
+        const vid       = document.querySelector(scope + '#fa-video');
+        const note      = document.querySelector(scope + '#fa-context-note');
+
+        if (container) container.classList.add('pos-' + position);
+        const fitClass = 'fit-' + (assetFit === 'cover' ? 'cover' : 'contain');
+        if (img) img.classList.add(fitClass);
+        if (vid) vid.classList.add(fitClass);
+
+        if (assetType === 'video') {
+          if (vid) { vid.src = assetSrc; vid.style.display = 'block'; }
+          if (img) img.style.display = 'none';
+        } else {
+          if (img) { img.src = assetSrc; img.style.display = 'block'; }
+          if (vid) vid.style.display = 'none';
+        }
+
+        if (note) note.textContent = contextNote;
+
+        const tl = gsap.timeline({ paused: true });
+        const HOLD = Math.max(duration - 0.9, 0.5);
+
+        // Face-panel / legacy top-half / feature-panel → drop-in from below
+        // Side cards (left/right) → slide in from their side
+        // Bottom-third → rise from below; Fullscreen-insert → fade only
+        let slideIn  = { x: 60 };
+        let slideOut = { x: 80 };
+        if (position === 'left')              { slideIn = { x: -60 }; slideOut = { x: -80 }; }
+        if (position === 'bottom-third')      { slideIn = { x: 0, y: 40 }; slideOut = { x: 0, y: 50 }; }
+        if (position === 'fullscreen-insert') { slideIn = { x: 0 }; slideOut = { x: 0 }; }
+        if (position === 'face-panel' || position === 'top-half' || position === 'feature-panel') {
+          slideIn = { y: 24 }; slideOut = { y: 28 };
+        }
+
+        tl.fromTo(
+          scope + '#fa-container',
+          { ...slideIn, opacity: 0, scale: 0.97 },
+          { x: 0, y: 0, opacity: 1, scale: 1, duration: 0.4, ease: 'expo.out' },
+          0.05
+        );
+        tl.fromTo(
+          scope + '#fa-context-note',
+          { y: 14, opacity: 0 },
+          { y: 0, opacity: 1, duration: 0.4, ease: 'expo.out' },
+          0.15
+        );
+        tl.to(
+          scope + '#fa-container',
+          { ...slideOut, opacity: 0, scale: 0.97, duration: 0.3, ease: 'power2.in' },
+          HOLD
+        );
+        tl.to(
+          scope + '#fa-context-note',
+          { y: 18, opacity: 0, duration: 0.3, ease: 'power2.in' },
+          HOLD
+        );
+
+        tl.set({}, {}, duration);
+        window.__timelines = window.__timelines || {};
+        window.__timelines['float-asset'] = tl;
+      })();
+    </script>
+  </div>
+</template>

@@ -1,0 +1,98 @@
+<template id="scene1-hook-template">
+  <div
+    data-composition-id="scene1-hook"
+    data-start="0"
+    data-width="1080"
+    data-height="1920"
+    data-duration="8.32"
+  >
+    <div class="s1-panel">
+      <div class="s1-eyebrow" id="s1-eyebrow">BEFORE YOU PLACE ANY VA</div>
+      <div class="s1-headline" id="s1-headline">NON-<br>NEGOTIABLE</div>
+      <div class="s1-sub" id="s1-sub">she has to be certified on this</div>
+      <div class="s1-bar" id="s1-bar"></div>
+    </div>
+
+    <style>
+      [data-composition-id="scene1-hook"] {
+        position: absolute;
+        inset: 0;
+      }
+      [data-composition-id="scene1-hook"] .s1-panel {
+        position: absolute;
+        top: 0; left: 0;
+        width: 1080px; height: 960px;
+        background: #07121c;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 24px;
+        padding: 60px 80px;
+        box-sizing: border-box;
+        font-family: "Montserrat", sans-serif;
+        overflow: hidden;
+      }
+      [data-composition-id="scene1-hook"] .s1-eyebrow {
+        font-family: "Roboto Mono", monospace;
+        font-weight: 500;
+        font-size: 38px;
+        letter-spacing: 0.16em;
+        color: #96a2b6;
+        opacity: 0;
+        text-align: center;
+      }
+      [data-composition-id="scene1-hook"] .s1-headline {
+        font-family: "Space Grotesk", "Montserrat", sans-serif;
+        font-weight: 900;
+        font-size: 148px;
+        line-height: 0.92;
+        letter-spacing: -0.03em;
+        text-align: center;
+        opacity: 0;
+        transform: scale(0.85);
+        background: linear-gradient(135deg, #ffffff 0%, #37bdf8 50%, #ffffff 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+      }
+      [data-composition-id="scene1-hook"] .s1-sub {
+        font-family: "Roboto Mono", monospace;
+        font-weight: 500;
+        font-size: 36px;
+        letter-spacing: 0.06em;
+        color: #ffffff;
+        text-align: center;
+        clip-path: inset(0 100% 0 0);
+        text-transform: uppercase;
+      }
+      [data-composition-id="scene1-hook"] .s1-bar {
+        width: 0;
+        height: 4px;
+        background: #f09025;
+        border-radius: 2px;
+      }
+    </style>
+
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script>
+      (function () {
+        const scope = '[data-composition-id="scene1-hook"] ';
+        const tl = gsap.timeline({ paused: true });
+
+        tl.to(scope + '.s1-eyebrow', { opacity: 1, duration: 0.3, ease: 'power2.out' }, 0.15);
+        tl.to(scope + '.s1-headline', { opacity: 1, scale: 1, duration: 0.45, ease: 'back.out(1.6)' }, 0.55);
+        tl.to(scope + '.s1-sub', { clipPath: 'inset(0 0% 0 0)', duration: 0.4, ease: 'power3.out' }, 1.6);
+        tl.to(scope + '.s1-bar', { width: 480, duration: 0.5, ease: 'power2.out' }, 2.1);
+
+        // Pulse on first "certified" word (~5.42s in v2 trimmed audio)
+        tl.to(scope + '.s1-headline', { scale: 1.04, duration: 0.15, ease: 'power2.out' }, 5.42);
+        tl.to(scope + '.s1-headline', { scale: 1, duration: 0.25, ease: 'power2.inOut' }, 5.57);
+
+        tl.set({}, {}, 8.32);
+        window.__timelines = window.__timelines || {};
+        window.__timelines['scene1-hook'] = tl;
+      })();
+    </script>
+  </div>
+</template>

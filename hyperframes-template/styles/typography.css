@@ -1,0 +1,89 @@
+/*
+ * FF Pilot — Shared Typography Tokens
+ *
+ * Usage: add a class to an element instead of hardcoding font-family/size/weight.
+ * Tokens reference CSS vars from assets/brand-tokens.css (loaded before this file).
+ *
+ * Token hierarchy:
+ *   Slam/hero hooks  → .type-hook-slam / .type-hook-contrast  (Space Grotesk)
+ *   Section labels   → .type-section-title / .type-label       (Roboto Mono)
+ *   Captions         → .type-caption                          (Outfit)
+ *   Stats/data       → .type-stat                             (Montserrat)
+ *   Proof/truth      → .type-proof                            (Roboto Mono)
+ */
+
+/* --- SLAM / HERO HOOKS --- */
+
+/* Full-frame slam words: CERTIFIED, THE MINIMUM, STRONG BASE, INCUBATOR */
+.type-hook-slam {
+  font-family: var(--font-display-slam);
+  font-weight: 900;
+  font-size: clamp(120px, 14vw, 180px);
+  line-height: 0.88;
+  letter-spacing: -0.04em;
+  text-align: center;
+}
+
+/* Side-by-side contrast pairs: KEEP UP / BUILD AHEAD */
+.type-hook-contrast {
+  font-family: var(--font-display-slam);
+  font-weight: 900;
+  font-size: 120px;
+  line-height: 0.88;
+  letter-spacing: -0.04em;
+  text-align: center;
+}
+
+/* --- SECTION LABELS --- */
+
+/* Panel header labels: BASELINE STACK, STRONG BASE STACK */
+.type-section-title {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 34px;
+  letter-spacing: 0.18em;
+  color: var(--ff-text-dim);
+  text-transform: uppercase;
+}
+
+/* Eyebrow labels: BEFORE YOU PLACE ANY VA, NOT JUST FAMILIAR */
+.type-label {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 42px;
+  letter-spacing: 0.14em;
+  color: var(--ff-text-dim);
+}
+
+/* --- CAPTIONS --- */
+
+.type-caption {
+  font-family: var(--font-caption);
+  font-weight: 900;
+  font-size: 54px;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+}
+
+/* --- STATS & DATA --- */
+
+/* Big stat numbers: MOST VAs */
+.type-stat {
+  font-family: var(--font-display);
+  font-weight: 900;
+  font-size: 96px;
+  line-height: 0.9;
+  letter-spacing: -0.03em;
+  color: var(--ff-text);
+}
+
+/* --- PROOF / TRUTH LINES --- */
+
+/* "But knowing them ≠ owning them." */
+.type-proof {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 36px;
+  letter-spacing: 0.02em;
+  color: var(--ff-accent);
+}

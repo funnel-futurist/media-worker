@@ -1,0 +1,166 @@
+<template id="scene4-highlev-template">
+  <div
+    data-composition-id="scene4-highlev"
+    data-start="26.08"
+    data-width="1080"
+    data-height="1920"
+    data-duration="7.85"
+  >
+    <!-- Fullscreen: "THEN THERE'S THE STRONG BASE" (local 0–3.92s) -->
+    <div class="s4-reveal" id="s4-reveal">
+      <div class="s4-then" id="s4-then">THEN THERE'S</div>
+      <div class="s4-strongbase" id="s4-strongbase">THE<br>STRONG<br>BASE</div>
+    </div>
+
+    <!-- Panel: CAPABLE → HIGH-LEVERAGE (local 3.92–7.85s) -->
+    <div class="s4-panel" id="s4-panel">
+      <div class="s4-label">THESE TOOLS SEPARATE</div>
+      <div class="s4-split">
+        <div class="s4-tier s4-capable" id="s4-capable">
+          <div class="s4-tier-label">CAPABLE</div>
+          <div class="s4-tier-tag">keeps up</div>
+        </div>
+        <div class="s4-arrow" id="s4-arrow">→</div>
+        <div class="s4-tier s4-highlev" id="s4-highlev">
+          <div class="s4-tier-label">HIGH-<br>LEVERAGE</div>
+          <div class="s4-tier-tag">builds more</div>
+        </div>
+      </div>
+    </div>
+
+    <style>
+      [data-composition-id="scene4-highlev"] {
+        position: absolute;
+        inset: 0;
+      }
+      /* Fullscreen reveal */
+      [data-composition-id="scene4-highlev"] .s4-reveal {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        background: rgba(7, 18, 28, 0.78);
+        opacity: 0;
+      }
+      [data-composition-id="scene4-highlev"] .s4-then {
+        font-family: "Roboto Mono", monospace;
+        font-weight: 500;
+        font-size: 46px;
+        letter-spacing: 0.14em;
+        color: #96a2b6;
+        clip-path: inset(0 100% 0 0);
+      }
+      [data-composition-id="scene4-highlev"] .s4-strongbase {
+        font-family: "Montserrat", sans-serif;
+        font-weight: 900;
+        font-size: 160px;
+        line-height: 0.9;
+        letter-spacing: -0.04em;
+        color: #f09025;
+        text-align: center;
+        opacity: 0;
+        transform: scale(0.8);
+      }
+      /* Panel */
+      [data-composition-id="scene4-highlev"] .s4-panel {
+        position: absolute;
+        top: 0; left: 0;
+        width: 1080px; height: 960px;
+        background: #07121c;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 40px;
+        padding: 60px 60px;
+        box-sizing: border-box;
+        font-family: "Montserrat", sans-serif;
+        opacity: 0;
+      }
+      [data-composition-id="scene4-highlev"] .s4-label {
+        font-family: "Roboto Mono", monospace;
+        font-weight: 500;
+        font-size: 36px;
+        letter-spacing: 0.1em;
+        color: #96a2b6;
+        text-align: center;
+        opacity: 0;
+      }
+      [data-composition-id="scene4-highlev"] .s4-split {
+        display: flex;
+        align-items: center;
+        gap: 24px;
+        width: 100%;
+      }
+      [data-composition-id="scene4-highlev"] .s4-tier {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+        padding: 32px 20px;
+        border-radius: 16px;
+        opacity: 0;
+        transform: translateY(20px);
+      }
+      [data-composition-id="scene4-highlev"] .s4-capable {
+        background: rgba(150, 162, 182, 0.12);
+        border: 2px solid rgba(150, 162, 182, 0.3);
+      }
+      [data-composition-id="scene4-highlev"] .s4-highlev {
+        background: rgba(55, 189, 248, 0.12);
+        border: 2px solid rgba(55, 189, 248, 0.4);
+      }
+      [data-composition-id="scene4-highlev"] .s4-tier-label {
+        font-weight: 900;
+        font-size: 68px;
+        line-height: 0.95;
+        letter-spacing: -0.02em;
+        text-align: center;
+      }
+      [data-composition-id="scene4-highlev"] .s4-capable .s4-tier-label { color: #96a2b6; }
+      [data-composition-id="scene4-highlev"] .s4-highlev .s4-tier-label { color: #37bdf8; }
+      [data-composition-id="scene4-highlev"] .s4-tier-tag {
+        font-family: "Roboto Mono", monospace;
+        font-size: 28px;
+        letter-spacing: 0.06em;
+        font-weight: 500;
+        color: rgba(255,255,255,0.5);
+      }
+      [data-composition-id="scene4-highlev"] .s4-arrow {
+        font-size: 80px;
+        color: #f09025;
+        opacity: 0;
+        transform: scale(0);
+      }
+    </style>
+
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script>
+      (function () {
+        const scope = '[data-composition-id="scene4-highlev"] ';
+        const tl = gsap.timeline({ paused: true });
+
+        // Phase 1: fullscreen "STRONG BASE" reveal
+        tl.to(scope + '.s4-reveal', { opacity: 1, duration: 0.2, ease: 'power2.out' }, 0.1);
+        tl.to(scope + '.s4-then', { clipPath: 'inset(0 0% 0 0)', duration: 0.35, ease: 'power3.out' }, 0.35);
+        tl.to(scope + '.s4-strongbase', { opacity: 1, scale: 1, duration: 0.5, ease: 'back.out(1.6)' }, 0.9);
+        tl.to(scope + '.s4-reveal', { opacity: 0, duration: 0.3, ease: 'power2.in' }, 3.5);
+
+        // Phase 2: CAPABLE → HIGH-LEVERAGE panel
+        tl.to(scope + '.s4-panel', { opacity: 1, duration: 0.3, ease: 'power2.out' }, 3.92);
+        tl.to(scope + '.s4-label', { opacity: 1, duration: 0.35, ease: 'power2.out' }, 4.2);
+        tl.to(scope + '.s4-capable', { opacity: 1, y: 0, duration: 0.38, ease: 'back.out(1.4)' }, 4.6);
+        tl.to(scope + '.s4-arrow', { opacity: 1, scale: 1, duration: 0.3, ease: 'back.out(2)' }, 5.1);
+        tl.to(scope + '.s4-highlev', { opacity: 1, y: 0, duration: 0.38, ease: 'back.out(1.4)' }, 5.4);
+
+        tl.set({}, {}, 7.85);
+        window.__timelines = window.__timelines || {};
+        window.__timelines['scene4-highlev'] = tl;
+      })();
+    </script>
+  </div>
+</template>

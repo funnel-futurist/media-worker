@@ -1,0 +1,179 @@
+<template id="scene6-close-template">
+  <div
+    data-composition-id="scene6-close"
+    data-start="56.20"
+    data-width="1080"
+    data-height="1920"
+    data-duration="13.60"
+  >
+    <!-- Fullscreen: "WE BUILT THE INCUBATOR" reveal (local 0–2.5s) -->
+    <div class="s6-reveal" id="s6-reveal">
+      <div class="s6-built" id="s6-built">WE BUILT THE</div>
+      <div class="s6-incubator" id="s6-incubator">INCUBATOR</div>
+      <div class="s6-plug" id="s6-plug">to plug exactly that gap.</div>
+    </div>
+
+    <!-- Panel: Close (local 2.5–13.60s) -->
+    <div class="s6-panel" id="s6-panel">
+      <div class="s6-cert-row" id="s6-cert-row">
+        <span class="s6-cert-label">CERTIFIED</span>
+        <span class="s6-eq">=</span>
+        <span class="s6-cert-val">verifiable.</span>
+      </div>
+      <div class="s6-foundation" id="s6-foundation">The tech stack is the foundation.</div>
+      <div class="s6-warn" id="s6-warn">Don't spend your first 30 days filling a skills gap that should have been filled</div>
+      <div class="s6-dayOne" id="s6-dayOne">BEFORE<br>DAY ONE.</div>
+    </div>
+
+    <style>
+      [data-composition-id="scene6-close"] {
+        position: absolute;
+        inset: 0;
+      }
+      /* Fullscreen reveal */
+      [data-composition-id="scene6-close"] .s6-reveal {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: flex-start;
+        padding-top: 80px;
+        box-sizing: border-box;
+        gap: 16px;
+        background: rgba(7, 18, 28, 0.82);
+        opacity: 0;
+      }
+      [data-composition-id="scene6-close"] .s6-built {
+        font-family: "Roboto Mono", monospace;
+        font-weight: 500;
+        font-size: 46px;
+        letter-spacing: 0.14em;
+        color: #96a2b6;
+        clip-path: inset(0 100% 0 0);
+      }
+      [data-composition-id="scene6-close"] .s6-incubator {
+        font-family: var(--font-display-slam);
+        font-weight: 900;
+        font-size: 148px;
+        line-height: 0.9;
+        letter-spacing: -0.04em;
+        color: #f09025;
+        text-align: center;
+        opacity: 0;
+        transform: scale(0.78);
+      }
+      [data-composition-id="scene6-close"] .s6-plug {
+        font-family: "Roboto Mono", monospace;
+        font-size: 34px;
+        font-weight: 500;
+        color: rgba(255, 255, 255, 0.6);
+        letter-spacing: 0.06em;
+        clip-path: inset(0 100% 0 0);
+      }
+      /* Close panel */
+      [data-composition-id="scene6-close"] .s6-panel {
+        position: absolute;
+        top: 0; left: 0;
+        width: 1080px; height: 960px;
+        background: #07121c;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        justify-content: center;
+        gap: 36px;
+        padding: 60px 80px;
+        box-sizing: border-box;
+        font-family: "Montserrat", sans-serif;
+        opacity: 0;
+      }
+      [data-composition-id="scene6-close"] .s6-cert-row {
+        display: flex;
+        align-items: center;
+        gap: 20px;
+        opacity: 0;
+        transform: translateY(14px);
+      }
+      [data-composition-id="scene6-close"] .s6-cert-label {
+        font-weight: 900;
+        font-size: 64px;
+        letter-spacing: -0.02em;
+        color: #37bdf8;
+      }
+      [data-composition-id="scene6-close"] .s6-eq {
+        font-family: "Roboto Mono", monospace;
+        font-size: 52px;
+        color: #f09025;
+        font-weight: 700;
+      }
+      [data-composition-id="scene6-close"] .s6-cert-val {
+        font-family: "Roboto Mono", monospace;
+        font-size: 46px;
+        font-weight: 500;
+        color: #ffffff;
+        letter-spacing: 0.04em;
+      }
+      [data-composition-id="scene6-close"] .s6-foundation {
+        font-family: "Roboto Mono", monospace;
+        font-size: 32px;
+        font-weight: 500;
+        color: #96a2b6;
+        letter-spacing: 0.06em;
+        line-height: 1.4;
+        opacity: 0;
+        clip-path: inset(0 100% 0 0);
+      }
+      [data-composition-id="scene6-close"] .s6-warn {
+        font-family: "Roboto Mono", monospace;
+        font-size: 28px;
+        font-weight: 500;
+        color: rgba(255, 255, 255, 0.5);
+        letter-spacing: 0.03em;
+        line-height: 1.5;
+        opacity: 0;
+        transform: translateY(10px);
+      }
+      [data-composition-id="scene6-close"] .s6-dayOne {
+        font-family: var(--font-display-slam);
+        font-weight: 900;
+        font-size: 110px;
+        line-height: 0.9;
+        letter-spacing: -0.03em;
+        color: #f09025;
+        opacity: 0;
+        transform: scale(0.85);
+      }
+    </style>
+
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script>
+      (function () {
+        const scope = '[data-composition-id="scene6-close"] ';
+        const tl = gsap.timeline({ paused: true });
+
+        // Phase 1: "INCUBATOR" reveal (0–2.5s)
+        tl.to(scope + '.s6-reveal', { opacity: 1, duration: 0.2, ease: 'power2.out' }, 0.1);
+        tl.to(scope + '.s6-built', { clipPath: 'inset(0 0% 0 0)', duration: 0.35, ease: 'power3.out' }, 0.3);
+        tl.to(scope + '.s6-incubator', { opacity: 1, scale: 1, duration: 0.5, ease: 'back.out(1.8)' }, 0.8);
+        tl.to(scope + '.s6-plug', { clipPath: 'inset(0 0% 0 0)', duration: 0.4, ease: 'power2.out' }, 1.5);
+        tl.to(scope + '.s6-reveal', { opacity: 0, duration: 0.25, ease: 'power2.in' }, 2.25);
+
+        // Phase 2: close panel (local 2.5s = face BOTTOM)
+        // Transcript timeline (local = abs - 56.20):
+        // "certified is a verifiable thing" → abs 59.42 = local 3.22
+        // "tech stack is the foundation" → abs 61.92 = local 5.72
+        // "spend the first 30 days filling" → abs 65.49 = local 9.29
+        // "before day one" → abs 68.96 = local 12.76
+        tl.to(scope + '.s6-panel', { opacity: 1, duration: 0.25, ease: 'power2.out' }, 2.5);
+        tl.to(scope + '.s6-cert-row', { opacity: 1, y: 0, duration: 0.4, ease: 'back.out(1.4)' }, 3.22);
+        tl.to(scope + '.s6-foundation', { opacity: 1, clipPath: 'inset(0 0% 0 0)', duration: 0.4, ease: 'power2.out' }, 5.72);
+        tl.to(scope + '.s6-warn', { opacity: 1, y: 0, duration: 0.4, ease: 'power2.out' }, 9.0);
+        tl.to(scope + '.s6-dayOne', { opacity: 1, scale: 1, duration: 0.45, ease: 'back.out(2)' }, 12.5);
+
+        tl.set({}, {}, 13.60);
+        window.__timelines = window.__timelines || {};
+        window.__timelines['scene6-close'] = tl;
+      })();
+    </script>
+  </div>
+</template>

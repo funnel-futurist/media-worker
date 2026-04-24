@@ -105,8 +105,15 @@ function runCommand(cmd, args, cwd, label) {
     });
     proc.on('error', reject);
     proc.on('close', (code) => {
-      if (code === 0) resolve(chunks.join(''));
-      else reject(new Error(`${label} exited with code ${code}`));
+      const output = chunks.join('');
+      if (code === 0) return resolve(output);
+      // Keep the last 1500 chars of combined stdout/stderr so we can surface
+      // the real failure reason in the ad_ingestion error event.
+      const tail = output.slice(-1500).replace(/\s+$/, '');
+      const err = new Error(`${label} exited with code ${code}\n--- last output ---\n${tail}`);
+      err.stage = label;
+      err.tail = tail;
+      reject(err);
     });
   });
 }
@@ -300,7 +307,12 @@ async function runHyperframesJob({
       client_id: clientId,
       event_type: 'error',
       source_module: 'media-worker/hyperframes',
-      metadata: { ingestion_id: adIngestionId, error: err.message.slice(0, 500) },
+      metadata: {
+        ingestion_id: adIngestionId,
+        error: err.message.slice(0, 1800),
+        stage: err.stage ?? null,
+        tail: err.tail ? err.tail.slice(-1500) : null,
+      },
     }).catch(() => {});
   } finally {
     // Clean up workspace

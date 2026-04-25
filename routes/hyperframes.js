@@ -306,25 +306,40 @@ async function runHyperframesJob({
     const publicUrl = await uploadToSupabaseStorage(outputPath, storagePath);
     console.log(`[hf] uploaded to ${publicUrl}`);
 
-    // 11. Update ad_ingestion
+    // 11. Update ad_ingestion — this is the success signal for the pipeline.
+    //     If this fails, the render is genuinely broken and we want the catch
+    //     block to revert to washed so cron retries.
     await supabaseUpdate('ad_ingestion', adIngestionId, {
       status: 'rendered',
       file_url: publicUrl,
     });
 
-    // 12. Log event
-    await supabaseInsert('content_pipeline_events', {
-      client_id: clientId,
-      event_type: 'hyperframes_render_complete',
-      source_module: 'media-worker/hyperframes',
-      metadata: {
-        ingestion_id: adIngestionId,
-        client_slug: clientSlug,
-        broll_count: brollUrls.length,
-        had_music: !!musicUrl,
-        output_path: storagePath,
-      },
-    });
+    // 12. Log event — BEST EFFORT ONLY.
+    //     Do NOT let an event-log write failure revert a successful render.
+    //     This bit us: the content_pipeline_events.event_type CHECK constraint
+    //     rejects 'hyperframes_render_complete' (not in the allowed enum),
+    //     which threw here, bubbled to the catch block, and flipped status
+    //     back to 'washed' — even though the MP4 was already uploaded and
+    //     ad_ingestion was already marked rendered.
+    //
+    //     Until a migration adds the new event_type, we swallow the error so
+    //     the render is considered complete regardless of log-write outcome.
+    try {
+      await supabaseInsert('content_pipeline_events', {
+        client_id: clientId,
+        event_type: 'hyperframes_render_complete',
+        source_module: 'media-worker/hyperframes',
+        metadata: {
+          ingestion_id: adIngestionId,
+          client_slug: clientSlug,
+          broll_count: brollUrls.length,
+          had_music: !!musicUrl,
+          output_path: storagePath,
+        },
+      });
+    } catch (logErr) {
+      console.warn(`[hf] event log write failed (non-fatal): ${logErr.message}`);
+    }
 
     console.log(`[hf] ✓ complete for ${adIngestionId}`);
   } catch (err) {

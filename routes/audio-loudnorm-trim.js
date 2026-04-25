@@ -16,26 +16,15 @@
  */
 
 import { Router } from 'express';
-import { writeFileSync, readFileSync, mkdirSync, rmSync, existsSync, createWriteStream } from 'fs';
+import { writeFileSync, readFileSync, mkdirSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { randomUUID, createHash } from 'crypto';
-import { pipeline } from 'stream/promises';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import axios from 'axios';
-import { google } from 'googleapis';
 import { getDuration } from '../lib/media.js';
 
 const execAsync = promisify(exec);
-
-function getDriveClient() {
-  const auth = new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET
-  );
-  auth.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
-  return google.drive({ version: 'v3', auth });
-}
 
 export const audioLoudnormTrimRouter = Router();
 
@@ -46,6 +35,8 @@ export const audioLoudnormTrimRouter = Router();
  *   sourceUrl: string,                         // for sourceType='public_url'
  *   sourceType: 'drive' | 'public_url',
  *   driveFileId?: string,                      // required when sourceType='drive'
+ *   driveToken?: string,                       // OAuth bearer token, required when sourceType='drive'
+ *                                              //   (generated caller-side via getDriveToken())
  *   trimStartSeconds: number,                  // head trim in seconds; 0 = no trim
  *   outputBucket: string,                      // e.g. 'hyperframes-source'
  *   outputObjectPath: string,                  // e.g. '<ad_ingestion_id>.mp4'
@@ -62,6 +53,7 @@ audioLoudnormTrimRouter.post('/audio-loudnorm-trim', async (req, res, next) => {
       sourceUrl,
       sourceType,
       driveFileId,
+      driveToken,
       trimStartSeconds = 0,
       outputBucket,
       outputObjectPath,
@@ -72,8 +64,8 @@ audioLoudnormTrimRouter.post('/audio-loudnorm-trim', async (req, res, next) => {
     if (!outputBucket || !outputObjectPath) {
       return res.status(400).json({ error: 'outputBucket and outputObjectPath are required' });
     }
-    if (sourceType === 'drive' && !driveFileId) {
-      return res.status(400).json({ error: 'driveFileId is required when sourceType=drive' });
+    if (sourceType === 'drive' && (!driveFileId || !driveToken)) {
+      return res.status(400).json({ error: 'driveFileId and driveToken are required when sourceType=drive' });
     }
     if (sourceType !== 'drive' && !sourceUrl) {
       return res.status(400).json({ error: 'sourceUrl is required when sourceType=public_url' });
@@ -87,23 +79,24 @@ audioLoudnormTrimRouter.post('/audio-loudnorm-trim', async (req, res, next) => {
     const outputPath = join(tmpDir, 'out.mp4');
 
     // ── 1. Download source ─────────────────────────────────────────
+    // Drive downloads use the caller-supplied bearer token (matches the
+    // pattern in routes/classify.js — Railway never holds OAuth credentials,
+    // creative-engine generates a short-lived token via getDriveToken()).
     console.log(`[audio-loudnorm-trim] downloading ${sourceType} for ${adIngestionId ?? '(no id)'}`);
-    if (sourceType === 'drive') {
-      const drive = getDriveClient();
-      const driveRes = await drive.files.get(
-        { fileId: driveFileId, alt: 'media', supportsAllDrives: true },
-        { responseType: 'stream' }
-      );
-      await pipeline(driveRes.data, createWriteStream(inputPath));
-    } else {
-      const { data } = await axios.get(sourceUrl, {
-        responseType: 'arraybuffer',
-        timeout: 180_000,
-        maxBodyLength: Infinity,
-        maxContentLength: Infinity,
-      });
-      writeFileSync(inputPath, Buffer.from(data));
-    }
+    const downloadUrl = sourceType === 'drive'
+      ? `https://www.googleapis.com/drive/v3/files/${driveFileId}?alt=media&supportsAllDrives=true`
+      : sourceUrl;
+    const downloadHeaders = sourceType === 'drive'
+      ? { Authorization: `Bearer ${driveToken}` }
+      : {};
+    const { data } = await axios.get(downloadUrl, {
+      responseType: 'arraybuffer',
+      timeout: 180_000,
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+      headers: downloadHeaders,
+    });
+    writeFileSync(inputPath, Buffer.from(data));
 
     if (!existsSync(inputPath)) {
       throw new Error('source download produced no file on disk');

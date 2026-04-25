@@ -23,19 +23,31 @@ RUN apt-get update && apt-get install -y \
 # short-form render pipeline fails at the prep step.
 # The small.en model (~466MB) is baked in so we don't download on every render.
 #
-# Uses a `set -euo pipefail` guard + `find` + explicit binary verification so
-# that a missing binary FAILS THE BUILD instead of silently creating a dangling
-# symlink (which would produce "whisper-cpp not found" at runtime).
+# Binary selection notes:
+#   whisper.cpp produces BOTH `main` (deprecation shim that prints a warning
+#   and exits 1) AND `whisper-cli` (the real current binary). An earlier
+#   version of this Dockerfile used a single `find` with `-o` and `head -1`,
+#   which picked whichever file the filesystem listed first — sometimes the
+#   deprecation shim. The shim's `exit 1` then failed the verify step.
+#   Prefer `whisper-cli` explicitly; fall back to the older names only if
+#   `whisper-cli` is missing (for older whisper.cpp commits).
 RUN set -euxo pipefail && \
     git clone --depth 1 https://github.com/ggml-org/whisper.cpp /opt/whisper.cpp && \
     cd /opt/whisper.cpp && \
     cmake -B build -DCMAKE_BUILD_TYPE=Release && \
     cmake --build build -j --config Release && \
-    echo "=== Searching for whisper binary ===" && \
-    WHISPER_BIN="$(find /opt/whisper.cpp/build/bin /opt/whisper.cpp -maxdepth 3 -type f -executable \
-                     \( -name 'whisper-cli' -o -name 'whisper' -o -name 'main' \) 2>/dev/null | head -1)" && \
+    echo "=== Searching for whisper binary (prefer whisper-cli) ===" && \
+    WHISPER_BIN="" && \
+    for candidate in whisper-cli whisper main; do \
+      WHISPER_BIN="$(find /opt/whisper.cpp/build/bin /opt/whisper.cpp -maxdepth 3 -type f -executable \
+                       -name "$candidate" 2>/dev/null | head -1)"; \
+      if [ -n "$WHISPER_BIN" ]; then \
+        echo "Found $candidate at $WHISPER_BIN"; \
+        break; \
+      fi; \
+    done && \
     if [ -z "$WHISPER_BIN" ]; then \
-      echo "FATAL: no whisper binary found after cmake build" && \
+      echo "FATAL: no whisper binary (whisper-cli/whisper/main) found after cmake build" && \
       ls -laR /opt/whisper.cpp/build/bin 2>/dev/null || true && \
       exit 1; \
     fi && \

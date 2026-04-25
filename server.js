@@ -26,6 +26,7 @@ import { youtubeRouter } from './routes/youtube.js';
 import { youtubeAuthRouter } from './routes/youtube-auth.js';
 import { hyperframesRouter } from './routes/hyperframes.js';
 import { audioLoudnormTrimRouter } from './routes/audio-loudnorm-trim.js';
+import { audioTranscribeRouter } from './routes/audio-transcribe.js';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -71,6 +72,8 @@ app.use('/', youtubeAuthRouter);
 app.use('/', hyperframesRouter);
 // Routes — Phase 11 (Per-video Hyperframes compose: trim+loudnorm)
 app.use('/', audioLoudnormTrimRouter);
+// Routes — Phase 12 (Per-video Hyperframes compose: word-level transcribe)
+app.use('/', audioTranscribeRouter);
 
 // Global error handler
 app.use((err, req, res, _next) => {

@@ -110,31 +110,66 @@ audioTranscribeRouter.post('/audio-transcribe', async (req, res, next) => {
 
     const raw = JSON.parse(readFileSync(transcriptPath, 'utf-8'));
 
-    // ── 3. Normalize Hyperframes' transcript shape into our gemini_markup shape
-    // Hyperframes transcribe output format (per align_captions.js):
-    //   { segments: [{ words: [{ word, start, end }, ...], ... }] }
-    // We need: { transcript: string, word_timestamps: [{ word, start_ms, end_ms }] }
+    // ── 3. Normalize Whisper output to gemini_markup shape ─────────
+    // Hyperframes wraps Whisper but the underlying binary's output format
+    // varies between platforms:
+    //   - OpenAI whisper.exe (Windows / miniconda):
+    //       { segments: [{ words: [{ word, start, end (seconds) }] }] }
+    //   - whisper.cpp on Linux/Railway (--output-json-full):
+    //       { transcription: [{ tokens: [{ text, offsets:{from,to} (ms), ... }],
+    //                            text: "...", offsets: {from, to} }] }
+    // We must handle BOTH. Normalize to:
+    //   { transcript: string, word_timestamps: [{word, start_ms, end_ms}] }
     const word_timestamps = [];
-    let transcriptParts = [];
+    const transcriptParts = [];
+
     const segments = raw.segments ?? raw.transcription ?? [];
+    console.log(
+      `[audio-transcribe] parsed ${segments.length} segments; ` +
+        `top-level keys: [${Object.keys(raw).join(', ')}]`
+    );
+
     for (const seg of segments) {
-      const words = seg.words ?? [];
-      for (const w of words) {
-        const text = (w.word ?? w.text ?? '').trim();
+      // Use 'words' (OpenAI) if present, else fall back to 'tokens' (whisper.cpp).
+      const items = seg.words ?? seg.tokens ?? [];
+      for (const item of items) {
+        const rawText = item.word ?? item.text ?? '';
+        const text = String(rawText).trim();
         if (!text) continue;
-        const startSec = typeof w.start === 'number' ? w.start : Number(w.start) || 0;
-        const endSec = typeof w.end === 'number' ? w.end : Number(w.end) || startSec;
-        word_timestamps.push({
-          word: text,
-          start_ms: Math.round(startSec * 1000),
-          end_ms: Math.round(endSec * 1000),
-        });
+        // whisper.cpp special tokens to skip:
+        //   "[BLANK_AUDIO]", "[_BEG_]", "<|0.00|>", "<|en|>", etc.
+        if (/^[\[<]/.test(text) || /^\[_/.test(text)) continue;
+
+        // Time extraction:
+        //   whisper.cpp: item.offsets = {from, to} in MILLISECONDS (ints)
+        //   OpenAI:      item.start / item.end in SECONDS (floats)
+        let start_ms, end_ms;
+        if (item.offsets && typeof item.offsets.from === 'number') {
+          start_ms = item.offsets.from;
+          end_ms = item.offsets.to;
+        } else {
+          const startSec =
+            typeof item.start === 'number' ? item.start : Number(item.start) || 0;
+          const endSec =
+            typeof item.end === 'number' ? item.end : Number(item.end) || startSec;
+          start_ms = Math.round(startSec * 1000);
+          end_ms = Math.round(endSec * 1000);
+        }
+        word_timestamps.push({ word: text, start_ms, end_ms });
       }
       if (seg.text) transcriptParts.push(String(seg.text).trim());
     }
+
     const transcript = transcriptParts.length
       ? transcriptParts.join(' ').replace(/\s+/g, ' ').trim()
       : word_timestamps.map((w) => w.word).join(' ');
+
+    if (word_timestamps.length === 0) {
+      console.warn(
+        `[audio-transcribe] PARSED ZERO WORDS — raw structure may be unexpected. ` +
+          `First 600 chars of raw: ${JSON.stringify(raw).slice(0, 600)}`
+      );
+    }
 
     const durationSeconds = word_timestamps.length
       ? word_timestamps[word_timestamps.length - 1].end_ms / 1000

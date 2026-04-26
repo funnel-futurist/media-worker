@@ -164,11 +164,22 @@ audioTranscribeRouter.post('/audio-transcribe', async (req, res, next) => {
       ? transcriptParts.join(' ').replace(/\s+/g, ' ').trim()
       : word_timestamps.map((w) => w.word).join(' ');
 
+    // When word_timestamps is empty, expose diagnostic info in the response
+    // so the Vercel-side caller can save it for inspection. Without this we
+    // have no visibility into Whisper's actual output shape from outside the
+    // Railway box.
+    let _debug = null;
     if (word_timestamps.length === 0) {
-      console.warn(
-        `[audio-transcribe] PARSED ZERO WORDS — raw structure may be unexpected. ` +
-          `First 600 chars of raw: ${JSON.stringify(raw).slice(0, 600)}`
-      );
+      const sample = JSON.stringify(raw).slice(0, 2000);
+      console.warn(`[audio-transcribe] PARSED ZERO WORDS. Raw sample: ${sample}`);
+      _debug = {
+        rawTopLevelKeys: Object.keys(raw),
+        rawIsArray: Array.isArray(raw),
+        rawSample: sample,
+        segmentsCount: segments.length,
+        firstSegmentKeys: segments[0] ? Object.keys(segments[0]) : null,
+        firstSegmentSample: segments[0] ? JSON.stringify(segments[0]).slice(0, 1000) : null,
+      };
     }
 
     const durationSeconds = word_timestamps.length
@@ -187,6 +198,7 @@ audioTranscribeRouter.post('/audio-transcribe', async (req, res, next) => {
       durationSeconds,
       adIngestionId: adIngestionId ?? null,
       clientId: clientId ?? null,
+      ..._debug ? { _debug } : {},
     });
   } catch (err) {
     console.error('[audio-transcribe] error:', err?.message ?? err);

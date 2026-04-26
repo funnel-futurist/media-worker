@@ -98,14 +98,41 @@ audioTranscribeRouter.post('/audio-transcribe', async (req, res, next) => {
     // The CLI writes transcript.json to CWD. We run with cwd=tmpDir so the
     // JSON lands in our scratch folder and gets cleaned up automatically.
     console.log(`[audio-transcribe] hyperframes transcribe (model=${model})`);
-    await execAsync(
-      `npx hyperframes transcribe "${inputPath}" --model ${model} --json`,
-      { cwd: tmpDir, timeout: 300_000, maxBuffer: 50 * 1024 * 1024 }
-    );
+    // Use the locally-installed hyperframes binary (pinned in package.json
+    // as ^0.4.20). Calling `npx hyperframes` was downloading 0.4.30 fresh
+    // each call AND failing — possibly version-incompatible with whisper-cli
+    // setup on Railway. Direct local-bin call avoids both issues.
+    const localBin = join(process.cwd(), 'node_modules', '.bin', 'hyperframes');
+    let runStdout = '';
+    let runStderr = '';
+    try {
+      const result = await execAsync(
+        `"${localBin}" transcribe "${inputPath}" --model ${model} --json`,
+        { cwd: tmpDir, timeout: 300_000, maxBuffer: 50 * 1024 * 1024 }
+      );
+      runStdout = result.stdout ?? '';
+      runStderr = result.stderr ?? '';
+    } catch (execErr) {
+      // execAsync swallows stderr by default — we need it to know why
+      // whisper-cli failed (model missing, ffmpeg path issue, etc).
+      const stdout = (execErr.stdout || '').toString();
+      const stderr = (execErr.stderr || '').toString();
+      const msg = execErr.message || String(execErr);
+      throw new Error(
+        `hyperframes transcribe exec failed:\n` +
+          `  stderr: ${stderr.slice(-1500)}\n` +
+          `  stdout: ${stdout.slice(-500)}\n` +
+          `  msg: ${msg.slice(0, 200)}`
+      );
+    }
 
     const transcriptPath = join(tmpDir, 'transcript.json');
     if (!existsSync(transcriptPath)) {
-      throw new Error('hyperframes transcribe produced no transcript.json');
+      throw new Error(
+        `hyperframes transcribe produced no transcript.json. ` +
+          `stderr tail: ${runStderr.slice(-1500)}\n` +
+          `stdout tail: ${runStdout.slice(-500)}`
+      );
     }
 
     const raw = JSON.parse(readFileSync(transcriptPath, 'utf-8'));

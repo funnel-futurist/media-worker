@@ -138,53 +138,55 @@ audioTranscribeRouter.post('/audio-transcribe', async (req, res, next) => {
     const raw = JSON.parse(readFileSync(transcriptPath, 'utf-8'));
 
     // ── 3. Normalize Whisper output to gemini_markup shape ─────────
-    // Hyperframes wraps Whisper but the underlying binary's output format
-    // varies between platforms:
-    //   - OpenAI whisper.exe (Windows / miniconda):
-    //       { segments: [{ words: [{ word, start, end (seconds) }] }] }
-    //   - whisper.cpp on Linux/Railway (--output-json-full):
-    //       { transcription: [{ tokens: [{ text, offsets:{from,to} (ms), ... }],
-    //                            text: "...", offsets: {from, to} }] }
-    // We must handle BOTH. Normalize to:
-    //   { transcript: string, word_timestamps: [{word, start_ms, end_ms}] }
+    // Hyperframes' `transcribe --json` actually emits a FLAT ARRAY of words:
+    //   [ { text, start (sec), end (sec) }, ... ]
+    // We previously assumed an object with segments/transcription keys (the
+    // raw OpenAI / whisper.cpp shapes) — but Hyperframes flattens those into
+    // a single word-level array before writing transcript.json.
+    //
+    // We still keep the segments/tokens fallbacks in case the shape changes
+    // in a future Hyperframes version, OR if a different runtime is used
+    // (e.g. local OpenAI whisper.exe on Windows).
     const word_timestamps = [];
     const transcriptParts = [];
 
-    const segments = raw.segments ?? raw.transcription ?? [];
+    const flatWords = Array.isArray(raw) ? raw : null;
+    const segments = !flatWords ? (raw.segments ?? raw.transcription ?? []) : [];
     console.log(
-      `[audio-transcribe] parsed ${segments.length} segments; ` +
-        `top-level keys: [${Object.keys(raw).join(', ')}]`
+      `[audio-transcribe] parsed ${flatWords ? `flat array len=${flatWords.length}` : `${segments.length} segments`}; ` +
+        `top-level: ${flatWords ? 'array' : '[' + Object.keys(raw).join(', ') + ']'}`
     );
 
-    for (const seg of segments) {
-      // Use 'words' (OpenAI) if present, else fall back to 'tokens' (whisper.cpp).
-      const items = seg.words ?? seg.tokens ?? [];
-      for (const item of items) {
-        const rawText = item.word ?? item.text ?? '';
-        const text = String(rawText).trim();
-        if (!text) continue;
-        // whisper.cpp special tokens to skip:
-        //   "[BLANK_AUDIO]", "[_BEG_]", "<|0.00|>", "<|en|>", etc.
-        if (/^[\[<]/.test(text) || /^\[_/.test(text)) continue;
+    function pushWord(item) {
+      const rawText = item.word ?? item.text ?? '';
+      const text = String(rawText).trim();
+      if (!text) return;
+      // whisper.cpp special tokens: "[BLANK_AUDIO]", "<|0.00|>", "<|en|>", etc.
+      if (/^[\[<]/.test(text) || /^\[_/.test(text)) return;
 
-        // Time extraction:
-        //   whisper.cpp: item.offsets = {from, to} in MILLISECONDS (ints)
-        //   OpenAI:      item.start / item.end in SECONDS (floats)
-        let start_ms, end_ms;
-        if (item.offsets && typeof item.offsets.from === 'number') {
-          start_ms = item.offsets.from;
-          end_ms = item.offsets.to;
-        } else {
-          const startSec =
-            typeof item.start === 'number' ? item.start : Number(item.start) || 0;
-          const endSec =
-            typeof item.end === 'number' ? item.end : Number(item.end) || startSec;
-          start_ms = Math.round(startSec * 1000);
-          end_ms = Math.round(endSec * 1000);
-        }
-        word_timestamps.push({ word: text, start_ms, end_ms });
+      let start_ms, end_ms;
+      if (item.offsets && typeof item.offsets.from === 'number') {
+        // whisper.cpp: offsets in milliseconds
+        start_ms = item.offsets.from;
+        end_ms = item.offsets.to;
+      } else {
+        // Hyperframes flat array AND OpenAI whisper.exe: start/end in seconds
+        const startSec = typeof item.start === 'number' ? item.start : Number(item.start) || 0;
+        const endSec = typeof item.end === 'number' ? item.end : Number(item.end) || startSec;
+        start_ms = Math.round(startSec * 1000);
+        end_ms = Math.round(endSec * 1000);
       }
-      if (seg.text) transcriptParts.push(String(seg.text).trim());
+      word_timestamps.push({ word: text, start_ms, end_ms });
+    }
+
+    if (flatWords) {
+      for (const item of flatWords) pushWord(item);
+    } else {
+      for (const seg of segments) {
+        const items = seg.words ?? seg.tokens ?? [];
+        for (const item of items) pushWord(item);
+        if (seg.text) transcriptParts.push(String(seg.text).trim());
+      }
     }
 
     const transcript = transcriptParts.length

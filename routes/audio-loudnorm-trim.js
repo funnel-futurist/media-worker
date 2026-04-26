@@ -37,14 +37,18 @@ export const audioLoudnormTrimRouter = Router();
  *   driveFileId?: string,                      // required when sourceType='drive'
  *   driveToken?: string,                       // OAuth bearer token, required when sourceType='drive'
  *                                              //   (generated caller-side via getDriveToken())
- *   trimStartSeconds: number,                  // head trim in seconds; 0 = no trim
+ *   trimStartSeconds: number,                  // head trim in seconds; 0 = no trim (legacy slate-only path)
+ *   cuts?: Array<{ start: number, end: number }>,  // optional silence/bad-take cuts in source-time;
+ *                                                   //   the slate trim (if trimStartSeconds > 0) is
+ *                                                   //   prepended automatically — caller passes ONE source
+ *                                                   //   of truth for editorial cuts only.
  *   outputBucket: string,                      // e.g. 'hyperframes-source'
  *   outputObjectPath: string,                  // e.g. '<ad_ingestion_id>.mp4'
  *   clientId: string,
  *   adIngestionId: string,
  * }
  *
- * Response: { storageBucket, storagePath, durationSeconds, assetHash }
+ * Response: { storageBucket, storagePath, durationSeconds, assetHash, cutsApplied }
  */
 audioLoudnormTrimRouter.post('/audio-loudnorm-trim', async (req, res, next) => {
   const tmpDir = join('/tmp', `audionorm-${randomUUID()}`);
@@ -55,6 +59,7 @@ audioLoudnormTrimRouter.post('/audio-loudnorm-trim', async (req, res, next) => {
       driveFileId,
       driveToken,
       trimStartSeconds = 0,
+      cuts = [],
       outputBucket,
       outputObjectPath,
       clientId,
@@ -72,6 +77,14 @@ audioLoudnormTrimRouter.post('/audio-loudnorm-trim', async (req, res, next) => {
     }
     if (typeof trimStartSeconds !== 'number' || trimStartSeconds < 0) {
       return res.status(400).json({ error: 'trimStartSeconds must be a non-negative number' });
+    }
+    if (!Array.isArray(cuts)) {
+      return res.status(400).json({ error: 'cuts must be an array' });
+    }
+    for (const c of cuts) {
+      if (typeof c?.start !== 'number' || typeof c?.end !== 'number' || c.end <= c.start) {
+        return res.status(400).json({ error: 'each cut must be { start: number, end: number } with end > start' });
+      }
     }
 
     mkdirSync(tmpDir, { recursive: true });
@@ -102,11 +115,44 @@ audioLoudnormTrimRouter.post('/audio-loudnorm-trim', async (req, res, next) => {
       throw new Error('source download produced no file on disk');
     }
 
-    // ── 2. Trim head + loudnorm in a single ffmpeg pass ────────────
-    // -ss BEFORE -i: fast seek; combined with re-encode, the trim is
-    // frame-accurate (slate detection gives us a precise timestamp,
-    // we don't want to drift to the nearest keyframe).
+    // ── 2. Build the unified cuts list, then derive keep-segments ──
+    // Slate trim (trimStartSeconds) is treated as the first cut [0, trimStartSeconds]
+    // so the rest of the pipeline only knows about ONE concept: cut windows.
     //
+    // After this step `allCuts` is a sorted, non-overlapping list of windows
+    // to REMOVE. Keep-segments are the inverse: the windows to retain.
+    const sourceDurationSeconds = await getDuration(inputPath);
+    const allCuts = [];
+    if (trimStartSeconds > 0) allCuts.push({ start: 0, end: trimStartSeconds });
+    for (const c of cuts) allCuts.push({ start: c.start, end: c.end });
+    allCuts.sort((a, b) => a.start - b.start);
+
+    // Merge overlapping/adjacent cuts so the segment math stays clean.
+    const mergedCuts = [];
+    for (const c of allCuts) {
+      const last = mergedCuts[mergedCuts.length - 1];
+      if (last && c.start <= last.end) {
+        last.end = Math.max(last.end, c.end);
+      } else {
+        mergedCuts.push({ start: c.start, end: c.end });
+      }
+    }
+
+    // Build keep-segments — gaps between cuts, plus the head/tail.
+    const keepSegments = [];
+    let cursor = 0;
+    for (const c of mergedCuts) {
+      if (c.start > cursor) keepSegments.push({ start: cursor, end: c.start });
+      cursor = Math.max(cursor, c.end);
+    }
+    if (cursor < sourceDurationSeconds) {
+      keepSegments.push({ start: cursor, end: sourceDurationSeconds });
+    }
+    if (keepSegments.length === 0) {
+      throw new Error('cuts cover the entire source — nothing to keep');
+    }
+
+    // ── 3. ffmpeg: trim each keep-segment, concat, then loudnorm ───
     // Re-encoding video as H.264 is necessary because:
     //   1. Frame-accurate trim requires re-encode (stream copy snaps to
     //      keyframes which can drift several seconds)
@@ -115,23 +161,47 @@ audioLoudnormTrimRouter.post('/audio-loudnorm-trim', async (req, res, next) => {
     //
     // The `loudnorm` filter brings audio to EBU R128 (-16 LUFS integrated,
     // -1.5 dBTP, 11 LU LRA) — same constants Phoenix used in submagic.js
-    // and the same standard Instagram/TikTok/YouTube target.
-    const trimArg = trimStartSeconds > 0 ? `-ss ${trimStartSeconds}` : '';
-    console.log(`[audio-loudnorm-trim] ffmpeg trim=${trimStartSeconds}s + loudnorm`);
+    // and the same standard Instagram/TikTok/YouTube target. Loudnorm runs
+    // AFTER concat so the normalized loudness is based on the kept content,
+    // not on the cut-out dead air.
+    //
+    // Dense keyframes (-r 30 -g 30 -keyint_min 30) are required by
+    // Hyperframes' parallel frame extractor — sparse keyframes cause the
+    // worker pool to time out waiting for `loadedmetadata`.
+    const filterParts = [];
+    keepSegments.forEach((seg, i) => {
+      filterParts.push(
+        `[0:v]trim=${seg.start.toFixed(3)}:${seg.end.toFixed(3)},setpts=PTS-STARTPTS[v${i}]`
+      );
+      filterParts.push(
+        `[0:a]atrim=${seg.start.toFixed(3)}:${seg.end.toFixed(3)},asetpts=PTS-STARTPTS[a${i}]`
+      );
+    });
+    const concatInputs = keepSegments.map((_, i) => `[v${i}][a${i}]`).join('');
+    filterParts.push(`${concatInputs}concat=n=${keepSegments.length}:v=1:a=1[v][araw]`);
+    filterParts.push(`[araw]loudnorm=I=-16:TP=-1.5:LRA=11[a]`);
+    const filterComplex = filterParts.join(';');
+
+    console.log(
+      `[audio-loudnorm-trim] ffmpeg cuts=${mergedCuts.length} ` +
+        `keep_segments=${keepSegments.length} src_dur=${sourceDurationSeconds.toFixed(2)}s`
+    );
     await execAsync(
-      `ffmpeg ${trimArg} -i "${inputPath}" ` +
-        `-af "loudnorm=I=-16:TP=-1.5:LRA=11" ` +
+      `ffmpeg -i "${inputPath}" ` +
+        `-filter_complex "${filterComplex}" ` +
+        `-map "[v]" -map "[a]" ` +
         `-c:v libx264 -preset veryfast -b:v 2500k ` +
+        `-r 30 -g 30 -keyint_min 30 ` +
         `-c:a aac -b:a 192k ` +
         `-movflags +faststart -y "${outputPath}"`,
-      { timeout: 600_000 }
+      { timeout: 600_000, maxBuffer: 50 * 1024 * 1024 }
     );
 
     if (!existsSync(outputPath)) {
       throw new Error('ffmpeg produced no output');
     }
 
-    // ── 3. Compute duration + content hash ─────────────────────────
+    // ── 4. Compute duration + content hash ─────────────────────────
     const durationSeconds = await getDuration(outputPath);
     const fileBuffer = readFileSync(outputPath);
     const assetHash = createHash('sha256').update(fileBuffer).digest('hex');
@@ -141,7 +211,7 @@ audioLoudnormTrimRouter.post('/audio-loudnorm-trim', async (req, res, next) => {
         `dur=${durationSeconds.toFixed(2)}s sha256=${assetHash.slice(0, 12)}…`
     );
 
-    // ── 4. Upload to Supabase Storage ──────────────────────────────
+    // ── 5. Upload to Supabase Storage ──────────────────────────────
     const supabaseUrl = process.env.SUPABASE_URL;
     const supabaseKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
     if (!supabaseUrl || !supabaseKey) {
@@ -162,12 +232,15 @@ audioLoudnormTrimRouter.post('/audio-loudnorm-trim', async (req, res, next) => {
       }
     );
 
-    // ── 5. Return STABLE refs (no signed URL — caller signs on demand) ─
+    // ── 6. Return STABLE refs (no signed URL — caller signs on demand) ─
+    const totalCutSeconds = mergedCuts.reduce((sum, c) => sum + (c.end - c.start), 0);
     res.json({
       storageBucket: outputBucket,
       storagePath: outputObjectPath,
       durationSeconds,
       assetHash,
+      cutsApplied: mergedCuts.length,
+      totalCutSeconds: Number(totalCutSeconds.toFixed(3)),
       // Helpful echo for log correlation
       adIngestionId: adIngestionId ?? null,
       clientId: clientId ?? null,

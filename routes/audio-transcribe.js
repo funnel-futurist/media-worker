@@ -24,8 +24,12 @@ import { Router } from 'express';
 import { writeFileSync, mkdirSync, rmSync, existsSync, statSync, createReadStream } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import axios from 'axios';
 import FormData from 'form-data';
+
+const execAsync = promisify(exec);
 import { getDuration } from '../lib/media.js';
 
 export const audioTranscribeRouter = Router();
@@ -109,6 +113,20 @@ audioTranscribeRouter.post('/audio-transcribe', async (req, res, next) => {
       );
     }
 
+    // ── 1b. Audio-waveform silence detection (Phoenix's approach from PR #106) ──
+    // Run ffmpeg silencedetect on the source audio to find REAL silences —
+    // not just gaps between Whisper words. Returns spans where audio energy
+    // drops below -35 dBFS for ≥ 0.6s. More accurate than word-gap heuristics
+    // because it catches mid-sentence breath pauses, gaps inside slurred
+    // speech, and is sample-accurate (vs Whisper word boundary drift).
+    //
+    // Uses defaults from ff-pilot/scripts/silence_cut.js. compose_pending
+    // can override via deterministic_cuts options if a client speaker has
+    // unusual mic levels.
+    console.log(`[audio-transcribe] running ffmpeg silencedetect (-35dB, 0.6s)`);
+    const silenceMap = await detectAudioSilences(inputPath);
+    console.log(`[audio-transcribe] silencedetect found ${silenceMap.length} silence span(s)`);
+
     // ── 2. Call ElevenLabs Scribe ──────────────────────────────────
     // multipart upload via form-data + axios. language_code=eng to match the
     // small.en model behavior we replaced (no auto-detect drift on long
@@ -171,6 +189,7 @@ audioTranscribeRouter.post('/audio-transcribe', async (req, res, next) => {
     res.json({
       transcript,
       word_timestamps,
+      silence_map: silenceMap,
       model: 'elevenlabs_scribe_v1',
       durationSeconds,
       adIngestionId: adIngestionId ?? null,
@@ -184,6 +203,49 @@ audioTranscribeRouter.post('/audio-transcribe', async (req, res, next) => {
     rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+/**
+ * Run ffmpeg silencedetect on the source mp4 and return silence spans.
+ *
+ * Adapted from Phoenix's video-projects/ff-pilot/scripts/silence_cut.js
+ * (creative-engine repo). Same defaults: noise=-35dB, duration=0.6s. The
+ * filter scans the audio waveform for low-energy spans and reports their
+ * start/end timestamps in seconds via stderr.
+ *
+ * Returns Array<{start, end}> in source-time seconds. Empty array if no
+ * silences found OR if ffmpeg fails (silence detection is optional — caller
+ * falls back to word-gap heuristic).
+ */
+async function detectAudioSilences(inputPath) {
+  const NOISE_DB = -35;
+  const MIN_DUR = 0.6;
+  try {
+    const { stderr } = await execAsync(
+      `ffmpeg -i "${inputPath}" -af "silencedetect=noise=${NOISE_DB}dB:duration=${MIN_DUR}" -f null -`,
+      { timeout: 60_000, maxBuffer: 50 * 1024 * 1024 },
+    ).catch((err) => {
+      // ffmpeg with -f null exits with code 0 normally; if it fails, log and
+      // return empty.
+      const stderrOut = (err && (err.stderr || err.message)) || '';
+      return { stderr: stderrOut };
+    });
+
+    const startMatches = [...stderr.matchAll(/silence_start: ([\d.]+)/g)];
+    const endMatches = [...stderr.matchAll(/silence_end: ([\d.]+)/g)];
+    const spans = [];
+    for (let i = 0; i < startMatches.length; i++) {
+      const start = parseFloat(startMatches[i][1]);
+      const end = endMatches[i] ? parseFloat(endMatches[i][1]) : null;
+      if (end == null || end <= start) continue;
+      if (end - start < MIN_DUR) continue;
+      spans.push({ start, end });
+    }
+    return spans;
+  } catch (err) {
+    console.warn(`[audio-transcribe] silencedetect failed (non-fatal): ${err.message}`);
+    return [];
+  }
+}
 
 /**
  * Call Scribe with one retry on transient network failures. We do NOT retry on

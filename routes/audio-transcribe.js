@@ -1,34 +1,38 @@
 /**
  * routes/audio-transcribe.js
  *
- * Word-level Whisper transcription endpoint. Used by creative-engine's
- * compose_pending cron to lazy-fill gemini_markup.word_timestamps when
- * classify_pending didn't produce them.
+ * Word-level transcription endpoint. Used by creative-engine's compose_pending
+ * cron to produce word_timestamps that drive captions, slate detection, and
+ * deterministic editorial cuts.
  *
- * Implementation: shells out to `npx hyperframes transcribe <file> --json`
- * (which wraps whisper.cpp internally — already installed on Railway per
- * Phoenix's PR #78). Output is `transcript.json` in CWD; we read and return
- * its contents as the response body.
+ * Implementation: POSTs the source bytes to ElevenLabs Scribe
+ * (https://api.elevenlabs.io/v1/speech-to-text) with model_id=scribe_v1 and
+ * language_code=eng. Response is mapped to the existing
+ *   { transcript, word_timestamps: [{word, start_ms, end_ms}], model, durationSeconds }
+ * shape so the wire contract to Vercel is unchanged.
  *
- * Returns the same shape Gemini's classify pipeline produces, so callers
- * can drop it directly into ad_ingestion.gemini_markup:
- *   { transcript: string, word_timestamps: Array<{word, start_ms, end_ms}> }
+ * Why Scribe and not whisper.cpp small.en (the previous implementation):
+ * Phase 2c proved Whisper's transcription errors ("Slack→slab", "automation→inone")
+ * were the upstream cause of bad editorial decisions. Higher-fidelity input was
+ * the cheapest improvement on the whole pipeline.
  *
- * Drive sources use the caller-supplied bearer token (same pattern as
- * routes/audio-loudnorm-trim.js + classify.js — Railway never holds OAuth).
+ * Drive sources still use the caller-supplied bearer token (Railway never holds
+ * OAuth credentials — same pattern as routes/audio-loudnorm-trim.js + classify.js).
  */
 
 import { Router } from 'express';
-import { writeFileSync, readFileSync, mkdirSync, rmSync, existsSync } from 'fs';
+import { writeFileSync, mkdirSync, rmSync, existsSync, statSync, createReadStream } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
-import { exec } from 'child_process';
-import { promisify } from 'util';
 import axios from 'axios';
-
-const execAsync = promisify(exec);
+import FormData from 'form-data';
+import { getDuration } from '../lib/media.js';
 
 export const audioTranscribeRouter = Router();
+
+const SCRIBE_URL = 'https://api.elevenlabs.io/v1/speech-to-text';
+const SCRIBE_MAX_BYTES = 1 * 1024 * 1024 * 1024; // 1 GB — Scribe's documented limit is 3 GB but we cap conservatively
+const SCRIBE_TIMEOUT_MS = 180_000;
 
 /**
  * POST /audio-transcribe
@@ -38,9 +42,9 @@ export const audioTranscribeRouter = Router();
  *   sourceType: 'drive' | 'public_url',
  *   driveFileId?: string,                 // required when sourceType='drive'
  *   driveToken?: string,                  // required when sourceType='drive'
- *   model?: string,                       // whisper model (default 'small.en')
- *   adIngestionId?: string,               // for log correlation
- *   clientId?: string,                    // for log correlation
+ *   model?: string,                       // ignored — kept for back-compat with old callers
+ *   adIngestionId?: string,
+ *   clientId?: string,
  * }
  *
  * Response: {
@@ -58,7 +62,6 @@ audioTranscribeRouter.post('/audio-transcribe', async (req, res, next) => {
       sourceType,
       driveFileId,
       driveToken,
-      model = 'small.en',
       adIngestionId,
       clientId,
     } = req.body || {};
@@ -68,6 +71,11 @@ audioTranscribeRouter.post('/audio-transcribe', async (req, res, next) => {
     }
     if (sourceType !== 'drive' && !sourceUrl) {
       return res.status(400).json({ error: 'sourceUrl is required when sourceType=public_url' });
+    }
+
+    const apiKey = process.env.ELEVENLABS_API_KEY;
+    if (!apiKey) {
+      throw new Error('ELEVENLABS_API_KEY not set on Railway — required for Scribe transcription');
     }
 
     mkdirSync(tmpDir, { recursive: true });
@@ -94,136 +102,76 @@ audioTranscribeRouter.post('/audio-transcribe', async (req, res, next) => {
       throw new Error('source download produced no file on disk');
     }
 
-    // ── 2. Run hyperframes transcribe (wraps whisper.cpp) ──────────
-    // The CLI writes transcript.json to CWD. We run with cwd=tmpDir so the
-    // JSON lands in our scratch folder and gets cleaned up automatically.
-    console.log(`[audio-transcribe] hyperframes transcribe (model=${model})`);
-    // Use the locally-installed hyperframes binary (pinned in package.json
-    // as ^0.4.20). Calling `npx hyperframes` was downloading 0.4.30 fresh
-    // each call AND failing — possibly version-incompatible with whisper-cli
-    // setup on Railway. Direct local-bin call avoids both issues.
-    const localBin = join(process.cwd(), 'node_modules', '.bin', 'hyperframes');
-    let runStdout = '';
-    let runStderr = '';
-    try {
-      const result = await execAsync(
-        `"${localBin}" transcribe "${inputPath}" --model ${model} --json`,
-        { cwd: tmpDir, timeout: 300_000, maxBuffer: 50 * 1024 * 1024 }
-      );
-      runStdout = result.stdout ?? '';
-      runStderr = result.stderr ?? '';
-    } catch (execErr) {
-      // execAsync swallows stderr by default — we need it to know why
-      // whisper-cli failed (model missing, ffmpeg path issue, etc).
-      const stdout = (execErr.stdout || '').toString();
-      const stderr = (execErr.stderr || '').toString();
-      const msg = execErr.message || String(execErr);
+    const fileSize = statSync(inputPath).size;
+    if (fileSize > SCRIBE_MAX_BYTES) {
       throw new Error(
-        `hyperframes transcribe exec failed:\n` +
-          `  stderr: ${stderr.slice(-1500)}\n` +
-          `  stdout: ${stdout.slice(-500)}\n` +
-          `  msg: ${msg.slice(0, 200)}`
+        `source is ${(fileSize / 1024 / 1024).toFixed(1)} MB — exceeds Scribe upload cap of 1 GB`,
       );
     }
 
-    const transcriptPath = join(tmpDir, 'transcript.json');
-    if (!existsSync(transcriptPath)) {
-      throw new Error(
-        `hyperframes transcribe produced no transcript.json. ` +
-          `stderr tail: ${runStderr.slice(-1500)}\n` +
-          `stdout tail: ${runStdout.slice(-500)}`
-      );
-    }
+    // ── 2. Call ElevenLabs Scribe ──────────────────────────────────
+    // multipart upload via form-data + axios. language_code=eng to match the
+    // small.en model behavior we replaced (no auto-detect drift on long
+    // monologues with rare loanwords).
+    console.log(`[audio-transcribe] scribe POST (${(fileSize / 1024 / 1024).toFixed(1)} MB)`);
+    const scribeResponse = await callScribeWithRetry(apiKey, inputPath);
 
-    const raw = JSON.parse(readFileSync(transcriptPath, 'utf-8'));
+    // ── 3. Map response → wire contract ────────────────────────────
+    // Scribe returns words[] with type='word' | 'spacing' | 'audio_event'.
+    // Filter to type='word' only — spacing is whitespace metadata, audio_event
+    // is non-speech sound annotations that aren't part of the speaker's words.
+    const rawWords = Array.isArray(scribeResponse.words) ? scribeResponse.words : [];
+    const word_timestamps = rawWords
+      .filter((w) => w && w.type === 'word' && typeof w.text === 'string' && w.text.trim().length > 0)
+      .map((w) => ({
+        word: w.text.trim(),
+        start_ms: Math.round((typeof w.start === 'number' ? w.start : 0) * 1000),
+        end_ms: Math.round((typeof w.end === 'number' ? w.end : 0) * 1000),
+      }))
+      .filter((w) => w.end_ms > w.start_ms);
 
-    // ── 3. Normalize Whisper output to gemini_markup shape ─────────
-    // Hyperframes' `transcribe --json` actually emits a FLAT ARRAY of words:
-    //   [ { text, start (sec), end (sec) }, ... ]
-    // We previously assumed an object with segments/transcription keys (the
-    // raw OpenAI / whisper.cpp shapes) — but Hyperframes flattens those into
-    // a single word-level array before writing transcript.json.
-    //
-    // We still keep the segments/tokens fallbacks in case the shape changes
-    // in a future Hyperframes version, OR if a different runtime is used
-    // (e.g. local OpenAI whisper.exe on Windows).
-    const word_timestamps = [];
-    const transcriptParts = [];
-
-    const flatWords = Array.isArray(raw) ? raw : null;
-    const segments = !flatWords ? (raw.segments ?? raw.transcription ?? []) : [];
-    console.log(
-      `[audio-transcribe] parsed ${flatWords ? `flat array len=${flatWords.length}` : `${segments.length} segments`}; ` +
-        `top-level: ${flatWords ? 'array' : '[' + Object.keys(raw).join(', ') + ']'}`
-    );
-
-    function pushWord(item) {
-      const rawText = item.word ?? item.text ?? '';
-      const text = String(rawText).trim();
-      if (!text) return;
-      // whisper.cpp special tokens: "[BLANK_AUDIO]", "<|0.00|>", "<|en|>", etc.
-      if (/^[\[<]/.test(text) || /^\[_/.test(text)) return;
-
-      let start_ms, end_ms;
-      if (item.offsets && typeof item.offsets.from === 'number') {
-        // whisper.cpp: offsets in milliseconds
-        start_ms = item.offsets.from;
-        end_ms = item.offsets.to;
-      } else {
-        // Hyperframes flat array AND OpenAI whisper.exe: start/end in seconds
-        const startSec = typeof item.start === 'number' ? item.start : Number(item.start) || 0;
-        const endSec = typeof item.end === 'number' ? item.end : Number(item.end) || startSec;
-        start_ms = Math.round(startSec * 1000);
-        end_ms = Math.round(endSec * 1000);
-      }
-      word_timestamps.push({ word: text, start_ms, end_ms });
-    }
-
-    if (flatWords) {
-      for (const item of flatWords) pushWord(item);
-    } else {
-      for (const seg of segments) {
-        const items = seg.words ?? seg.tokens ?? [];
-        for (const item of items) pushWord(item);
-        if (seg.text) transcriptParts.push(String(seg.text).trim());
-      }
-    }
-
-    const transcript = transcriptParts.length
-      ? transcriptParts.join(' ').replace(/\s+/g, ' ').trim()
+    // Canonical transcript = top-level `text` (not joined from filtered words —
+    // word/spacing punctuation lives in the spacing entries we just dropped).
+    const transcript = typeof scribeResponse.text === 'string'
+      ? scribeResponse.text.trim()
       : word_timestamps.map((w) => w.word).join(' ');
 
-    // When word_timestamps is empty, expose diagnostic info in the response
-    // so the Vercel-side caller can save it for inspection. Without this we
-    // have no visibility into Whisper's actual output shape from outside the
-    // Railway box.
+    // Use ffprobe-measured duration over Scribe's audio_duration_secs to keep
+    // consistent with how audio-loudnorm-trim measures duration on the same file.
+    let durationSeconds = 0;
+    try {
+      durationSeconds = await getDuration(inputPath);
+    } catch (err) {
+      console.warn(`[audio-transcribe] ffprobe failed, falling back to Scribe duration: ${err.message}`);
+      durationSeconds = typeof scribeResponse.audio_duration_secs === 'number'
+        ? scribeResponse.audio_duration_secs
+        : (word_timestamps.length ? word_timestamps[word_timestamps.length - 1].end_ms / 1000 : 0);
+    }
+
+    // Diagnostic if we somehow got zero words — lets the caller log raw shape
+    // for debugging without an extra round trip.
     let _debug = null;
     if (word_timestamps.length === 0) {
-      const sample = JSON.stringify(raw).slice(0, 2000);
+      const sample = JSON.stringify(scribeResponse).slice(0, 2000);
       console.warn(`[audio-transcribe] PARSED ZERO WORDS. Raw sample: ${sample}`);
       _debug = {
-        rawTopLevelKeys: Object.keys(raw),
-        rawIsArray: Array.isArray(raw),
+        rawTopLevelKeys: Object.keys(scribeResponse),
+        rawWordsLength: rawWords.length,
+        rawWordTypes: [...new Set(rawWords.map((w) => w.type))],
         rawSample: sample,
-        segmentsCount: segments.length,
-        firstSegmentKeys: segments[0] ? Object.keys(segments[0]) : null,
-        firstSegmentSample: segments[0] ? JSON.stringify(segments[0]).slice(0, 1000) : null,
       };
     }
 
-    const durationSeconds = word_timestamps.length
-      ? word_timestamps[word_timestamps.length - 1].end_ms / 1000
-      : 0;
-
     console.log(
       `[audio-transcribe] done: ${word_timestamps.length} words, ` +
-        `transcript ${transcript.length} chars, dur ~${durationSeconds.toFixed(1)}s`
+        `transcript ${transcript.length} chars, dur ${durationSeconds.toFixed(2)}s ` +
+        `(model=elevenlabs_scribe_v1, lang=${scribeResponse.language_code ?? '?'})`,
     );
 
     res.json({
       transcript,
       word_timestamps,
-      model,
+      model: 'elevenlabs_scribe_v1',
       durationSeconds,
       adIngestionId: adIngestionId ?? null,
       clientId: clientId ?? null,
@@ -236,3 +184,45 @@ audioTranscribeRouter.post('/audio-transcribe', async (req, res, next) => {
     rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+/**
+ * Call Scribe with one retry on transient network failures. We do NOT retry on
+ * 4xx (caller's fault — bad audio, bad key, oversize) — those will fail the
+ * same way again.
+ */
+async function callScribeWithRetry(apiKey, filePath) {
+  let lastErr;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const form = new FormData();
+      form.append('file', createReadStream(filePath), { filename: 'source.mp4', contentType: 'video/mp4' });
+      form.append('model_id', 'scribe_v1');
+      form.append('language_code', 'eng');
+
+      const res = await axios.post(SCRIBE_URL, form, {
+        headers: {
+          ...form.getHeaders(),
+          'xi-api-key': apiKey,
+        },
+        timeout: SCRIBE_TIMEOUT_MS,
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+      });
+      return res.data;
+    } catch (err) {
+      lastErr = err;
+      const status = err.response?.status ?? 0;
+      // 4xx: don't retry
+      if (status >= 400 && status < 500) {
+        const body = err.response?.data ? JSON.stringify(err.response.data).slice(0, 500) : err.message;
+        throw new Error(`Scribe ${status} — ${body}`);
+      }
+      // 5xx or network: retry once after 2s
+      if (attempt === 1) {
+        console.warn(`[audio-transcribe] scribe attempt 1 failed (${err.message}), retrying in 2s`);
+        await new Promise((r) => setTimeout(r, 2_000));
+      }
+    }
+  }
+  throw new Error(`Scribe failed after retry: ${lastErr?.message ?? lastErr}`);
+}

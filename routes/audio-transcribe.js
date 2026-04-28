@@ -68,6 +68,11 @@ audioTranscribeRouter.post('/audio-transcribe', async (req, res, next) => {
       driveToken,
       adIngestionId,
       clientId,
+      // Phase 2.9: per-row silencedetect tuning. Defaults preserve Phase 2.7
+      // behaviour (-35dB / 0.6s) when absent. Caller (creative-engine
+      // compose_pending) computes these from the resolved cut_profile.
+      silenceDb,
+      silenceMinDur,
     } = req.body || {};
 
     if (sourceType === 'drive' && (!driveFileId || !driveToken)) {
@@ -123,8 +128,10 @@ audioTranscribeRouter.post('/audio-transcribe', async (req, res, next) => {
     // Uses defaults from ff-pilot/scripts/silence_cut.js. compose_pending
     // can override via deterministic_cuts options if a client speaker has
     // unusual mic levels.
-    console.log(`[audio-transcribe] running ffmpeg silencedetect (-35dB, 0.6s)`);
-    const silenceMap = await detectAudioSilences(inputPath);
+    const noiseDb = typeof silenceDb === 'number' ? silenceDb : -35;
+    const minDur = typeof silenceMinDur === 'number' ? silenceMinDur : 0.6;
+    console.log(`[audio-transcribe] running ffmpeg silencedetect (${noiseDb}dB, ${minDur}s)`);
+    const silenceMap = await detectAudioSilences(inputPath, { noiseDb, minDur });
     console.log(`[audio-transcribe] silencedetect found ${silenceMap.length} silence span(s)`);
 
     // ── 2. Call ElevenLabs Scribe ──────────────────────────────────
@@ -216,12 +223,12 @@ audioTranscribeRouter.post('/audio-transcribe', async (req, res, next) => {
  * silences found OR if ffmpeg fails (silence detection is optional — caller
  * falls back to word-gap heuristic).
  */
-async function detectAudioSilences(inputPath) {
-  const NOISE_DB = -35;
-  const MIN_DUR = 0.6;
+async function detectAudioSilences(inputPath, opts = {}) {
+  const noiseDb = typeof opts.noiseDb === 'number' ? opts.noiseDb : -35;
+  const minDur = typeof opts.minDur === 'number' ? opts.minDur : 0.6;
   try {
     const { stderr } = await execAsync(
-      `ffmpeg -i "${inputPath}" -af "silencedetect=noise=${NOISE_DB}dB:duration=${MIN_DUR}" -f null -`,
+      `ffmpeg -i "${inputPath}" -af "silencedetect=noise=${noiseDb}dB:duration=${minDur}" -f null -`,
       { timeout: 60_000, maxBuffer: 50 * 1024 * 1024 },
     ).catch((err) => {
       // ffmpeg with -f null exits with code 0 normally; if it fails, log and
@@ -237,7 +244,7 @@ async function detectAudioSilences(inputPath) {
       const start = parseFloat(startMatches[i][1]);
       const end = endMatches[i] ? parseFloat(endMatches[i][1]) : null;
       if (end == null || end <= start) continue;
-      if (end - start < MIN_DUR) continue;
+      if (end - start < minDur) continue;
       spans.push({ start, end });
     }
     return spans;

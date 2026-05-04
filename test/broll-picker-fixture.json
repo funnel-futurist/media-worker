@@ -1,0 +1,67 @@
+{
+  "_comment": "Repeatable fixture for POST /broll-picker. Synthetic data — no real client, no PII. Adjust the model field for diagnostic testing.",
+  "transcript": [
+    { "startSec": 0.5, "endSec": 4.2, "text": "Most VAs treat tasks like a checklist." },
+    { "startSec": 4.5, "endSec": 8.1, "text": "But the great ones think two steps ahead." },
+    { "startSec": 8.4, "endSec": 13.0, "text": "When I onboard a new operator, I look for one specific habit." },
+    { "startSec": 13.3, "endSec": 17.5, "text": "Do they ask why before they ask how?" },
+    { "startSec": 17.8, "endSec": 22.4, "text": "Because that one question changes everything about the work they ship." },
+    { "startSec": 22.7, "endSec": 27.2, "text": "Last week, my team caught a billing error worth six thousand dollars." },
+    { "startSec": 27.5, "endSec": 32.0, "text": "Not because I told them to look — because they understood why it mattered." }
+  ],
+  "library": [
+    {
+      "asset_id": "11111111-1111-1111-1111-111111111111",
+      "asset_title": "VA reviewing a checklist on iPad at desk",
+      "asset_type": "B-Roll Video",
+      "content_strategy_type": "Process",
+      "context": "VA at desk with laptop and iPad, scrolling a checklist",
+      "insight": "shows the tactical execution work — going through tasks one at a time",
+      "emotion": "focused",
+      "when_to_use": "talking about VA workflows / task lists / checklists / execution"
+    },
+    {
+      "asset_id": "22222222-2222-2222-2222-222222222222",
+      "asset_title": "Founder + VA in a planning meeting, whiteboard visible",
+      "asset_type": "B-Roll Video",
+      "content_strategy_type": "Personal",
+      "context": "Two people at a whiteboard, pointing and discussing strategy",
+      "insight": "shows the strategic / planning side of the relationship",
+      "emotion": "engaged",
+      "when_to_use": "talking about thinking ahead / strategy / why before how / planning"
+    },
+    {
+      "asset_id": "33333333-3333-3333-3333-333333333333",
+      "asset_title": "Spreadsheet with highlighted billing line items",
+      "asset_type": "B-Roll Video",
+      "content_strategy_type": "Proof",
+      "context": "A spreadsheet on screen with red highlights on certain cells, suggesting an error caught",
+      "insight": "shows tangible audit / detail-oriented work product",
+      "emotion": "alert",
+      "when_to_use": "talking about catching errors / billing / financial review / audit / quality control"
+    },
+    {
+      "asset_id": "44444444-4444-4444-4444-444444444444",
+      "asset_title": "Slack messages in dark mode, fast typing",
+      "asset_type": "B-Roll Video",
+      "content_strategy_type": "Process",
+      "context": "Hands typing in Slack, messages visibly flowing back and forth",
+      "insight": "shows real-time async communication and team coordination",
+      "emotion": "fast-paced",
+      "when_to_use": "talking about team communication / async work / messaging / coordination"
+    },
+    {
+      "asset_id": "55555555-5555-5555-5555-555555555555",
+      "asset_title": "VA onboarding session with founder, video call",
+      "asset_type": "B-Roll Video",
+      "content_strategy_type": "Personal",
+      "context": "A video call screen with founder and new VA, looks like a kickoff conversation",
+      "insight": "shows the onboarding / training relationship",
+      "emotion": "warm",
+      "when_to_use": "talking about hiring / onboarding / training / new operator"
+    }
+  ],
+  "totalDuration": 33.5,
+  "brollDensity": 0.35,
+  "model": "gemini-3.1-pro-preview"
+}

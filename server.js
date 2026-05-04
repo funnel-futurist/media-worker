@@ -27,6 +27,7 @@ import { youtubeAuthRouter } from './routes/youtube-auth.js';
 import { hyperframesRouter } from './routes/hyperframes.js';
 import { audioLoudnormTrimRouter } from './routes/audio-loudnorm-trim.js';
 import { audioTranscribeRouter } from './routes/audio-transcribe.js';
+import { brollPickerRouter } from './routes/broll-picker.js';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -74,6 +75,8 @@ app.use('/', hyperframesRouter);
 app.use('/', audioLoudnormTrimRouter);
 // Routes — Phase 12 (Per-video Hyperframes compose: word-level transcribe)
 app.use('/', audioTranscribeRouter);
+// Routes — Phase 13 M1 (Clean-mode b-roll picker — Gemini JSON-in/JSON-out)
+app.use('/', brollPickerRouter);
 
 // Global error handler
 app.use((err, req, res, _next) => {

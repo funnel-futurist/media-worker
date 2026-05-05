@@ -13,7 +13,11 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { detectDeterministicCuts, detectAndClassifyCuts } from '../lib/cut_detection.js';
+import {
+  detectDeterministicCuts,
+  detectAndClassifyCuts,
+  isSilenceGhostWord,
+} from '../lib/cut_detection.js';
 
 function w(word, start, end) {
   return { word, start_ms: Math.round(start * 1000), end_ms: Math.round(end * 1000) };
@@ -895,4 +899,180 @@ test('Phase 2.9.1: contextBefore and contextAfter populated on every classified 
     assert.ok(typeof c.contextBefore === 'string', `missing contextBefore: ${JSON.stringify(c)}`);
     assert.ok(typeof c.contextAfter === 'string', `missing contextAfter: ${JSON.stringify(c)}`);
   }
+});
+
+// ── PR #105: clamp-aware-of-silencedetect ghost-word ───────────────────
+
+test('PR #105 helper: ghost word — long word mostly inside a silence span', () => {
+  // Justine 1:11–1:13 fixture: Scribe reported "The" as a 2.71s word
+  // [87.24, 89.95] = duration 2.71s. Silencedetect span [87.31, 89.75]
+  // overlaps from 87.31 to 89.75 = 2.44s. Overlap ratio = 2.44/2.71 ≈ 0.90.
+  const ghost = w('The', 87.24, 89.95);
+  const silences = [{ start: 87.31, end: 89.75 }];
+  assert.equal(isSilenceGhostWord(ghost, silences), true);
+});
+
+test('PR #105 helper: short normal word is never a ghost (duration < 0.8s)', () => {
+  // 0.5s "the" sitting fully inside a silence — still NOT a ghost because
+  // the duration threshold filters it out. We don't want to treat a normal
+  // short utterance as a ghost just because it happens to fall inside a
+  // mis-aligned silence span.
+  const norm = w('the', 87.50, 88.00);
+  const silences = [{ start: 87.30, end: 89.00 }];
+  assert.equal(isSilenceGhostWord(norm, silences), false);
+});
+
+test('PR #105 helper: long word with low silence overlap is not a ghost (overlap < 70%)', () => {
+  // 1.0s word with 60% overlap: starts inside silence, exits before the
+  // silence ends. Should NOT be a ghost — this is a real speech word that
+  // simply trailed off into a pause.
+  const trail = w('continuous', 87.00, 88.00);
+  const silences = [{ start: 87.40, end: 89.00 }];   // 0.6s overlap of 1.0s word = 60%
+  assert.equal(isSilenceGhostWord(trail, silences), false);
+});
+
+test('PR #105 helper: long word with no silence overlap at all is not a ghost', () => {
+  const real = w('important', 80.00, 81.00);
+  const silences = [{ start: 87.00, end: 89.00 }];
+  assert.equal(isSilenceGhostWord(real, silences), false);
+});
+
+test('PR #105 helper: empty/missing silences returns false', () => {
+  const longWord = w('something', 10.00, 11.00);
+  assert.equal(isSilenceGhostWord(longWord, []), false);
+  assert.equal(isSilenceGhostWord(longWord, null), false);
+});
+
+test('PR #105 helper: overlap accumulates across multiple silence spans', () => {
+  // 1.0s word straddling two short silence spans that together cover 80%.
+  // Each span alone would be only 40% — combined they exceed the threshold.
+  const ghost = w('something', 10.0, 11.0);
+  const silences = [
+    { start: 10.1, end: 10.5 },   // 0.4s overlap
+    { start: 10.6, end: 11.0 },   // 0.4s overlap
+  ];
+  assert.equal(isSilenceGhostWord(ghost, silences), true);
+});
+
+test('PR #105: clamp default (relaxClampForGhostWords=false) keeps existing parity behavior', () => {
+  // Same shape as the Justine fixture, but the option is OFF (or unset).
+  // The clamp must still pull cut.end backward through the ghost word —
+  // this is the legacy behavior we're preserving for the rest of the test
+  // suite and for non-clean-mode callers.
+  const words = [
+    w('and', 86.50, 86.80),
+    w('The', 87.24, 89.95),    // 2.71s ghost word straddles cut.end
+    w('next', 90.10, 90.40),
+  ];
+  const cuts = detectDeterministicCuts(words, {
+    sourceDuration: 95,
+    minGapSec: 0.3,
+    externalSilences: [{ start: 87.31, end: 89.75 }],
+    detectSlateFromTranscript: false,
+    cutMidSentenceLongerThan: 0.3,
+    // relaxClampForGhostWords intentionally NOT set
+  });
+  // Without the relax flag, any cut that lands inside or after "The" gets
+  // clamped backwards. The cut span around the silence should NOT extend
+  // through the ghost word.
+  for (const c of cuts) {
+    if (c.start >= 86.80 && c.end >= 87.24) {
+      assert.ok(c.end <= 87.24, `default-mode clamp leaked through ghost word: cut.end=${c.end}`);
+    }
+  }
+});
+
+test('PR #105: relaxClampForGhostWords=true allows the cut.end to extend through the ghost word', () => {
+  // Justine 1:11–1:13 fixture. With the relax flag ON, the clamp must skip
+  // the ghost "The" word and allow the cut.end to land past 87.24 (where
+  // the ghost word starts). Compared to the previous test, the only
+  // difference is the option flip.
+  const words = [
+    w('and', 86.50, 86.80),
+    w('The', 87.24, 89.95),    // 2.71s ghost word straddles cut.end
+    w('next', 90.10, 90.40),
+  ];
+  const cuts = detectDeterministicCuts(words, {
+    sourceDuration: 95,
+    minGapSec: 0.3,
+    externalSilences: [{ start: 87.31, end: 89.75 }],
+    detectSlateFromTranscript: false,
+    cutMidSentenceLongerThan: 0.3,
+    relaxClampForGhostWords: true,
+  });
+  // Find any silence-driven cut overlapping the ghost word's range. The
+  // externalSilences-driven span shrinks by `retain` (0.15s default), so
+  // cut.start can be ≈ 87.46, NOT 86.80 — that's expected. The point of
+  // this test is purely cut.end: with the relax flag on, the clamp must
+  // not pull cut.end back to 87.24-0.05 (just before the ghost word). It
+  // must be allowed to land past 87.24, ideally near silence_end-retain.
+  const silenceCut = cuts.find((c) => c.category === 'silence' && c.end > 87.24);
+  assert.ok(silenceCut,
+    `expected a silence-driven cut with end past 87.24 (ghost-word start); got ${JSON.stringify(cuts)}`);
+  // Defensive: legacy clamp would have pulled cut.end to 87.24-0.05 = 87.19.
+  // Anything > 87.24 proves the relax flag fired.
+  assert.ok(silenceCut.end > 87.24,
+    `relaxed clamp should let cut.end extend through ghost word "The"; got cut.end=${silenceCut.end}`);
+});
+
+test('PR #105: relaxClampForGhostWords=true requires externalSilences to be effective', () => {
+  // Even with the flag on, if no externalSilences are provided we have no
+  // signal for "ghost" detection — the helper returns false for everything,
+  // so the clamp behavior must match the legacy default.
+  const words = [
+    w('and', 86.50, 86.80),
+    w('The', 87.24, 89.95),
+    w('next', 90.10, 90.40),
+  ];
+  const cuts = detectDeterministicCuts(words, {
+    sourceDuration: 95,
+    minGapSec: 0.3,
+    detectSlateFromTranscript: false,
+    cutMidSentenceLongerThan: 0.3,
+    relaxClampForGhostWords: true,
+    // externalSilences intentionally NOT provided
+  });
+  // Without externalSilences the relax flag must be a no-op: the ghost
+  // detector has nothing to compare against, so the clamp pulls back as
+  // it always did. This guards against operators turning the flag on
+  // without supplying the silence map.
+  for (const c of cuts) {
+    if (c.start >= 86.80 && c.end >= 87.24) {
+      assert.ok(c.end <= 87.24,
+        `flag without externalSilences must not relax clamp; got cut.end=${c.end}`);
+    }
+  }
+});
+
+test('PR #105: relaxed clamp does NOT cut into legitimate trailing speech (overlap < 70%)', () => {
+  // Trailing-off speech case: a real 1.30s word that mostly sits past a
+  // silence span — only 0.30s of overlap = 23%. Below the 70% threshold,
+  // so isSilenceGhostWord returns false and the clamp must apply normally.
+  // The trailing word straddles cut.end, so we expect the clamp to pull
+  // cut.end back to just before the word's start.
+  const words = [
+    w('and', 86.50, 86.80),
+    // overlap with [87.40, 88.50] = 0.30s of 1.30s = 23% (< 70%) — NOT a ghost
+    w('continuous', 88.20, 89.50),
+    w('next', 90.50, 90.80),
+  ];
+  const cuts = detectDeterministicCuts(words, {
+    sourceDuration: 95,
+    minGapSec: 0.3,
+    externalSilences: [{ start: 87.40, end: 88.50 }],
+    detectSlateFromTranscript: false,
+    cutMidSentenceLongerThan: 0.3,
+    relaxClampForGhostWords: true,
+  });
+  // The audio-driven cut from silence [87.40, 88.50] starts at 87.55 and
+  // ends near 88.35 (silence_end − retain=0.15). 88.35 falls inside
+  // "continuous" [88.20, 89.50], so the clamp must pull cut.end back to
+  // wStart − pad = 88.20 − 0.05 = 88.15. The relax flag must NOT skip
+  // "continuous" because its overlap ratio (23%) is below the 70%
+  // threshold — this guards against the relax flag eating legitimate
+  // trailing speech.
+  const silenceCut = cuts.find((c) => c.category === 'silence');
+  assert.ok(silenceCut, `expected a silence-driven cut; got ${JSON.stringify(cuts)}`);
+  assert.ok(silenceCut.end <= 88.20,
+    `relaxed clamp ate legitimate trailing speech "continuous" (overlap 23% < 70%); got cut.end=${silenceCut.end}`);
 });

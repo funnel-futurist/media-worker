@@ -21,22 +21,21 @@
  */
 
 import { Router } from 'express';
-import { writeFileSync, mkdirSync, rmSync, existsSync, statSync, createReadStream } from 'fs';
+import { writeFileSync, mkdirSync, rmSync, existsSync, statSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
-import { exec } from 'child_process';
-import { promisify } from 'util';
 import axios from 'axios';
-import FormData from 'form-data';
 
-const execAsync = promisify(exec);
 import { getDuration } from '../lib/media.js';
+import {
+  detectAudioSilences,
+  callScribeWithRetry,
+  mapScribeResponse,
+} from '../lib/scribe_transcribe.js';
 
 export const audioTranscribeRouter = Router();
 
-const SCRIBE_URL = 'https://api.elevenlabs.io/v1/speech-to-text';
 const SCRIBE_MAX_BYTES = 1 * 1024 * 1024 * 1024; // 1 GB — Scribe's documented limit is 3 GB but we cap conservatively
-const SCRIBE_TIMEOUT_MS = 180_000;
 
 /**
  * POST /audio-transcribe
@@ -142,24 +141,7 @@ audioTranscribeRouter.post('/audio-transcribe', async (req, res, next) => {
     const scribeResponse = await callScribeWithRetry(apiKey, inputPath);
 
     // ── 3. Map response → wire contract ────────────────────────────
-    // Scribe returns words[] with type='word' | 'spacing' | 'audio_event'.
-    // Filter to type='word' only — spacing is whitespace metadata, audio_event
-    // is non-speech sound annotations that aren't part of the speaker's words.
-    const rawWords = Array.isArray(scribeResponse.words) ? scribeResponse.words : [];
-    const word_timestamps = rawWords
-      .filter((w) => w && w.type === 'word' && typeof w.text === 'string' && w.text.trim().length > 0)
-      .map((w) => ({
-        word: w.text.trim(),
-        start_ms: Math.round((typeof w.start === 'number' ? w.start : 0) * 1000),
-        end_ms: Math.round((typeof w.end === 'number' ? w.end : 0) * 1000),
-      }))
-      .filter((w) => w.end_ms > w.start_ms);
-
-    // Canonical transcript = top-level `text` (not joined from filtered words —
-    // word/spacing punctuation lives in the spacing entries we just dropped).
-    const transcript = typeof scribeResponse.text === 'string'
-      ? scribeResponse.text.trim()
-      : word_timestamps.map((w) => w.word).join(' ');
+    const { transcript, word_timestamps, _debug: mappedDebug } = mapScribeResponse(scribeResponse);
 
     // Use ffprobe-measured duration over Scribe's audio_duration_secs to keep
     // consistent with how audio-loudnorm-trim measures duration on the same file.
@@ -173,18 +155,10 @@ audioTranscribeRouter.post('/audio-transcribe', async (req, res, next) => {
         : (word_timestamps.length ? word_timestamps[word_timestamps.length - 1].end_ms / 1000 : 0);
     }
 
-    // Diagnostic if we somehow got zero words — lets the caller log raw shape
-    // for debugging without an extra round trip.
-    let _debug = null;
-    if (word_timestamps.length === 0) {
-      const sample = JSON.stringify(scribeResponse).slice(0, 2000);
-      console.warn(`[audio-transcribe] PARSED ZERO WORDS. Raw sample: ${sample}`);
-      _debug = {
-        rawTopLevelKeys: Object.keys(scribeResponse),
-        rawWordsLength: rawWords.length,
-        rawWordTypes: [...new Set(rawWords.map((w) => w.type))],
-        rawSample: sample,
-      };
+    // Diagnostic if we somehow got zero words — log raw shape for debugging
+    // without an extra round trip. mapScribeResponse populated _debug already.
+    if (mappedDebug) {
+      console.warn(`[audio-transcribe] PARSED ZERO WORDS. Raw sample: ${mappedDebug.rawSample}`);
     }
 
     console.log(
@@ -201,7 +175,7 @@ audioTranscribeRouter.post('/audio-transcribe', async (req, res, next) => {
       durationSeconds,
       adIngestionId: adIngestionId ?? null,
       clientId: clientId ?? null,
-      ..._debug ? { _debug } : {},
+      ...(mappedDebug ? { _debug: mappedDebug } : {}),
     });
   } catch (err) {
     console.error('[audio-transcribe] error:', err?.message ?? err);
@@ -210,88 +184,3 @@ audioTranscribeRouter.post('/audio-transcribe', async (req, res, next) => {
     rmSync(tmpDir, { recursive: true, force: true });
   }
 });
-
-/**
- * Run ffmpeg silencedetect on the source mp4 and return silence spans.
- *
- * Adapted from Phoenix's video-projects/ff-pilot/scripts/silence_cut.js
- * (creative-engine repo). Same defaults: noise=-35dB, duration=0.6s. The
- * filter scans the audio waveform for low-energy spans and reports their
- * start/end timestamps in seconds via stderr.
- *
- * Returns Array<{start, end}> in source-time seconds. Empty array if no
- * silences found OR if ffmpeg fails (silence detection is optional — caller
- * falls back to word-gap heuristic).
- */
-async function detectAudioSilences(inputPath, opts = {}) {
-  const noiseDb = typeof opts.noiseDb === 'number' ? opts.noiseDb : -35;
-  const minDur = typeof opts.minDur === 'number' ? opts.minDur : 0.6;
-  try {
-    const { stderr } = await execAsync(
-      `ffmpeg -i "${inputPath}" -af "silencedetect=noise=${noiseDb}dB:duration=${minDur}" -f null -`,
-      { timeout: 60_000, maxBuffer: 50 * 1024 * 1024 },
-    ).catch((err) => {
-      // ffmpeg with -f null exits with code 0 normally; if it fails, log and
-      // return empty.
-      const stderrOut = (err && (err.stderr || err.message)) || '';
-      return { stderr: stderrOut };
-    });
-
-    const startMatches = [...stderr.matchAll(/silence_start: ([\d.]+)/g)];
-    const endMatches = [...stderr.matchAll(/silence_end: ([\d.]+)/g)];
-    const spans = [];
-    for (let i = 0; i < startMatches.length; i++) {
-      const start = parseFloat(startMatches[i][1]);
-      const end = endMatches[i] ? parseFloat(endMatches[i][1]) : null;
-      if (end == null || end <= start) continue;
-      if (end - start < minDur) continue;
-      spans.push({ start, end });
-    }
-    return spans;
-  } catch (err) {
-    console.warn(`[audio-transcribe] silencedetect failed (non-fatal): ${err.message}`);
-    return [];
-  }
-}
-
-/**
- * Call Scribe with one retry on transient network failures. We do NOT retry on
- * 4xx (caller's fault — bad audio, bad key, oversize) — those will fail the
- * same way again.
- */
-async function callScribeWithRetry(apiKey, filePath) {
-  let lastErr;
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      const form = new FormData();
-      form.append('file', createReadStream(filePath), { filename: 'source.mp4', contentType: 'video/mp4' });
-      form.append('model_id', 'scribe_v1');
-      form.append('language_code', 'eng');
-
-      const res = await axios.post(SCRIBE_URL, form, {
-        headers: {
-          ...form.getHeaders(),
-          'xi-api-key': apiKey,
-        },
-        timeout: SCRIBE_TIMEOUT_MS,
-        maxBodyLength: Infinity,
-        maxContentLength: Infinity,
-      });
-      return res.data;
-    } catch (err) {
-      lastErr = err;
-      const status = err.response?.status ?? 0;
-      // 4xx: don't retry
-      if (status >= 400 && status < 500) {
-        const body = err.response?.data ? JSON.stringify(err.response.data).slice(0, 500) : err.message;
-        throw new Error(`Scribe ${status} — ${body}`);
-      }
-      // 5xx or network: retry once after 2s
-      if (attempt === 1) {
-        console.warn(`[audio-transcribe] scribe attempt 1 failed (${err.message}), retrying in 2s`);
-        await new Promise((r) => setTimeout(r, 2_000));
-      }
-    }
-  }
-  throw new Error(`Scribe failed after retry: ${lastErr?.message ?? lastErr}`);
-}

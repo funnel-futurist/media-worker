@@ -28,6 +28,7 @@ import { hyperframesRouter } from './routes/hyperframes.js';
 import { audioLoudnormTrimRouter } from './routes/audio-loudnorm-trim.js';
 import { audioTranscribeRouter } from './routes/audio-transcribe.js';
 import { brollPickerRouter } from './routes/broll-picker.js';
+import { cleanModeComposeRouter } from './routes/clean-mode-compose.js';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -77,6 +78,8 @@ app.use('/', audioLoudnormTrimRouter);
 app.use('/', audioTranscribeRouter);
 // Routes — Phase 13 M1 (Clean-mode b-roll picker — Gemini JSON-in/JSON-out)
 app.use('/', brollPickerRouter);
+// Routes — Phase 13 M2 (Clean-mode full compose pipeline)
+app.use('/', cleanModeComposeRouter);
 
 // Global error handler
 app.use((err, req, res, _next) => {

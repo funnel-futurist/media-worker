@@ -19,12 +19,9 @@ import { Router } from 'express';
 import { writeFileSync, readFileSync, mkdirSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { randomUUID, createHash } from 'crypto';
-import { exec } from 'child_process';
-import { promisify } from 'util';
 import axios from 'axios';
 import { getDuration } from '../lib/media.js';
-
-const execAsync = promisify(exec);
+import { buildKeepSegments, runTrimConcat } from '../lib/ffmpeg_trim_concat.js';
 
 export const audioLoudnormTrimRouter = Router();
 
@@ -118,38 +115,24 @@ audioLoudnormTrimRouter.post('/audio-loudnorm-trim', async (req, res, next) => {
     // ── 2. Build the unified cuts list, then derive keep-segments ──
     // Slate trim (trimStartSeconds) is treated as the first cut [0, trimStartSeconds]
     // so the rest of the pipeline only knows about ONE concept: cut windows.
-    //
-    // After this step `allCuts` is a sorted, non-overlapping list of windows
-    // to REMOVE. Keep-segments are the inverse: the windows to retain.
     const sourceDurationSeconds = await getDuration(inputPath);
     const allCuts = [];
     if (trimStartSeconds > 0) allCuts.push({ start: 0, end: trimStartSeconds });
     for (const c of cuts) allCuts.push({ start: c.start, end: c.end });
-    allCuts.sort((a, b) => a.start - b.start);
+    const keepSegments = buildKeepSegments(allCuts, sourceDurationSeconds);
 
-    // Merge overlapping/adjacent cuts so the segment math stays clean.
+    // mergedCuts are derived for the response's totalCutSeconds + cutsApplied
+    // count. Compute the merged form alongside keepSegments since the lib
+    // doesn't expose it.
+    const sortedCuts = [...allCuts].sort((a, b) => a.start - b.start);
     const mergedCuts = [];
-    for (const c of allCuts) {
+    for (const c of sortedCuts) {
       const last = mergedCuts[mergedCuts.length - 1];
       if (last && c.start <= last.end) {
         last.end = Math.max(last.end, c.end);
       } else {
         mergedCuts.push({ start: c.start, end: c.end });
       }
-    }
-
-    // Build keep-segments — gaps between cuts, plus the head/tail.
-    const keepSegments = [];
-    let cursor = 0;
-    for (const c of mergedCuts) {
-      if (c.start > cursor) keepSegments.push({ start: cursor, end: c.start });
-      cursor = Math.max(cursor, c.end);
-    }
-    if (cursor < sourceDurationSeconds) {
-      keepSegments.push({ start: cursor, end: sourceDurationSeconds });
-    }
-    if (keepSegments.length === 0) {
-      throw new Error('cuts cover the entire source — nothing to keep');
     }
 
     // ── 3. ffmpeg: trim each keep-segment, concat, then loudnorm ───
@@ -159,47 +142,25 @@ audioLoudnormTrimRouter.post('/audio-loudnorm-trim', async (req, res, next) => {
     //   2. Source could be HEVC (iPhone/Mac); H.264 is safer for downstream
     //   3. Hyperframes' headless Chrome render pipeline is happiest with H.264
     //
-    // The `loudnorm` filter brings audio to EBU R128 (-16 LUFS integrated,
-    // -1.5 dBTP, 11 LU LRA) — same constants Phoenix used in submagic.js
-    // and the same standard Instagram/TikTok/YouTube target. Loudnorm runs
-    // AFTER concat so the normalized loudness is based on the kept content,
-    // not on the cut-out dead air.
-    //
+    // Loudnorm (EBU R128: -16 LUFS / -1.5 dBTP / 11 LU LRA) runs AFTER concat
+    // so normalized loudness is based on kept content, not cut-out dead air.
     // Dense keyframes (-r 30 -g 30 -keyint_min 30) are required by
-    // Hyperframes' parallel frame extractor — sparse keyframes cause the
-    // worker pool to time out waiting for `loadedmetadata`.
-    const filterParts = [];
-    keepSegments.forEach((seg, i) => {
-      filterParts.push(
-        `[0:v]trim=${seg.start.toFixed(3)}:${seg.end.toFixed(3)},setpts=PTS-STARTPTS[v${i}]`
-      );
-      filterParts.push(
-        `[0:a]atrim=${seg.start.toFixed(3)}:${seg.end.toFixed(3)},asetpts=PTS-STARTPTS[a${i}]`
-      );
-    });
-    const concatInputs = keepSegments.map((_, i) => `[v${i}][a${i}]`).join('');
-    filterParts.push(`${concatInputs}concat=n=${keepSegments.length}:v=1:a=1[v][araw]`);
-    filterParts.push(`[araw]loudnorm=I=-16:TP=-1.5:LRA=11[a]`);
-    const filterComplex = filterParts.join(';');
-
+    // Hyperframes' parallel frame extractor.
     console.log(
       `[audio-loudnorm-trim] ffmpeg cuts=${mergedCuts.length} ` +
         `keep_segments=${keepSegments.length} src_dur=${sourceDurationSeconds.toFixed(2)}s`
     );
-    await execAsync(
-      `ffmpeg -i "${inputPath}" ` +
-        `-filter_complex "${filterComplex}" ` +
-        `-map "[v]" -map "[a]" ` +
-        `-c:v libx264 -preset veryfast -b:v 2500k ` +
-        `-r 30 -g 30 -keyint_min 30 ` +
-        `-c:a aac -b:a 192k ` +
-        `-movflags +faststart -y "${outputPath}"`,
-      { timeout: 600_000, maxBuffer: 50 * 1024 * 1024 }
-    );
-
-    if (!existsSync(outputPath)) {
-      throw new Error('ffmpeg produced no output');
-    }
+    await runTrimConcat(inputPath, outputPath, {
+      keepSegments,
+      applyLoudnorm: true,
+      encoderArgs: [
+        '-c:v', 'libx264', '-preset', 'veryfast', '-b:v', '2500k',
+        '-r', '30', '-g', '30', '-keyint_min', '30',
+        '-c:a', 'aac', '-b:a', '192k',
+        '-movflags', '+faststart',
+      ],
+      timeoutMs: 600_000,
+    });
 
     // ── 4. Compute duration + content hash ─────────────────────────
     const durationSeconds = await getDuration(outputPath);

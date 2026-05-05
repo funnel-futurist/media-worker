@@ -18,6 +18,27 @@ RUN apt-get update && apt-get install -y \
     pip3 install --break-system-packages opencv-python-headless yt-dlp && \
     rm -rf /var/lib/apt/lists/*
 
+# Install Montserrat fonts for the short-form caption style (PR #107).
+# Without this, libass's fontselect would fall back from the Style's
+# Fontname="Montserrat Black" to whatever fontconfig considers closest —
+# typically Arial Bold on this base image, which reads visibly thinner
+# than Montserrat Black/ExtraBold and was Shannon's "doesn't look bold
+# enough" complaint on B5.
+#
+# `fonts-montserrat` ships Regular + Bold; `fonts-montserrat-extra` ships
+# the heavier weights (Black, ExtraBold, etc.). The `-extra` package may
+# not exist on every Ubuntu/Debian release — we tolerate that and continue
+# with the regular package only (still a major improvement over Arial).
+#
+# `fc-cache -f` rebuilds fontconfig's cache so libass sees the new
+# families on the next render.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends fonts-montserrat && \
+    (apt-get install -y --no-install-recommends fonts-montserrat-extra || \
+       echo "WARN: fonts-montserrat-extra unavailable on this base — using fonts-montserrat only") && \
+    fc-cache -f && \
+    rm -rf /var/lib/apt/lists/*
+
 # Build whisper.cpp and expose the `whisper-cpp` binary on PATH.
 # Hyperframes' `transcribe` command spawns `whisper-cpp`. Without this the
 # short-form render pipeline fails at the prep step.

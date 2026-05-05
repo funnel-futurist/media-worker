@@ -259,3 +259,55 @@ test('warnings: detects Montserrat fallback', () => {
 test('warnings: empty for clean stderr', () => {
   assert.deepEqual(extractSubtitleWarnings('frame=  100 fps=...'), []);
 });
+
+// ── PR #108: arrow-notation fontselect fallback ────────────────────────
+
+test('warnings: detects arrow-notation fontselect fallback (real libass log line) — PR #108', () => {
+  // Verbatim from the local libass diagnostic 2026-05-05 — this is the
+  // log shape libass actually emits in production. Pre-PR #108 our regex
+  // missed this format entirely, so the warning silently disappeared
+  // even when libass had genuinely fallen back from Montserrat to Arial.
+  const stderr = '[Parsed_subtitles_0 @ 0000015b585717c0] fontselect: (Montserrat, 700, 0) -> Arial-BoldMT, 0, Arial-BoldMT';
+  const warnings = extractSubtitleWarnings(stderr);
+  assert.ok(warnings.length >= 1, 'expected at least one warning for arrow fallback');
+  // The resolved family ("Arial-BoldMT") must appear in the warning text
+  // so an operator can read the response and immediately see what libass
+  // actually rendered with.
+  assert.ok(warnings.some((w) => /Arial-BoldMT/.test(w)),
+    `expected resolved family in warning; got ${JSON.stringify(warnings)}`);
+  // Should NOT match the older "not found / Using default" warning string —
+  // this is a different shape and gets its own clearly-distinct message.
+  assert.ok(warnings.some((w) => /fontselect/i.test(w) && /resolved/i.test(w)),
+    'expected the arrow-notation warning shape, not the old "not found" shape');
+});
+
+test('warnings: arrow-notation match for Montserrat Black (PR #107 family) — PR #108', () => {
+  // Same shape but with the PR #107 Style Fontname "Montserrat Black".
+  // If libass falls back from Montserrat Black to anything that isn't a
+  // Montserrat face, we still want to warn.
+  const stderr = 'fontselect: (Montserrat Black, 700, 0) -> DejaVu Sans Bold, 0, DejaVu Sans-Bold';
+  const warnings = extractSubtitleWarnings(stderr);
+  assert.ok(warnings.some((w) => /DejaVu Sans Bold/.test(w)));
+});
+
+test('warnings: arrow-notation stays silent when libass binds to a Montserrat face — PR #108', () => {
+  // After PR #107 deploys, the expected log shape on a successful Montserrat
+  // resolution is something like:
+  //   fontselect: (Montserrat Black, 700, 0) -> Montserrat-Black, 0, Montserrat Black
+  // This is the *good* outcome — we must NOT warn on this.
+  const stderr = 'fontselect: (Montserrat Black, 700, 0) -> Montserrat-Black, 0, Montserrat Black';
+  const warnings = extractSubtitleWarnings(stderr);
+  // The arrow-notation warning shape should NOT appear here. (Other Glyph-not-found
+  // / "not found" warnings could in theory still trigger, but neither applies.)
+  assert.ok(!warnings.some((w) => /resolved/i.test(w)),
+    `expected NO arrow-fallback warning when resolved family contains Montserrat; got ${JSON.stringify(warnings)}`);
+});
+
+test('warnings: arrow-notation also silent when libass falls back from Black to Bold (still Montserrat) — PR #108', () => {
+  // Mid-tier graceful path: fonts-montserrat is installed but not
+  // fonts-montserrat-extra, so libass binds Montserrat Black -> Montserrat-Bold.
+  // Still a Montserrat face — no warning, captions are still on-brand.
+  const stderr = 'fontselect: (Montserrat Black, 700, 0) -> Montserrat-Bold, 0, Montserrat Bold';
+  const warnings = extractSubtitleWarnings(stderr);
+  assert.ok(!warnings.some((w) => /resolved/i.test(w)));
+});

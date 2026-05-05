@@ -178,27 +178,45 @@ test('ass: does NOT regress to old 50pt size', () => {
   assert.doesNotMatch(ass, /Montserrat,50,/);
 });
 
-test('ass: subtitles positioned just below middle (MarginV=820) — PR #99', () => {
-  // Lock-in test: caption baseline must land at y≈1100 (just below the
-  // 960 vertical midpoint of the 1920px canvas), per Shannon's
-  // talking-head reel placement spec. With Alignment=2 (bottom-center),
-  // MarginV=820 → baseline = 1920 - 820 = 1100.
+test('ass: subtitles positioned at shoulder/upper-chest level (MarginV=520) — PR #106', () => {
+  // Lock-in test: caption baseline must land at y≈1400 (shoulder/upper-chest
+  // level on a 1080×1920 canvas). With Alignment=2 (bottom-center) and
+  // PlayResY=1920, MarginV=520 → baseline = 1920 - 520 = 1400.
+  // Replaces PR #99's MarginV=820 (which covered the face on Justine's framing).
   const lines = [{ start: 0, end: 1, text: 'HELLO' }];
   const ass = generateAss(lines);
-  // The Style line ends with `,...,2,40,40,820,1` (Alignment=2, MarginL=40,
-  // MarginR=40, MarginV=820, Encoding=1). Anchor the regex to the line end.
-  assert.match(ass, /,2,40,40,820,1$/m);
-  // Defensive: ensure we did not regress to the old 200 value.
+  // The Style line ends with `,...,2,40,40,520,1` (Alignment=2, MarginL=40,
+  // MarginR=40, MarginV=520, Encoding=1). Anchor the regex to the line end.
+  assert.match(ass, /,2,40,40,520,1$/m);
+  // Defensive: ensure we did not regress to the old face-covering 820 value
+  // (PR #99) or the bottom-documentary 200 value (pre-PR #99).
+  assert.doesNotMatch(ass, /,40,40,820,1$/m);
   assert.doesNotMatch(ass, /,40,40,200,1$/m);
 });
 
-test('ass: top placement variant also gets the higher MarginV', () => {
+test('ass: MarginV stays in the face-safe range [400, 700]', () => {
+  // Future drift guard: extract the MarginV value from the Style line and
+  // assert it sits within a safe range that keeps captions off the speaker's
+  // face on the standard 1080×1920 reel canvas. 400 → baseline at y=1520
+  // (lower-chest); 700 → baseline at y=1220 (just above mouth). Anything
+  // outside this band risks face overlap (high) or bottom-documentary
+  // placement (low) and should require explicit intent.
+  const lines = [{ start: 0, end: 1, text: 'HELLO' }];
+  const ass = generateAss(lines);
+  const m = ass.match(/,40,40,(\d+),1$/m);
+  assert.ok(m, 'expected to find Style line ending with MarginV value');
+  const marginV = parseInt(m[1], 10);
+  assert.ok(marginV >= 400 && marginV <= 700,
+    `MarginV ${marginV} outside the face-safe range [400, 700]`);
+});
+
+test('ass: top placement variant also gets the new MarginV', () => {
   // The placement override flips Alignment from 2 (bottom-center) to 8
-  // (top-center), but MarginV should still be 820 (we only changed the
+  // (top-center), but MarginV should still be 520 (we only change the
   // vertical magnitude, not the placement-conditional value).
   const lines = [{ start: 0, end: 1, text: 'HELLO' }];
   const ass = generateAss(lines, { placement: 'top' });
-  assert.match(ass, /,8,40,40,820,1$/m);
+  assert.match(ass, /,8,40,40,520,1$/m);
 });
 
 test('ass: top placement uses Alignment=8', () => {

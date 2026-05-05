@@ -178,6 +178,29 @@ test('ass: does NOT regress to old 50pt size', () => {
   assert.doesNotMatch(ass, /Montserrat,50,/);
 });
 
+test('ass: subtitles positioned just below middle (MarginV=820) — PR #99', () => {
+  // Lock-in test: caption baseline must land at y≈1100 (just below the
+  // 960 vertical midpoint of the 1920px canvas), per Shannon's
+  // talking-head reel placement spec. With Alignment=2 (bottom-center),
+  // MarginV=820 → baseline = 1920 - 820 = 1100.
+  const lines = [{ start: 0, end: 1, text: 'HELLO' }];
+  const ass = generateAss(lines);
+  // The Style line ends with `,...,2,40,40,820,1` (Alignment=2, MarginL=40,
+  // MarginR=40, MarginV=820, Encoding=1). Anchor the regex to the line end.
+  assert.match(ass, /,2,40,40,820,1$/m);
+  // Defensive: ensure we did not regress to the old 200 value.
+  assert.doesNotMatch(ass, /,40,40,200,1$/m);
+});
+
+test('ass: top placement variant also gets the higher MarginV', () => {
+  // The placement override flips Alignment from 2 (bottom-center) to 8
+  // (top-center), but MarginV should still be 820 (we only changed the
+  // vertical magnitude, not the placement-conditional value).
+  const lines = [{ start: 0, end: 1, text: 'HELLO' }];
+  const ass = generateAss(lines, { placement: 'top' });
+  assert.match(ass, /,8,40,40,820,1$/m);
+});
+
 test('ass: top placement uses Alignment=8', () => {
   const lines = [{ start: 0, end: 1, text: 'TOP' }];
   const ass = generateAss(lines, { placement: 'top' });

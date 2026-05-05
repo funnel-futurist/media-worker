@@ -47,74 +47,65 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
   const body = req.body || {};
   const jobId = typeof body.jobId === 'string' ? body.jobId : undefined;
 
-  // Surface any thrown error as { jobId, step, error } so operators see
-  // exactly which phase blew up without grepping logs.
-  let currentStep = 'validate';
+  // Body-shape validation runs here (returns 400 with `step:'validate'`).
+  // Pipeline failures are caught INSIDE runCleanModePipeline (PR #103) and
+  // returned as a partial-data shape with an `error` field — which lets the
+  // operator see what data was collected before the throw.
   try {
     if (!jobId) return res.status(400).json({ error: 'jobId is required (non-empty string)' });
     if (!body.sourceMP4 || typeof body.sourceMP4.bucket !== 'string' || typeof body.sourceMP4.path !== 'string') {
-      return res.status(400).json({ jobId, step: currentStep, error: 'sourceMP4 must be { bucket, path }' });
+      return res.status(400).json({ jobId, step: 'validate', error: 'sourceMP4 must be { bucket, path }' });
     }
     if (typeof body.clientId !== 'string' || body.clientId.length === 0) {
-      return res.status(400).json({ jobId, step: currentStep, error: 'clientId is required' });
+      return res.status(400).json({ jobId, step: 'validate', error: 'clientId is required' });
     }
     if (!body.output || typeof body.output.bucket !== 'string' || typeof body.output.pathPrefix !== 'string') {
-      return res.status(400).json({ jobId, step: currentStep, error: 'output must be { bucket, pathPrefix }' });
+      return res.status(400).json({ jobId, step: 'validate', error: 'output must be { bucket, pathPrefix }' });
     }
     if (body.options) {
       if (body.options.brollDensity != null && (typeof body.options.brollDensity !== 'number' || body.options.brollDensity <= 0 || body.options.brollDensity > 1)) {
-        return res.status(400).json({ jobId, step: currentStep, error: 'options.brollDensity must be in (0, 1]' });
+        return res.status(400).json({ jobId, step: 'validate', error: 'options.brollDensity must be in (0, 1]' });
       }
     }
 
-    currentStep = 'pipeline';
     console.log(`[clean-mode-compose] job=${jobId} client=${body.clientId} src=${body.sourceMP4.bucket}/${body.sourceMP4.path}`);
     const result = await runCleanModePipeline(body);
+
+    // PR #103: orchestrator's catch returns a partial-data response with an
+    // `error` field. Map that to a non-2xx status (preserve the partial
+    // payload so the operator sees diagnostics + cuts + streamSync etc).
+    if (result?.error) {
+      const status = pickStatusFromMessage(result.error.message ?? '');
+      console.error(
+        `[clean-mode-compose] job=${jobId} step=${result.error.step ?? '?'} ` +
+        `error: ${result.error.message ?? '(no message)'} (returning partial data)`,
+      );
+      return res.status(status).json(result);
+    }
+
     console.log(`[clean-mode-compose] job=${jobId} OK in ${result.processingMs}ms (cuts:${result.cuts.applied} ins:${result.insertions.count} subs:${result.subtitles.lines})`);
     return res.json(result);
   } catch (err) {
-    const stepFromMsg = inferStepFromError(err?.message ?? '');
-    const step = stepFromMsg ?? currentStep;
-    console.error(`[clean-mode-compose] job=${jobId ?? '?'} step=${step} error:`, err?.message ?? err);
-    const status = pickStatusFromError(err);
-    return res.status(status).json({
+    // Fallback path — only hit if the orchestrator throws BEFORE its own
+    // try/catch can fire (e.g., the early validation throws like
+    // "jobId is required"). Pipeline-internal errors return through the
+    // partial-data path above instead.
+    console.error(`[clean-mode-compose] job=${jobId ?? '?'} early error:`, err?.message ?? err);
+    return res.status(500).json({
       jobId: jobId ?? null,
-      step,
+      step: 'pipeline',
       error: err?.message ?? String(err),
     });
   }
 });
 
 /**
- * Map an error message back to the pipeline step that produced it. Best-effort
- * — the orchestrator's per-step timing record on a successful run is the
- * authoritative breakdown. This mapping just gives the failure response a
- * step name when the orchestrator threw.
- */
-function inferStepFromError(message) {
-  if (/Supabase download/i.test(message)) return 'download';
-  if (/Scribe/.test(message)) return 'transcribe';
-  if (/silencedetect/i.test(message)) return 'silenceDetect';
-  if (/cuts cover the entire source/i.test(message)) return 'cutApply';
-  if (/broll_library lookup/i.test(message)) return 'libraryLookup';
-  if (/broll picker failed/i.test(message)) return 'brollPick';
-  if (/Broll download/i.test(message) || /no file_url/i.test(message)) return 'brollDownload';
-  if (/ffmpeg compose/i.test(message)) return 'compose';
-  if (/subtitles burn/i.test(message)) return 'subtitleBurn';
-  if (/Supabase upload/i.test(message)) return 'upload';
-  if (/Supabase sign/i.test(message)) return 'sign';
-  return null;
-}
-
-/**
- * Status code policy:
- *   - 400 for caller-shape errors (already returned above before throwing)
+ * Status code policy (matches the prior `pickStatusFromError`):
  *   - 502 when an upstream service responds with an error (Gemini, Supabase,
- *     Scribe, etc — anything starting with "Supabase X yyy: ..." or similar)
- *   - 500 for everything else (internal pipeline bug)
+ *     Scribe, etc)
+ *   - 500 for everything else (internal pipeline bug, A/V sync gate, etc)
  */
-function pickStatusFromError(err) {
-  const msg = err?.message ?? '';
+function pickStatusFromMessage(msg) {
   if (/Supabase \w+ \d{3}/.test(msg)) return 502;
   if (/Scribe \d{3}/.test(msg)) return 502;
   if (/broll picker failed/.test(msg)) return 502;

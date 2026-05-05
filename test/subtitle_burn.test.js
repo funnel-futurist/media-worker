@@ -162,7 +162,7 @@ test('ass: header includes talking-head reel styling tokens', () => {
   const ass = generateAss(lines);
   assert.match(ass, /PlayResX: 1080/);
   assert.match(ass, /PlayResY: 1920/);
-  assert.match(ass, /Montserrat,80/);                       // talking-head reel size (was 50)
+  assert.match(ass, /Montserrat Black,80/);                 // PR #107: heaviest Montserrat face; was "Montserrat,80"
   assert.match(ass, /&H00FFFFFF/);                          // white primary
   assert.match(ass, /&H001A1A1A/);                          // dark outline
   assert.match(ass, /,-1,/);                                // Bold=-1
@@ -176,6 +176,23 @@ test('ass: does NOT regress to old 50pt size', () => {
   const lines = [{ start: 0, end: 1, text: 'HELLO' }];
   const ass = generateAss(lines);
   assert.doesNotMatch(ass, /Montserrat,50,/);
+  assert.doesNotMatch(ass, /Montserrat Black,50,/);
+});
+
+test('ass: requests heaviest Montserrat face (Fontname=Montserrat Black) — PR #107', () => {
+  // Lock-in test: B5 visual review showed Montserrat Bold (weight 700) reading
+  // visibly thinner than Shannon expected. PR #107 bumps the Style Fontname
+  // to "Montserrat Black" — fontconfig binds to the Black face on the
+  // Dockerfile-installed fonts-montserrat-extra package. Defends against
+  // drift back to plain "Montserrat" (which falls back to a thinner weight
+  // when Black isn't present).
+  const lines = [{ start: 0, end: 1, text: 'HELLO' }];
+  const ass = generateAss(lines);
+  assert.match(ass, /Style: Default,Montserrat Black,80,/);
+  // Defensive: ensure the family name was not silently regressed back to the
+  // pre-PR #107 plain "Montserrat" (which would let libass fall back to
+  // Montserrat Bold / Arial Bold and undo this PR).
+  assert.doesNotMatch(ass, /Style: Default,Montserrat,80,/);
 });
 
 test('ass: subtitles positioned at shoulder/upper-chest level (MarginV=520) — PR #106', () => {

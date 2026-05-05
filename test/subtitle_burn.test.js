@@ -117,7 +117,7 @@ test('group: breaks on sentence-end punctuation', () => {
     w('are', 1.3, 1.5),
     w('you?', 1.6, 1.9),    // question → break
   ];
-  const lines = groupIntoLines(words, 6, 2.5);
+  const lines = groupIntoLines(words, 4, 1.8);
   assert.equal(lines.length, 2);
   assert.equal(lines[0].text, 'HELLO THERE.');
   assert.equal(lines[1].text, 'HOW ARE YOU?');
@@ -125,36 +125,57 @@ test('group: breaks on sentence-end punctuation', () => {
 
 test('group: breaks on max words', () => {
   const words = Array.from({ length: 14 }, (_, i) => w('word', i * 0.3, i * 0.3 + 0.2));
-  const lines = groupIntoLines(words, 6, 100);
-  assert.equal(lines.length, Math.ceil(14 / 6));
+  const lines = groupIntoLines(words, 4, 100);
+  assert.equal(lines.length, Math.ceil(14 / 4));
 });
 
 test('group: breaks on max duration', () => {
-  // 10 words spaced 0.6s apart → line dur > 2.5s before 6 words hit
-  const words = Array.from({ length: 10 }, (_, i) => w(`word${i}`, i * 0.6, i * 0.6 + 0.3));
-  const lines = groupIntoLines(words, 100, 2.5);
+  // 10 words spaced 0.5s apart → line dur > 1.8s before 4 words hit
+  const words = Array.from({ length: 10 }, (_, i) => w(`word${i}`, i * 0.5, i * 0.5 + 0.2));
+  const lines = groupIntoLines(words, 100, 1.8);
   assert.ok(lines.length >= 2, `expected ≥2 lines, got ${lines.length}`);
   for (const l of lines) {
-    assert.ok(l.end - l.start <= 2.5 + 0.5, `line dur ${l.end - l.start}s exceeded`);
+    assert.ok(l.end - l.start <= 1.8 + 0.5, `line dur ${l.end - l.start}s exceeded`);
   }
 });
 
 test('group: empty input → empty lines', () => {
-  assert.deepEqual(groupIntoLines([], 6, 2.5), []);
+  assert.deepEqual(groupIntoLines([], 4, 1.8), []);
+});
+
+test('group: defaults to 4 words / 1.8s for talking-head reel style', () => {
+  // Lock in the default values so future drift gets caught. 5 words spaced
+  // 0.4s apart (each 0.3s long) — slow enough that maxWords=4 is the gate
+  // (not maxDurationSec=1.8) for the first line.
+  const words = Array.from({ length: 5 }, (_, i) => w(`word${i}`, i * 0.4, i * 0.4 + 0.3));
+  const lines = groupIntoLines(words);
+  // First line should be capped at 4 words (line 1 = words 0..3, line 2 = word 4)
+  assert.equal(lines.length, 2);
+  assert.equal(lines[0].wordCount, 4);
+  assert.equal(lines[1].wordCount, 1);
 });
 
 // ── generateAss ────────────────────────────────────────────────────────
 
-test('ass: header includes ff_clean_subtitle styling tokens', () => {
+test('ass: header includes talking-head reel styling tokens', () => {
   const lines = [{ start: 0, end: 1, text: 'HELLO' }];
   const ass = generateAss(lines);
   assert.match(ass, /PlayResX: 1080/);
   assert.match(ass, /PlayResY: 1920/);
-  assert.match(ass, /Montserrat,50/);
-  assert.match(ass, /&H00FFFFFF/);  // white primary
-  assert.match(ass, /&H001A1A1A/);  // dark outline
+  assert.match(ass, /Montserrat,80/);                       // talking-head reel size (was 50)
+  assert.match(ass, /&H00FFFFFF/);                          // white primary
+  assert.match(ass, /&H001A1A1A/);                          // dark outline
+  assert.match(ass, /,-1,/);                                // Bold=-1
+  assert.match(ass, /1,4,2,2,/);                            // BorderStyle=1, Outline=4, Shadow=2, Alignment=2 (bottom-center)
   assert.match(ass, /Dialogue: 0,/);
   assert.match(ass, /HELLO/);
+});
+
+test('ass: does NOT regress to old 50pt size', () => {
+  // Lock-in test: catch any future drift back to the documentary-style 50pt.
+  const lines = [{ start: 0, end: 1, text: 'HELLO' }];
+  const ass = generateAss(lines);
+  assert.doesNotMatch(ass, /Montserrat,50,/);
 });
 
 test('ass: top placement uses Alignment=8', () => {

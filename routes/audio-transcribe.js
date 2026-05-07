@@ -5,16 +5,24 @@
  * cron to produce word_timestamps that drive captions, slate detection, and
  * deterministic editorial cuts.
  *
- * Implementation: POSTs the source bytes to ElevenLabs Scribe
- * (https://api.elevenlabs.io/v1/speech-to-text) with model_id=scribe_v1 and
- * language_code=eng. Response is mapped to the existing
+ * Implementation: POSTs the source bytes to Deepgram Nova-3
+ * (https://api.deepgram.com/v1/listen?model=nova-3&...). Response is mapped
+ * to the existing
  *   { transcript, word_timestamps: [{word, start_ms, end_ms}], model, durationSeconds }
+ *
+ * The previous backend was ElevenLabs Scribe (model_id=scribe_v1,
+ * language_code=eng). Swapped to Deepgram for billing isolation and 35%
+ * lower per-hour cost — see lib/deepgram_transcribe.js header for the full
+ * rationale. Wire contract on this route is unchanged.
  * shape so the wire contract to Vercel is unchanged.
  *
- * Why Scribe and not whisper.cpp small.en (the previous implementation):
+ * Why a hosted ASR and not whisper.cpp small.en (the original implementation):
  * Phase 2c proved Whisper's transcription errors ("Slack→slab", "automation→inone")
  * were the upstream cause of bad editorial decisions. Higher-fidelity input was
- * the cheapest improvement on the whole pipeline.
+ * the cheapest improvement on the whole pipeline. Scribe replaced Whisper;
+ * Deepgram replaced Scribe — both deliver the same word-level fidelity;
+ * Deepgram does it at a lower per-hour rate under a Funnel-Futurists-owned
+ * billing account.
  *
  * Drive sources still use the caller-supplied bearer token (Railway never holds
  * OAuth credentials — same pattern as routes/audio-loudnorm-trim.js + classify.js).
@@ -27,15 +35,14 @@ import { randomUUID } from 'crypto';
 import axios from 'axios';
 
 import { getDuration } from '../lib/media.js';
-import {
-  detectAudioSilences,
-  callScribeWithRetry,
-  mapScribeResponse,
-} from '../lib/scribe_transcribe.js';
+import { detectAudioSilences } from '../lib/scribe_transcribe.js';
+import { callDeepgramWithRetry, mapDeepgramResponse } from '../lib/deepgram_transcribe.js';
 
 export const audioTranscribeRouter = Router();
 
-const SCRIBE_MAX_BYTES = 1 * 1024 * 1024 * 1024; // 1 GB — Scribe's documented limit is 3 GB but we cap conservatively
+// 1 GB cap — Deepgram's documented limit is 2 GB but we cap conservatively
+// (also matches the prior Scribe-era cap so callers see no behavior change).
+const TRANSCRIBE_MAX_BYTES = 1 * 1024 * 1024 * 1024;
 
 /**
  * POST /audio-transcribe
@@ -81,9 +88,9 @@ audioTranscribeRouter.post('/audio-transcribe', async (req, res, next) => {
       return res.status(400).json({ error: 'sourceUrl is required when sourceType=public_url' });
     }
 
-    const apiKey = process.env.ELEVENLABS_API_KEY;
+    const apiKey = process.env.DEEPGRAM_API_KEY?.trim();
     if (!apiKey) {
-      throw new Error('ELEVENLABS_API_KEY not set on Railway — required for Scribe transcription');
+      throw new Error('DEEPGRAM_API_KEY not set on Railway — required for transcription');
     }
 
     mkdirSync(tmpDir, { recursive: true });
@@ -111,9 +118,9 @@ audioTranscribeRouter.post('/audio-transcribe', async (req, res, next) => {
     }
 
     const fileSize = statSync(inputPath).size;
-    if (fileSize > SCRIBE_MAX_BYTES) {
+    if (fileSize > TRANSCRIBE_MAX_BYTES) {
       throw new Error(
-        `source is ${(fileSize / 1024 / 1024).toFixed(1)} MB — exceeds Scribe upload cap of 1 GB`,
+        `source is ${(fileSize / 1024 / 1024).toFixed(1)} MB — exceeds transcribe upload cap of 1 GB`,
       );
     }
 
@@ -133,45 +140,55 @@ audioTranscribeRouter.post('/audio-transcribe', async (req, res, next) => {
     const silenceMap = await detectAudioSilences(inputPath, { noiseDb, minDur });
     console.log(`[audio-transcribe] silencedetect found ${silenceMap.length} silence span(s)`);
 
-    // ── 2. Call ElevenLabs Scribe ──────────────────────────────────
-    // multipart upload via form-data + axios. language_code=eng to match the
-    // small.en model behavior we replaced (no auto-detect drift on long
-    // monologues with rare loanwords).
-    console.log(`[audio-transcribe] scribe POST (${(fileSize / 1024 / 1024).toFixed(1)} MB)`);
-    const scribeResponse = await callScribeWithRetry(apiKey, inputPath);
+    // ── 2. Call Deepgram Nova-3 ────────────────────────────────────
+    // Raw-bytes POST (no multipart wrapping needed — Deepgram extracts audio
+    // server-side from the mp4 container). language=en, smart_format=true,
+    // punctuate=true — see lib/deepgram_transcribe.js for the full query
+    // string and rationale for each parameter.
+    console.log(`[audio-transcribe] deepgram POST (${(fileSize / 1024 / 1024).toFixed(1)} MB)`);
+    const dgResponse = await callDeepgramWithRetry(apiKey, inputPath);
 
     // ── 3. Map response → wire contract ────────────────────────────
-    const { transcript, word_timestamps, _debug: mappedDebug } = mapScribeResponse(scribeResponse);
+    const { transcript, word_timestamps, _debug: mappedDebug } = mapDeepgramResponse(dgResponse);
 
-    // Use ffprobe-measured duration over Scribe's audio_duration_secs to keep
-    // consistent with how audio-loudnorm-trim measures duration on the same file.
+    // Always trust ffprobe over the ASR's own duration field — keeps duration
+    // consistent with how audio-loudnorm-trim measures duration on the same
+    // file. Deepgram returns duration via results.duration; we only fall
+    // back to it (or to the last-word end_ms) if ffprobe fails.
     let durationSeconds = 0;
     try {
       durationSeconds = await getDuration(inputPath);
     } catch (err) {
-      console.warn(`[audio-transcribe] ffprobe failed, falling back to Scribe duration: ${err.message}`);
-      durationSeconds = typeof scribeResponse.audio_duration_secs === 'number'
-        ? scribeResponse.audio_duration_secs
+      console.warn(`[audio-transcribe] ffprobe failed, falling back to Deepgram duration: ${err.message}`);
+      durationSeconds = typeof dgResponse?.metadata?.duration === 'number'
+        ? dgResponse.metadata.duration
         : (word_timestamps.length ? word_timestamps[word_timestamps.length - 1].end_ms / 1000 : 0);
     }
 
     // Diagnostic if we somehow got zero words — log raw shape for debugging
-    // without an extra round trip. mapScribeResponse populated _debug already.
+    // without an extra round trip. mapDeepgramResponse populated _debug already.
     if (mappedDebug) {
       console.warn(`[audio-transcribe] PARSED ZERO WORDS. Raw sample: ${mappedDebug.rawSample}`);
     }
 
+    const dgModel = dgResponse?.metadata?.model_info
+      ? Object.values(dgResponse.metadata.model_info)[0]?.name ?? 'nova-3'
+      : 'nova-3';
     console.log(
       `[audio-transcribe] done: ${word_timestamps.length} words, ` +
         `transcript ${transcript.length} chars, dur ${durationSeconds.toFixed(2)}s ` +
-        `(model=elevenlabs_scribe_v1, lang=${scribeResponse.language_code ?? '?'})`,
+        `(model=deepgram_${dgModel})`,
     );
 
     res.json({
       transcript,
       word_timestamps,
       silence_map: silenceMap,
-      model: 'elevenlabs_scribe_v1',
+      // The wire contract historically reported `model: 'elevenlabs_scribe_v1'`.
+      // Now that we've switched backends, callers (creative-engine
+      // compose_pending) should be able to introspect which ASR ran. Use a
+      // namespaced string the same shape.
+      model: `deepgram_${dgModel}`,
       durationSeconds,
       adIngestionId: adIngestionId ?? null,
       clientId: clientId ?? null,

@@ -899,10 +899,25 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
           const filename = `${safeTitle}.mp4`;
 
           // ── Route by content type ──────────────────────────────────────
-          // Long form: skip the render pipeline entirely — deliver the raw clip.
-          // Short form: classify → washed → Submagic (unless subtitles already present).
+          // Long form: skip the render pipeline entirely — deliver the raw clip
+          //   straight to Drive (status='rendered' lets upload_captioned pick
+          //   it up immediately, bypassing compose_pending → Hyperframes).
+          // Short form: status='classified' so compose_pending picks it up and
+          //   authors a Hyperframes blueprint. The blueprint composer reads
+          //   has_burned_subtitles + motion_graphics_plan from gemini_markup
+          //   and biases scene placement accordingly (omitCaptionsTrack +
+          //   subtitleSafeZone when the source already has burned-in captions).
           const ingestionStatus = isLongForm ? 'rendered' : 'classified';
           const assetType = isLongForm ? 'youtube_longform' : 'reel_raw';
+
+          // Phase 2 enrichment from the in-repo clip planner (lib/youtube_clipper.ts).
+          // Long-form clips bypass Hyperframes entirely — force motion_graphics_plan=[]
+          // for them regardless of what the planner sent, so compose layer never
+          // sees a hint for a clip it shouldn't be authoring.
+          const planScore = typeof clip.score === 'number' ? clip.score : null;
+          const planMotionGraphics = isLongForm
+            ? []
+            : Array.isArray(clip.motionGraphicsPlan) ? clip.motionGraphicsPlan : [];
 
           await supabaseInsert('ad_ingestion', {
             client_id: clientId,
@@ -923,6 +938,8 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
               video_title: videoTitle,
               clip_title: clip.title,
               suggested_caption: clip.suggestedCaption ?? null,
+              score: planScore,
+              motion_graphics_plan: planMotionGraphics,
               broll_cues: [],
               emotion_tags: [],
             },

@@ -1,0 +1,22 @@
+{
+  "_comment": "Sample Gemini Pro response wrapped in the standard candidates[0].content.parts[0].text envelope. Inner JSON is what lib/stock_keyword_gen.js parses. Mirror of the broll_picker / slate_detect / bad_take_detect response shape.",
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "{\n  \"keywords\": [\n    \"family planning home\",\n    \"parents living room conversation\",\n    \"financial documents desk\",\n    \"calendar deadline approaching\",\n    \"empty calendar pages\"\n  ],\n  \"reasoning\": \"Transcript discusses families delaying long-term planning. Keywords target the family-home aesthetic + paperwork + time-passing visual metaphors most likely to support the message without distracting from the speaker.\"\n}"
+          }
+        ]
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 850,
+    "candidatesTokenCount": 90,
+    "totalTokenCount": 940
+  },
+  "modelVersion": "gemini-3.1-pro-preview"
+}

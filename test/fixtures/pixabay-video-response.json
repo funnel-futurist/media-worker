@@ -1,0 +1,94 @@
+{
+  "_comment": "Abbreviated Pixabay video API response. Real responses have ~20+ fields per hit; we keep only what lib/pixabay_video.js reads. Shape matches https://pixabay.com/api/docs/#api_video_search.",
+  "total": 142,
+  "totalHits": 142,
+  "hits": [
+    {
+      "id": 1234567,
+      "pageURL": "https://pixabay.com/videos/family-home-living-room-1234567/",
+      "type": "film",
+      "tags": "family, home, living room, parents, children",
+      "duration": 18,
+      "videos": {
+        "large": {
+          "url": "https://cdn.pixabay.com/video/2025/01/01/1234567-large.mp4",
+          "width": 1920,
+          "height": 1080,
+          "size": 8500000
+        },
+        "medium": {
+          "url": "https://cdn.pixabay.com/video/2025/01/01/1234567-medium.mp4",
+          "width": 1280,
+          "height": 720,
+          "size": 4200000
+        },
+        "small": {
+          "url": "https://cdn.pixabay.com/video/2025/01/01/1234567-small.mp4",
+          "width": 960,
+          "height": 540,
+          "size": 1900000
+        },
+        "tiny": {
+          "url": "https://cdn.pixabay.com/video/2025/01/01/1234567-tiny.mp4",
+          "width": 640,
+          "height": 360,
+          "size": 800000
+        }
+      },
+      "user": "TestPhotographer",
+      "user_id": 5555
+    },
+    {
+      "id": 7654321,
+      "pageURL": "https://pixabay.com/videos/documents-paperwork-desk-7654321/",
+      "type": "film",
+      "tags": "documents, paperwork, desk, office",
+      "duration": 12,
+      "videos": {
+        "large": {
+          "url": "https://cdn.pixabay.com/video/2025/01/02/7654321-large.mp4",
+          "width": 1920,
+          "height": 1080,
+          "size": 6300000
+        },
+        "medium": {
+          "url": "https://cdn.pixabay.com/video/2025/01/02/7654321-medium.mp4",
+          "width": 1280,
+          "height": 720,
+          "size": 3100000
+        },
+        "small": {
+          "url": "https://cdn.pixabay.com/video/2025/01/02/7654321-small.mp4",
+          "width": 960,
+          "height": 540,
+          "size": 1400000
+        },
+        "tiny": {
+          "url": "https://cdn.pixabay.com/video/2025/01/02/7654321-tiny.mp4",
+          "width": 640,
+          "height": 360,
+          "size": 600000
+        }
+      },
+      "user": "AnotherPhotographer",
+      "user_id": 6666
+    },
+    {
+      "id": 9999999,
+      "pageURL": "https://pixabay.com/videos/calendar-planning-9999999/",
+      "type": "film",
+      "tags": "calendar, planning, schedule",
+      "duration": 8,
+      "videos": {
+        "medium": {
+          "url": "https://cdn.pixabay.com/video/2025/01/03/9999999-medium.mp4",
+          "width": 1280,
+          "height": 720,
+          "size": 2100000
+        }
+      },
+      "user": "PhotoUser3",
+      "user_id": 7777
+    }
+  ]
+}

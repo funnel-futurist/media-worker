@@ -1,0 +1,27 @@
+ffmpeg version 7.0.2 Copyright (c) 2000-2024 the FFmpeg developers
+  built with gcc 13 (Ubuntu 13.2.0-23ubuntu4)
+Input #0, mp3, from 'sample-music.mp3':
+  Duration: 00:02:22.05, start: 0.025056, bitrate: 128 kb/s
+  Stream #0:0: Audio: mp3, 44100 Hz, stereo, fltp, 128 kb/s
+Stream mapping:
+  Stream #0:0 -> #0:0 (mp3 (mp3float) -> pcm_s16le (native))
+[Parsed_ebur128_0 @ 0x55a8e3] EBU R128 LU computed at sample rate 48000 Hz
+Output #0, null, to 'pipe:':
+  Metadata:
+    encoder         : Lavf61.1.100
+  Stream #0:0: Audio: pcm_s16le, 48000 Hz, stereo, s16, 1536 kb/s
+size=N/A time=00:02:22.04 bitrate=N/A speed= 119x
+[Parsed_ebur128_0 @ 0x55a8e3] Summary:
+
+  Integrated loudness:
+    I:         -22.4 LUFS
+    Threshold: -32.5 LUFS
+
+  Loudness range:
+    LRA:         8.7 LU
+    Threshold: -42.5 LUFS
+    LRA low:   -27.8 LUFS
+    LRA high:  -19.1 LUFS
+
+  True peak:
+    Peak:       -1.2 dBFS

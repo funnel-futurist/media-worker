@@ -8,7 +8,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { shouldFetchStock, mergeStockIntoLibrary } from '../lib/stock_library_merge.js';
+import { shouldFetchStock, mergeStockIntoLibrary, rebalanceClientFirst } from '../lib/stock_library_merge.js';
 
 // ── shouldFetchStock — coverage heuristic ───────────────────────────────
 
@@ -213,4 +213,96 @@ test('merge: when_to_use mentions visual cue from tags so the picker has search 
   const hit = stockHit({ tags: 'documents, paperwork, desk' });
   const out = mergeStockIntoLibrary([], [hit]);
   assert.match(out[0].when_to_use, /documents|paperwork|desk/);
+});
+
+// ── rebalanceClientFirst — post-pick safety net (PR-D) ─────────────────
+
+const ins = (id, prov) => ({ asset_id: id, startSec: 0, endSec: 3, provenance: prov });
+const insArr = (...provs) => provs.map((p, i) => ins(`a${i}`, p));
+
+test('rebalance: returns input untouched when usableClient=0 (Pixabay free to dominate)', () => {
+  const picks = insArr('pixabay', 'pixabay', 'pixabay');
+  const out = rebalanceClientFirst({ insertions: picks, usableClientCount: 0 });
+  assert.equal(out.insertions.length, 3);
+  assert.equal(out.droppedStockCount, 0);
+  assert.equal(out.action, 'skipped_no_client_assets');
+});
+
+test('rebalance: empty insertions short-circuits', () => {
+  const out = rebalanceClientFirst({ insertions: [], usableClientCount: 5 });
+  assert.deepEqual(out.insertions, []);
+  assert.equal(out.action, null);
+  assert.equal(out.droppedStockCount, 0);
+});
+
+test('rebalance: leaves insertions alone when stock ratio already <= max', () => {
+  // 2 client + 1 stock = 33% stock, default cap 0.4 → no trim
+  const picks = insArr('client', 'client', 'pixabay');
+  const out = rebalanceClientFirst({ insertions: picks, usableClientCount: 5 });
+  assert.equal(out.insertions.length, 3);
+  assert.equal(out.droppedStockCount, 0);
+  assert.equal(out.action, null);
+});
+
+test('rebalance: trims stock from the tail when ratio exceeds max', () => {
+  // 2 client + 4 stock = 67% stock, default cap 0.4. Need stock <= 0.4*total.
+  // After dropping last stock: 2 client + 3 stock = 60% stock (still over).
+  // After 2 drops: 2 client + 2 stock = 50% (still over).
+  // After 3 drops: 2 client + 1 stock = 33% (under cap) → stop.
+  const picks = insArr('client', 'pixabay', 'client', 'pixabay', 'pixabay', 'pixabay');
+  const out = rebalanceClientFirst({ insertions: picks, usableClientCount: 5 });
+  assert.equal(out.droppedStockCount, 3);
+  assert.equal(out.insertions.length, 3);
+  assert.equal(out.insertions.filter((i) => i.provenance === 'pixabay').length, 1);
+  assert.match(out.action ?? '', /trimmed_3/);
+});
+
+test('rebalance: trims latest-time stock first (preserves early-video stock)', () => {
+  // ordered chronologically; expect the LAST stock pick to be removed first
+  const picks = [
+    ins('a0', 'pixabay'),  // t=early
+    ins('a1', 'client'),
+    ins('a2', 'pixabay'),  // t=late — should be dropped
+  ];
+  // 1 client + 2 stock = 67% > 0.4. Drop last stock → 1c+1s=50% > 0.4. Drop next stock (now last) → 1c+0s.
+  const out = rebalanceClientFirst({ insertions: picks, usableClientCount: 3 });
+  assert.equal(out.droppedStockCount, 2);
+  assert.equal(out.insertions.length, 1);
+  assert.equal(out.insertions[0].asset_id, 'a1');
+});
+
+test('rebalance: respects custom maxStockRatio override', () => {
+  // 2 client + 2 stock = 50% stock. With maxStockRatio=0.5, ratio is exactly at cap → no trim.
+  const picks = insArr('client', 'pixabay', 'client', 'pixabay');
+  const out = rebalanceClientFirst({ insertions: picks, usableClientCount: 5, maxStockRatio: 0.5 });
+  assert.equal(out.droppedStockCount, 0);
+});
+
+test('rebalance: maxStockRatio=0.3 (stricter) trims more aggressively', () => {
+  // 2 client + 2 stock = 50% > 0.3. Drop last stock → 2c+1s=33% > 0.3. Drop again → 2c+0s=0%.
+  const picks = insArr('client', 'pixabay', 'client', 'pixabay');
+  const out = rebalanceClientFirst({ insertions: picks, usableClientCount: 5, maxStockRatio: 0.3 });
+  assert.equal(out.droppedStockCount, 2);
+  assert.equal(out.insertions.length, 2);
+  assert.equal(out.insertions.every((i) => i.provenance === 'client'), true);
+});
+
+test('rebalance: tolerates missing provenance — treats undefined as client (legacy rows)', () => {
+  // legacy rows that pre-date PR-A may not carry provenance; default-as-client matches downloadBrollAssets behavior.
+  const picks = [
+    { asset_id: 'a0' },
+    { asset_id: 'a1', provenance: 'pixabay' },
+  ];
+  const out = rebalanceClientFirst({ insertions: picks, usableClientCount: 3 });
+  assert.equal(out.droppedStockCount, 1);
+  assert.equal(out.insertions.length, 1);
+  assert.equal(out.insertions[0].asset_id, 'a0');
+});
+
+test('rebalance: returns metadata fields callers can read for response.insertions.sourceBalance', () => {
+  const picks = insArr('client', 'pixabay', 'pixabay', 'pixabay');
+  const out = rebalanceClientFirst({ insertions: picks, usableClientCount: 5, maxStockRatio: 0.4 });
+  assert.equal(typeof out.droppedStockCount, 'number');
+  assert.equal(typeof out.action, 'string');
+  assert.ok(Array.isArray(out.insertions));
 });

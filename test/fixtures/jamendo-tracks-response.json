@@ -1,0 +1,69 @@
+{
+  "_comment": "Sample Jamendo /v3.0/tracks response. Real shape captured 2026-05-08 via curl; values trimmed for brevity. lib/jamendo_music.js parses `headers.status === 'success'` + maps `results[*]` into our cleaned track shape (see file header).",
+  "headers": {
+    "status": "success",
+    "code": 0,
+    "error_message": "",
+    "warnings": "",
+    "results_count": 3
+  },
+  "results": [
+    {
+      "id": "1781234",
+      "name": "Warm Acoustic Reflection",
+      "duration": 184,
+      "artist_id": "501234",
+      "artist_name": "Jane Doe",
+      "album_name": "Quiet Mornings",
+      "album_id": "210101",
+      "license_ccurl": "https://creativecommons.org/licenses/by/3.0/",
+      "position": 1,
+      "releasedate": "2024-09-12",
+      "audio": "https://prod-1.storage.jamendo.com/?trackid=1781234&format=mp32&from=app-test",
+      "audiodownload": "https://prod-1.storage.jamendo.com/download/track/1781234/mp32/",
+      "shorturl": "https://jam.to/1781234",
+      "shareurl": "https://www.jamendo.com/track/1781234/warm-acoustic-reflection",
+      "image": "https://usercontent.jamendo.com?type=album&id=210101&width=300",
+      "audiodownload_allowed": true,
+      "tags": "acoustic,guitar,calm,instrumental,reflective"
+    },
+    {
+      "id": "1781235",
+      "name": "Hopeful Piano Sketch",
+      "duration": 132,
+      "artist_id": "501235",
+      "artist_name": "John Q",
+      "album_name": "Studies",
+      "album_id": "210102",
+      "license_ccurl": "https://creativecommons.org/licenses/by-sa/4.0/",
+      "position": 2,
+      "releasedate": "2024-04-02",
+      "audio": "https://prod-1.storage.jamendo.com/?trackid=1781235&format=mp32&from=app-test",
+      "audiodownload": "https://prod-1.storage.jamendo.com/download/track/1781235/mp32/",
+      "shorturl": "https://jam.to/1781235",
+      "shareurl": "https://www.jamendo.com/track/1781235/hopeful-piano-sketch",
+      "image": "https://usercontent.jamendo.com?type=album&id=210102&width=300",
+      "audiodownload_allowed": true,
+      "tags": "piano,hopeful,instrumental,minimal"
+    },
+    {
+      "id": "1781236",
+      "name": "Gentle Folk Background",
+      "duration": 220,
+      "artist_id": "501236",
+      "artist_name": "Acme Strings",
+      "album_name": "Field Notes",
+      "album_id": "210103",
+      "license_ccurl": "https://creativecommons.org/licenses/by/4.0/",
+      "position": 3,
+      "releasedate": "2025-01-22",
+      "audio": "https://prod-1.storage.jamendo.com/?trackid=1781236&format=mp32&from=app-test",
+      "audiodownload": "https://prod-1.storage.jamendo.com/download/track/1781236/mp32/",
+      "shorturl": "https://jam.to/1781236",
+      "shareurl": "https://www.jamendo.com/track/1781236/gentle-folk-background",
+      "image": "https://usercontent.jamendo.com?type=album&id=210103&width=300",
+      "audiodownload_allowed": true,
+      "tags": "folk,acoustic,guitar,warm,instrumental"
+    }
+  ]
+}

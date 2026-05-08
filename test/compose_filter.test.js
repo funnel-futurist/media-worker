@@ -33,16 +33,55 @@ const SOURCE = readFileSync(SOURCE_PATH, 'utf8');
 // ── PR #111: fill-crop reframing (production 1080×1920 path) ──────────
 
 test('compose filter: uses fill-crop (increase + crop=1080:1920) — PR #111', () => {
-  // Both the face-segment and broll-segment branches in composeFaceAndBrolls
-  // should use the same scale+crop chain. Counted occurrences should be
-  // exactly 2 — not 1 (only one branch was changed) and not 3+ (drift).
-  const FILL_CROP = /scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920/g;
-  const matches = SOURCE.match(FILL_CROP) || [];
+  // Both face and broll branches in composeFaceAndBrolls use the fill-crop
+  // chain. PR #114 made the FACE branch use a dynamic x-expression coming
+  // from face_detect.js (`crop=1080:1920:<expr>:0`); the broll branch keeps
+  // the simple `crop=1080:1920` because brolls are iPhone portrait content
+  // already at the target aspect (the crop is a no-op there). So we expect:
+  //   - the scale+crop prefix appears exactly twice
+  //   - one occurrence is followed by a `:` (face branch with dynamic offset)
+  //   - one occurrence is followed by a `,` (broll branch, plain crop)
+  const FILL_CROP_PREFIX = /scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920/g;
+  const matches = SOURCE.match(FILL_CROP_PREFIX) || [];
   assert.equal(
     matches.length,
     2,
-    `expected fill-crop filter to appear exactly twice (face + broll segments); ` +
+    `expected fill-crop prefix to appear exactly twice (face + broll segments); ` +
     `found ${matches.length} occurrence(s)`,
+  );
+});
+
+test('compose filter: face branch uses face-aware crop expression — PR #114', () => {
+  // The face branch must apply the face_detect-driven horizontal offset.
+  // Match the shape `crop=1080:1920:<expr>:0` where <expr> is the ffmpeg
+  // expression produced by buildCropXExpression — `max(0\,min(iw-1080\,...))`.
+  // Catches a regression where someone reverts the dynamic offset and
+  // pushes off-center subjects to the edge again.
+  const DYNAMIC_FACE_CROP = /crop=1080:1920:\$\{cropXExpr\}:0/;
+  assert.match(
+    SOURCE,
+    DYNAMIC_FACE_CROP,
+    'face segment must use crop=1080:1920:${cropXExpr}:0 (PR #114) so the ' +
+    'face_detect offset reaches ffmpeg',
+  );
+  // And buildCropXExpression must be imported and used.
+  assert.match(
+    SOURCE,
+    /buildCropXExpression\(faceCropOffsetX\)/,
+    'composeFaceAndBrolls must call buildCropXExpression(faceCropOffsetX) ' +
+    'to render the dynamic crop expression',
+  );
+});
+
+test('compose filter: broll branch keeps plain center crop (no offset needed) — PR #114', () => {
+  // Brolls are iPhone portrait content (rotate=90 metadata) → already 9:16
+  // effective. Adding a horizontal crop offset would be meaningless and
+  // could destabilize the broll path. Keep the broll branch with the simple
+  // `crop=1080:1920,setsar=1` chain.
+  assert.match(
+    SOURCE,
+    /\$\{inputChain\},setpts=PTS-STARTPTS,[\s\S]*?scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,/,
+    'broll branch must keep plain `crop=1080:1920,` (no dynamic offset)',
   );
 });
 

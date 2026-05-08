@@ -1,0 +1,18 @@
+{
+  "_comment": "Sample Gemini Pro response for bgm_select. Inner JSON is what lib/bgm_select.js parses.",
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "{\n  \"mood\": \"warm, hopeful\",\n  \"genre\": \"acoustic folk\",\n  \"instrumentTags\": [\"acoustic guitar\", \"soft piano\"],\n  \"tempo\": \"moderate\",\n  \"searchQuery\": \"warm acoustic folk guitar\"\n}"
+          }
+        ]
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": { "promptTokenCount": 750, "candidatesTokenCount": 60, "totalTokenCount": 810 },
+  "modelVersion": "gemini-3.1-pro-preview"
+}

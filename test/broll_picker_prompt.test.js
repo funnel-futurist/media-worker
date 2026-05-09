@@ -1,12 +1,19 @@
 /**
  * test/broll_picker_prompt.test.js
  *
- * Pure-function snapshot tests on broll_picker `buildPrompts`. Locks down the
- * PR-D "prefer client over Pixabay" constraint so a future prompt rewrite
- * can't silently let stock take over the edit again.
+ * Pure-function snapshot tests on broll_picker `buildPrompts`.
  *
- * Pattern matches test/clean_mode_models_lock.test.js — read the source,
- * assert the wording is present. No Gemini calls.
+ * History:
+ *   PR-D (2026-05-09): locked the "STRONGLY prefer client over Pixabay"
+ *     wording so a refactor couldn't accidentally let stock take over.
+ *   PR-F (2026-05-09): flipped to AI-blend semantics. The picker should
+ *     USE BOTH sources when both are available and pick the asset that
+ *     best fits each spoken moment, preferring client only when relevance
+ *     is genuinely similar. Locks the new wording so a future refactor
+ *     can't regress to a one-sided rule.
+ *
+ * Pattern matches test/clean_mode_models_lock.test.js — read the prompt,
+ * assert the wording is/isn't present. No Gemini calls.
  */
 
 import test from 'node:test';
@@ -29,37 +36,51 @@ test('buildPrompts: user prompt names provenance="client" and provenance="pixaba
   assert.match(userPrompt, /provenance="pixabay"/);
 });
 
-test('buildPrompts: user prompt explicitly tells Gemini to PREFER client over pixabay', () => {
+test('buildPrompts: PR-F — user prompt tells Gemini to USE BOTH sources for a healthy mix', () => {
   const { userPrompt } = buildPrompts({
     transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.4,
   });
-  // The exact word "prefer" (case-insensitive) anchored on client > pixabay.
-  assert.match(userPrompt, /STRONGLY prefer client/i);
-  // And the inverse: pixabay is supplemental / fallback / fill.
-  assert.match(userPrompt, /Pixabay is a SUPPLEMENTAL fallback/i);
+  assert.match(userPrompt, /USE BOTH/i);
+  assert.match(userPrompt, /healthy mix/i);
 });
 
-test('buildPrompts: user prompt forbids Pixabay from taking over when client assets exist', () => {
+test('buildPrompts: PR-F — user prompt frames the choice as "what fits the moment best", not "fallback"', () => {
   const { userPrompt } = buildPrompts({
     transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.4,
   });
-  // Wording from Shannon's PR-D directive — locked so a refactor can't soften it.
-  assert.match(userPrompt, /should NEVER take over the edit/i);
-  assert.match(userPrompt, /ALWAYS pick the client asset/i);
+  // Wording from Shannon's PR-F directive — locked so a future rewrite can't soften.
+  assert.match(userPrompt, /best fits|best fit/i);
+  // Prefer-client clause is now CONDITIONAL on "relevance is similar", not absolute.
+  assert.match(userPrompt, /prefer client only when relevance is/i);
+  // Stock is OK to pick when it explains the moment more directly.
+  assert.match(userPrompt, /pick stock when it (explains|fills|fits)/i);
+});
+
+test('buildPrompts: PR-F — old "STRONGLY prefer / NEVER take over" wording is GONE', () => {
+  // Regression guard: the PR-D wording produced too-client-heavy results
+  // (Phil rerun was 7 client / 0 stock when both sources were available).
+  // PR-F replaces it with AI-blend language; assert the old absolute rule
+  // is no longer present.
+  const { userPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.4,
+  });
+  assert.doesNotMatch(userPrompt, /STRONGLY prefer client/i);
+  assert.doesNotMatch(userPrompt, /should NEVER take over the edit/i);
+  assert.doesNotMatch(userPrompt, /SUPPLEMENTAL fallback/i);
 });
 
 test('buildPrompts: still includes the library JSON so Gemini sees provenance per row', () => {
   const { userPrompt } = buildPrompts({
     transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.4,
   });
-  // Library JSON dump must be present so the prefer-client rule has data to act on.
+  // Library JSON dump must be present so the mix rule has data to act on.
   assert.match(userPrompt, /"asset_id": "c1"/);
   assert.match(userPrompt, /"provenance": "client"/);
   assert.match(userPrompt, /"provenance": "pixabay"/);
 });
 
 test('buildPrompts: density target + variety + duration constraints stay intact (regression guard)', () => {
-  // PR-D added a constraint; existing rules must not have regressed.
+  // PR-F changed the source-selection rule; existing rules must not have regressed.
   const { userPrompt } = buildPrompts({
     transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.4,
   });

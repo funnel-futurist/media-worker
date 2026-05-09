@@ -11,60 +11,110 @@ import assert from 'node:assert/strict';
 import { shouldFetchStock, mergeStockIntoLibrary, rebalanceClientFirst } from '../lib/stock_library_merge.js';
 
 // ── shouldFetchStock — coverage heuristic ───────────────────────────────
+//
+// PR-F (2026-05-09): Default mode flipped from "fallback only when gap > 0"
+// to ai_blend (always trigger when pixabayEnabled, fetch a supplementalCount
+// of stock candidates so the picker has a healthy mix to choose from).
+// Legacy gap_only mode preserved as escape hatch.
 
-test('shouldFetchStock: triggers when client lib is below ceil(dur/8)', () => {
-  // 60s reel → target 8 rows. Client has 5 → gap 3 → trigger.
-  const out = shouldFetchStock({ clientLibrarySize: 5, durationSec: 60 });
+// ── ai_blend mode (new default) ────────────────────────────────────────
+
+test('shouldFetchStock: ai_blend ALWAYS triggers when client lib is healthy (Phil-style full lib)', () => {
+  // 78s reel → target=10. Client has 13 (Phil after HEIC conversion). Pre-PR-F
+  // would gap=0 → no trigger. PR-F ai_blend: trigger=true, supplementalCount =
+  // max(1, floor(10*0.4)) = 4 → fetch 4 stock candidates so picker sees both pools.
+  const out = shouldFetchStock({ clientLibrarySize: 13, durationSec: 78 });
+  assert.equal(out.trigger, true);
+  assert.equal(out.target, 10);
+  assert.equal(out.gap, 0);
+  assert.equal(out.supplementalCount, 4);
+  assert.equal(out.fetchCount, 4);
+  assert.equal(out.mode, 'ai_blend');
+  assert.match(out.reason, /blend_supplemental_4|blend/);
+});
+
+test('shouldFetchStock: ai_blend covers gap AND adds supplemental for thin lib', () => {
+  // 60s reel → target=8. Client has 3 → gap=5. supplementalCount = max(1, floor(8*0.4)) = 3.
+  // fetchCount = max(gap=5, supplementalCount=3) = 5 → fetch enough to fill the gap.
+  const out = shouldFetchStock({ clientLibrarySize: 3, durationSec: 60 });
+  assert.equal(out.trigger, true);
+  assert.equal(out.target, 8);
+  assert.equal(out.gap, 5);
+  assert.equal(out.supplementalCount, 3);
+  assert.equal(out.fetchCount, 5);                   // gap dominates
+  assert.equal(out.mode, 'ai_blend');
+});
+
+test('shouldFetchStock: ai_blend triggers for empty client lib (gap fully covers)', () => {
+  // 60s reel + 0 client → target=8, gap=8. fetchCount = max(8, floor(8*0.4)=3) = 8.
+  const out = shouldFetchStock({ clientLibrarySize: 0, durationSec: 60 });
+  assert.equal(out.trigger, true);
+  assert.equal(out.gap, 8);
+  assert.equal(out.fetchCount, 8);
+  assert.equal(out.mode, 'ai_blend');
+});
+
+test('shouldFetchStock: ai_blend supplementalCount has minimum of 1 even on tiny target', () => {
+  // 4s reel → target=1. Client has 5 → gap=0. supplementalCount = max(1, floor(1*0.4)=0) = 1.
+  const out = shouldFetchStock({ clientLibrarySize: 5, durationSec: 4 });
+  assert.equal(out.trigger, true);
+  assert.equal(out.target, 1);
+  assert.equal(out.supplementalCount, 1);
+  assert.equal(out.fetchCount, 1);
+});
+
+test('shouldFetchStock: ai_blend honors blendRatio override', () => {
+  // 60s reel → target=8. With blendRatio=0.5 → supplementalCount=4.
+  const out = shouldFetchStock({ clientLibrarySize: 13, durationSec: 60, blendRatio: 0.5 });
+  assert.equal(out.supplementalCount, 4);
+});
+
+// ── gap_only mode (legacy escape hatch) ────────────────────────────────
+
+test('shouldFetchStock: gap_only — does NOT trigger when client lib hits target exactly', () => {
+  const out = shouldFetchStock({ clientLibrarySize: 8, durationSec: 64, mode: 'gap_only' });
+  assert.equal(out.trigger, false);
+  assert.equal(out.gap, 0);
+  assert.equal(out.fetchCount, 0);
+  assert.equal(out.reason, 'client_coverage_sufficient');
+  assert.equal(out.mode, 'gap_only');
+});
+
+test('shouldFetchStock: gap_only — does NOT trigger when client lib exceeds target (Justine 187 rows)', () => {
+  const out = shouldFetchStock({ clientLibrarySize: 187, durationSec: 60, mode: 'gap_only' });
+  assert.equal(out.trigger, false);
+  assert.equal(out.gap, 0);
+  assert.equal(out.fetchCount, 0);
+});
+
+test('shouldFetchStock: gap_only — triggers when client lib is below ceil(dur/8)', () => {
+  const out = shouldFetchStock({ clientLibrarySize: 5, durationSec: 60, mode: 'gap_only' });
   assert.equal(out.trigger, true);
   assert.equal(out.target, 8);
   assert.equal(out.gap, 3);
+  assert.equal(out.fetchCount, 3);                   // gap_only fetches exactly the gap
   assert.match(out.reason, /client_below_target/);
 });
 
-test('shouldFetchStock: does NOT trigger when client lib hits target exactly', () => {
-  // 64s reel → target 8 rows. Client has exactly 8 → gap 0 → no trigger.
-  const out = shouldFetchStock({ clientLibrarySize: 8, durationSec: 64 });
-  assert.equal(out.trigger, false);
-  assert.equal(out.gap, 0);
-  assert.equal(out.reason, 'client_coverage_sufficient');
-});
+// ── shared validation (mode-independent) ───────────────────────────────
 
-test('shouldFetchStock: does NOT trigger when client lib exceeds target', () => {
-  // Justine has 187 rows; should never trigger Pixabay.
-  const out = shouldFetchStock({ clientLibrarySize: 187, durationSec: 60 });
-  assert.equal(out.trigger, false);
-  assert.equal(out.gap, 0);
-});
-
-test('shouldFetchStock: triggers aggressively for empty client lib', () => {
-  // 60s reel + zero client rows → target 8, gap 8 → trigger with full gap.
-  const out = shouldFetchStock({ clientLibrarySize: 0, durationSec: 60 });
-  assert.equal(out.trigger, true);
-  assert.equal(out.target, 8);
-  assert.equal(out.gap, 8);
-});
-
-test('shouldFetchStock: ceiling math — short reel still has minimum target of 1', () => {
-  // 4s reel → target 1 row. Client has 0 → gap 1 → trigger.
-  const out = shouldFetchStock({ clientLibrarySize: 0, durationSec: 4 });
-  assert.equal(out.target, 1);
-  assert.equal(out.gap, 1);
-  assert.equal(out.trigger, true);
-});
-
-test('shouldFetchStock: rejects invalid client size', () => {
+test('shouldFetchStock: rejects invalid client size (both modes)', () => {
   for (const bad of [-1, NaN, null, undefined, 'five']) {
-    const out = shouldFetchStock({ clientLibrarySize: bad, durationSec: 60 });
-    assert.equal(out.trigger, false, `should not trigger with clientLibrarySize=${bad}`);
-    assert.equal(out.reason, 'invalid_client_size');
+    for (const mode of ['ai_blend', 'gap_only']) {
+      const out = shouldFetchStock({ clientLibrarySize: bad, durationSec: 60, mode });
+      assert.equal(out.trigger, false, `${mode}: should not trigger with clientLibrarySize=${bad}`);
+      assert.equal(out.reason, 'invalid_client_size');
+    }
   }
 });
 
-test('shouldFetchStock: rejects invalid duration', () => {
+test('shouldFetchStock: rejects invalid duration (both modes)', () => {
   for (const bad of [-1, 0, NaN, Infinity, null, undefined, 'sixty']) {
-    const out = shouldFetchStock({ clientLibrarySize: 5, durationSec: bad });
-    assert.equal(out.trigger, false, `should not trigger with durationSec=${bad}`);
-    assert.equal(out.reason, 'invalid_duration');
+    for (const mode of ['ai_blend', 'gap_only']) {
+      const out = shouldFetchStock({ clientLibrarySize: 5, durationSec: bad, mode });
+      assert.equal(out.trigger, false, `${mode}: should not trigger with durationSec=${bad}`);
+      assert.equal(out.reason, 'invalid_duration');
+    }
   }
 });
 
@@ -235,51 +285,65 @@ test('rebalance: empty insertions short-circuits', () => {
   assert.equal(out.droppedStockCount, 0);
 });
 
-test('rebalance: leaves insertions alone when stock ratio already <= max', () => {
-  // 2 client + 1 stock = 33% stock, default cap 0.4 → no trim
-  const picks = insArr('client', 'client', 'pixabay');
-  const out = rebalanceClientFirst({ insertions: picks, usableClientCount: 5 });
-  assert.equal(out.insertions.length, 3);
+// PR-F (2026-05-09): default maxStockRatio raised from 0.4 → 0.55 so the
+// AI's mix decision wins more often. Trim only kicks in when stock truly
+// dominates. Mix-state diagnostics added.
+
+test('rebalance: PR-F — 4 client + 3 stock = 43% stock → NO trim (under new 0.55 ceiling)', () => {
+  // The Phil-after-PR-F target case: AI picks 4 client + 3 stock = 43%. Should pass through clean.
+  const picks = insArr('client', 'pixabay', 'client', 'pixabay', 'client', 'pixabay', 'client');
+  const out = rebalanceClientFirst({ insertions: picks, usableClientCount: 13 });
   assert.equal(out.droppedStockCount, 0);
+  assert.equal(out.insertions.length, 7);
   assert.equal(out.action, null);
+  // Mix diagnostic: both sources represented.
+  assert.equal(out.mixMet, true);
+  assert.equal(out.mixReason, 'both_sources_represented');
 });
 
-test('rebalance: trims stock from the tail when ratio exceeds max', () => {
-  // 2 client + 4 stock = 67% stock, default cap 0.4. Need stock <= 0.4*total.
-  // After dropping last stock: 2 client + 3 stock = 60% stock (still over).
-  // After 2 drops: 2 client + 2 stock = 50% (still over).
-  // After 3 drops: 2 client + 1 stock = 33% (under cap) → stop.
+test('rebalance: PR-F — 3 client + 4 stock = 57% stock → trims 1 stock (back under 0.55)', () => {
+  // 3c+4s = 57% > 55%. After dropping last stock: 3c+3s = 50% → under cap, stop.
+  const picks = insArr('client', 'pixabay', 'client', 'pixabay', 'client', 'pixabay', 'pixabay');
+  const out = rebalanceClientFirst({ insertions: picks, usableClientCount: 13 });
+  assert.equal(out.droppedStockCount, 1);
+  assert.equal(out.insertions.length, 6);
+  assert.match(out.action ?? '', /trimmed_1/);
+  assert.equal(out.mixMet, true);   // still both sources after trim
+});
+
+test('rebalance: PR-F — 2 client + 4 stock = 67% → trims 1 (50% remains, under 0.55)', () => {
+  // 2c+4s = 67% > 55%. Drop last stock → 2c+3s = 60% (still over). Drop again → 2c+2s = 50% under cap.
   const picks = insArr('client', 'pixabay', 'client', 'pixabay', 'pixabay', 'pixabay');
   const out = rebalanceClientFirst({ insertions: picks, usableClientCount: 5 });
-  assert.equal(out.droppedStockCount, 3);
-  assert.equal(out.insertions.length, 3);
-  assert.equal(out.insertions.filter((i) => i.provenance === 'pixabay').length, 1);
-  assert.match(out.action ?? '', /trimmed_3/);
+  assert.equal(out.droppedStockCount, 2);
+  assert.equal(out.insertions.length, 4);
+  assert.equal(out.insertions.filter((i) => i.provenance === 'pixabay').length, 2);
+  assert.match(out.action ?? '', /trimmed_2/);
 });
 
-test('rebalance: trims latest-time stock first (preserves early-video stock)', () => {
-  // ordered chronologically; expect the LAST stock pick to be removed first
+test('rebalance: PR-F — trims latest-time stock first (preserves early-video stock)', () => {
   const picks = [
     ins('a0', 'pixabay'),  // t=early
     ins('a1', 'client'),
-    ins('a2', 'pixabay'),  // t=late — should be dropped
+    ins('a2', 'pixabay'),  // t=late — should be dropped first
+    ins('a3', 'pixabay'),  // t=latest — dropped first actually
   ];
-  // 1 client + 2 stock = 67% > 0.4. Drop last stock → 1c+1s=50% > 0.4. Drop next stock (now last) → 1c+0s.
+  // 1c + 3s = 75% > 55%. Drop last (a3) → 1c+2s=67% > 55%. Drop a2 → 1c+1s=50% under.
   const out = rebalanceClientFirst({ insertions: picks, usableClientCount: 3 });
   assert.equal(out.droppedStockCount, 2);
-  assert.equal(out.insertions.length, 1);
-  assert.equal(out.insertions[0].asset_id, 'a1');
+  assert.deepEqual(out.insertions.map((i) => i.asset_id), ['a0', 'a1']);
 });
 
-test('rebalance: respects custom maxStockRatio override', () => {
-  // 2 client + 2 stock = 50% stock. With maxStockRatio=0.5, ratio is exactly at cap → no trim.
+test('rebalance: PR-F — respects custom maxStockRatio override', () => {
+  // 2 client + 2 stock = 50%. With maxStockRatio=0.5, ratio is exactly at cap → no trim.
   const picks = insArr('client', 'pixabay', 'client', 'pixabay');
   const out = rebalanceClientFirst({ insertions: picks, usableClientCount: 5, maxStockRatio: 0.5 });
   assert.equal(out.droppedStockCount, 0);
 });
 
-test('rebalance: maxStockRatio=0.3 (stricter) trims more aggressively', () => {
-  // 2 client + 2 stock = 50% > 0.3. Drop last stock → 2c+1s=33% > 0.3. Drop again → 2c+0s=0%.
+test('rebalance: PR-F — maxStockRatio=0.3 (stricter) trims more aggressively', () => {
+  // Caller-supplied stricter ratio still works.
+  // 2 client + 2 stock = 50% > 0.3. Drop last → 2c+1s=33% > 0.3. Drop → 2c+0s.
   const picks = insArr('client', 'pixabay', 'client', 'pixabay');
   const out = rebalanceClientFirst({ insertions: picks, usableClientCount: 5, maxStockRatio: 0.3 });
   assert.equal(out.droppedStockCount, 2);
@@ -287,13 +351,73 @@ test('rebalance: maxStockRatio=0.3 (stricter) trims more aggressively', () => {
   assert.equal(out.insertions.every((i) => i.provenance === 'client'), true);
 });
 
+// ── PR-F mix-state diagnostics (informational, no enforcement) ─────────
+
+test('rebalance: PR-F — mixMet=false when AI chose all-client despite stock candidates', () => {
+  // Phil-style after PR-E: 7 client + 0 stock when usable client > 0 and stock was offered.
+  // No trim (ratio 0%), but flag the mix as unmet so operator can see why.
+  const picks = insArr('client', 'client', 'client', 'client', 'client', 'client', 'client');
+  const out = rebalanceClientFirst({
+    insertions: picks,
+    usableClientCount: 13,
+    stockCandidatesAvailable: 4,        // PR-F new param: were stock candidates offered to picker?
+  });
+  assert.equal(out.droppedStockCount, 0);
+  assert.equal(out.mixMet, false);
+  assert.equal(out.mixReason, 'ai_chose_all_client_despite_stock_available');
+  assert.equal(out.action, null);
+});
+
+test('rebalance: PR-F — mixMet=true when only ONE source had candidates (single_source_only)', () => {
+  // Phil-pre-HEIC-conversion: usableClient=0, all picks must be stock by necessity.
+  const picks = insArr('pixabay', 'pixabay', 'pixabay');
+  const out = rebalanceClientFirst({
+    insertions: picks,
+    usableClientCount: 0,
+    stockCandidatesAvailable: 6,
+  });
+  assert.equal(out.action, 'skipped_no_client_assets');
+  assert.equal(out.mixMet, true);                              // not unmet — there was no choice
+  assert.equal(out.mixReason, 'single_source_only');
+});
+
+test('rebalance: PR-F — preserve all-stock when AI chose 100% stock despite client available', () => {
+  // Edge case: usableClient > 0 but Gemini went all-stock anyway. Pre-PR-F's trim
+  // would drop EVERY stock pick → 0 picks, worse than the original. Fix:
+  // detect "no client picks present" and preserve the picks, flag the diagnostic.
+  const picks = insArr('pixabay', 'pixabay', 'pixabay', 'pixabay');
+  const out = rebalanceClientFirst({
+    insertions: picks,
+    usableClientCount: 5,
+    stockCandidatesAvailable: 6,
+  });
+  // picks preserved unchanged
+  assert.equal(out.insertions.length, 4);
+  assert.equal(out.droppedStockCount, 0);
+  assert.equal(out.action, 'preserved_ai_chose_all_stock');
+  assert.equal(out.mixMet, false);
+  assert.equal(out.mixReason, 'ai_chose_all_stock_despite_client_available');
+});
+
+test('rebalance: PR-F — mixMet defaults to true when both sources represented', () => {
+  const picks = insArr('client', 'client', 'pixabay');
+  const out = rebalanceClientFirst({
+    insertions: picks,
+    usableClientCount: 5,
+    stockCandidatesAvailable: 4,
+  });
+  assert.equal(out.mixMet, true);
+  assert.equal(out.mixReason, 'both_sources_represented');
+});
+
 test('rebalance: tolerates missing provenance — treats undefined as client (legacy rows)', () => {
   // legacy rows that pre-date PR-A may not carry provenance; default-as-client matches downloadBrollAssets behavior.
+  // With explicit maxStockRatio=0.4: 1c + 1s = 50% > 40% → trim 1 stock.
   const picks = [
     { asset_id: 'a0' },
     { asset_id: 'a1', provenance: 'pixabay' },
   ];
-  const out = rebalanceClientFirst({ insertions: picks, usableClientCount: 3 });
+  const out = rebalanceClientFirst({ insertions: picks, usableClientCount: 3, maxStockRatio: 0.4 });
   assert.equal(out.droppedStockCount, 1);
   assert.equal(out.insertions.length, 1);
   assert.equal(out.insertions[0].asset_id, 'a0');
@@ -303,6 +427,9 @@ test('rebalance: returns metadata fields callers can read for response.insertion
   const picks = insArr('client', 'pixabay', 'pixabay', 'pixabay');
   const out = rebalanceClientFirst({ insertions: picks, usableClientCount: 5, maxStockRatio: 0.4 });
   assert.equal(typeof out.droppedStockCount, 'number');
-  assert.equal(typeof out.action, 'string');
+  assert.equal(typeof out.action, 'string');                   // trim happened → string action
   assert.ok(Array.isArray(out.insertions));
+  // PR-F: mix-state diagnostic fields always present
+  assert.equal(typeof out.mixMet, 'boolean');
+  assert.equal(typeof out.mixReason, 'string');
 });

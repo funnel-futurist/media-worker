@@ -132,6 +132,158 @@ test('downloadBrollAssets: throws when insertion references unknown asset_id', a
   );
 });
 
+// ── PR-G: asset_id prefix-match fallback ───────────────────────────────
+//
+// Phil PR-F rerun (2026-05-09) failed at brollDownload because Gemini
+// truncated the long client UUIDs (e.g. `1c2817be-8326-4f4c-a666-...` →
+// `1c2817be`) when emitting insertions. The library lookup was strict
+// equality so the truncated id wasn't found and the pipeline threw.
+//
+// Hotfix: when an insertion's asset_id has no exact library match, try
+// unique prefix-matching. If exactly one library row starts with the
+// insertion's id, use that row. If multiple match, fail clearly with an
+// ambiguity error. If none match, preserve the existing "unknown asset_id"
+// throw.
+
+test('downloadBrollAssets: PR-G — exact UUID match works (no regression)', async () => {
+  const stockRow = {
+    asset_id: '1c2817be-8326-4f4c-a666-56d422f44612',
+    file_url: 'https://x', storage_url: null,
+    provenance: 'client',
+    localPath: '/tmp/x/1c2817be.mp4',                  // short-circuit so no axios
+    sourceDurSec: 5, hasVideo: true, hasAudio: false, width: 1280, height: 720,
+  };
+  const result = await downloadBrollAssets(
+    [{ startSec: 0, endSec: 5, asset_id: '1c2817be-8326-4f4c-a666-56d422f44612' }],
+    [stockRow],
+    '/tmp/unused',
+  );
+  assert.equal(result.assets.length, 1);
+  assert.equal(result.assets[0].asset_id, '1c2817be-8326-4f4c-a666-56d422f44612');
+});
+
+test('downloadBrollAssets: PR-G — truncated UUID prefix-matches a unique library row', async () => {
+  // Phil's bug: Gemini emits `1c2817be` instead of the full UUID. The library
+  // has exactly one row starting with that prefix → resolve to that row.
+  const fullUuidRow = {
+    asset_id: '1c2817be-8326-4f4c-a666-56d422f44612',
+    file_url: 'https://x', storage_url: null,
+    provenance: 'client',
+    localPath: '/tmp/x/full.mp4',
+    sourceDurSec: 5, hasVideo: true, hasAudio: false, width: 1280, height: 720,
+  };
+  const otherRow = {
+    asset_id: '29b10bbb-5079-4d85-b03e-17e3f9ab1935',
+    file_url: 'https://x', storage_url: null,
+    provenance: 'client',
+    localPath: '/tmp/x/other.mp4',
+    sourceDurSec: 4, hasVideo: true, hasAudio: false, width: 1280, height: 720,
+  };
+  const result = await downloadBrollAssets(
+    [{ startSec: 0, endSec: 5, asset_id: '1c2817be' }],   // truncated
+    [fullUuidRow, otherRow],
+    '/tmp/unused',
+  );
+  assert.equal(result.assets.length, 1);
+  assert.equal(result.assets[0].asset_id, '1c2817be',
+    'insertion keeps its requested asset_id; localPath comes from the resolved library row');
+  assert.equal(result.assets[0].localPath, '/tmp/x/full.mp4',
+    'should resolve to the full UUID row');
+});
+
+test('downloadBrollAssets: PR-G — prefix match emits a warning when used', async () => {
+  // Track that the prefix-match fallback fired so the operator knows the
+  // picker output was non-canonical. Used only for visibility — pipeline
+  // still proceeds.
+  const fullUuidRow = {
+    asset_id: '1c2817be-8326-4f4c-a666-56d422f44612',
+    file_url: 'https://x', storage_url: null,
+    provenance: 'client',
+    localPath: '/tmp/x/full.mp4',
+    sourceDurSec: 5, hasVideo: true, hasAudio: false, width: 1280, height: 720,
+  };
+  const warnings = [];
+  const result = await downloadBrollAssets(
+    [{ startSec: 0, endSec: 5, asset_id: '1c2817be' }],
+    [fullUuidRow],
+    '/tmp/unused',
+    { warnings },
+  );
+  assert.equal(result.assets.length, 1);
+  // Expose the resolved-via-prefix event in the result so the orchestrator
+  // can convert it into an insertions.warnings entry.
+  assert.ok(Array.isArray(result.assetIdResolutions),
+    'should expose prefix-match resolutions for orchestrator visibility');
+  const prefixHit = result.assetIdResolutions.find((r) => r.mode === 'prefix');
+  assert.ok(prefixHit, 'should record at least one prefix resolution');
+  assert.equal(prefixHit.requested, '1c2817be');
+  assert.equal(prefixHit.resolved, '1c2817be-8326-4f4c-a666-56d422f44612');
+});
+
+test('downloadBrollAssets: PR-G — ambiguous prefix throws clearly (does NOT silently choose)', async () => {
+  // Two library rows start with the same prefix → must not silently pick one.
+  const ambig1 = {
+    asset_id: '1c2817be-8326-4f4c-a666-56d422f44612',
+    file_url: 'https://x', storage_url: null,
+    provenance: 'client',
+    localPath: '/tmp/x/a.mp4',
+    sourceDurSec: 5, hasVideo: true, hasAudio: false, width: 1280, height: 720,
+  };
+  const ambig2 = {
+    asset_id: '1c2817be-deaf-beef-cafe-deadbeefcafe',
+    file_url: 'https://x', storage_url: null,
+    provenance: 'client',
+    localPath: '/tmp/x/b.mp4',
+    sourceDurSec: 5, hasVideo: true, hasAudio: false, width: 1280, height: 720,
+  };
+  await assert.rejects(
+    () => downloadBrollAssets(
+      [{ startSec: 0, endSec: 5, asset_id: '1c2817be' }],
+      [ambig1, ambig2],
+      '/tmp/unused',
+    ),
+    /ambiguous|matches \d+ library rows/i,
+  );
+});
+
+test('downloadBrollAssets: PR-G — completely unknown asset_id still throws clearly (no regression)', async () => {
+  const row = {
+    asset_id: 'real-id-here',
+    file_url: 'https://x', storage_url: null,
+    provenance: 'client',
+    localPath: '/tmp/x/real.mp4',
+    sourceDurSec: 5, hasVideo: true, hasAudio: false, width: 1280, height: 720,
+  };
+  await assert.rejects(
+    () => downloadBrollAssets(
+      [{ startSec: 0, endSec: 5, asset_id: 'totally-unrelated-fakeid' }],
+      [row],
+      '/tmp/unused',
+    ),
+    /unknown asset_id=totally-unrelated-fakeid/,
+  );
+});
+
+test('downloadBrollAssets: PR-G — very short prefix (< 4 chars) is rejected even if unique', async () => {
+  // Defensive: a 2-char prefix like "1c" might happen to be unique by accident
+  // but is too short to trust. Treat as unknown rather than risk a false match.
+  const row = {
+    asset_id: '1c2817be-8326-4f4c-a666-56d422f44612',
+    file_url: 'https://x', storage_url: null,
+    provenance: 'client',
+    localPath: '/tmp/x/full.mp4',
+    sourceDurSec: 5, hasVideo: true, hasAudio: false, width: 1280, height: 720,
+  };
+  await assert.rejects(
+    () => downloadBrollAssets(
+      [{ startSec: 0, endSec: 5, asset_id: '1c' }],
+      [row],
+      '/tmp/unused',
+    ),
+    /unknown asset_id=1c/,
+  );
+});
+
 // Note: the client-row branch (no `localPath`) is unchanged from pre-PR-A
 // code. It's exercised by every M2 real-video B-run (B6 through B11), so we
 // don't unit-test it here — would require mocking axios + ffprobe + the

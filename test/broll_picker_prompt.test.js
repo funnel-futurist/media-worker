@@ -79,6 +79,22 @@ test('buildPrompts: still includes the library JSON so Gemini sees provenance pe
   assert.match(userPrompt, /"provenance": "pixabay"/);
 });
 
+test('buildPrompts: PR-G — explicit asset_id-fidelity instruction is present', () => {
+  // Phil PR-F rerun (2026-05-09) failed at brollDownload because Gemini
+  // truncated long client UUIDs. The prompt must explicitly tell the picker
+  // to copy the full asset_id verbatim. Lock the wording so a future rewrite
+  // can't silently re-introduce the regression.
+  const { userPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.4,
+  });
+  // "exact" / "verbatim" / "do not truncate/abbreviate/shorten/invent" anchors
+  assert.match(userPrompt, /exact|verbatim/i);
+  assert.match(userPrompt, /do not (truncate|shorten|abbreviate)/i);
+  assert.match(userPrompt, /do not (invent|make up|fabricate)/i);
+  // The id-fidelity rule should specifically reference asset_id.
+  assert.match(userPrompt, /full asset_id/i);
+});
+
 test('buildPrompts: density target + variety + duration constraints stay intact (regression guard)', () => {
   // PR-F changed the source-selection rule; existing rules must not have regressed.
   const { userPrompt } = buildPrompts({

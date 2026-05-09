@@ -46,7 +46,7 @@ test('downloadBrollAssets: stock row with localPath skips fetch and returns merg
   const insertions = [
     { startSec: 5, endSec: 10, asset_id: 'px-video-1234', reason: 'test', matchedPhrase: 'phrase' },
   ];
-  const out = await downloadBrollAssets(insertions, [stockRow], '/tmp/unused');
+  const out = (await downloadBrollAssets(insertions, [stockRow], '/tmp/unused')).assets;
 
   assert.equal(out.length, 1);
   assert.equal(out[0].asset_id, 'px-video-1234');
@@ -91,7 +91,7 @@ test('downloadBrollAssets: stock row preserves insertion order with multiple sto
     { startSec: 10, endSec: 18, asset_id: 'px-video-2' },
     { startSec: 30, endSec: 42, asset_id: 'px-video-3' },
   ];
-  const out = await downloadBrollAssets(insertions, rows, '/tmp/unused');
+  const { assets: out } = await downloadBrollAssets(insertions, rows, '/tmp/unused');
   assert.deepEqual(out.map((o) => o.asset_id), ['px-video-1', 'px-video-2', 'px-video-3']);
 });
 
@@ -107,7 +107,7 @@ test('downloadBrollAssets: short-circuit fills sane defaults when row metadata i
     localPath: '/tmp/x/99.mp4',
     // sourceDurSec, hasVideo, hasAudio, width, height all missing
   };
-  const out = await downloadBrollAssets(
+  const { assets: out } = await downloadBrollAssets(
     [{ startSec: 0, endSec: 4, asset_id: 'px-video-99' }],
     [minimal],
     '/tmp/unused',
@@ -136,3 +136,43 @@ test('downloadBrollAssets: throws when insertion references unknown asset_id', a
 // code. It's exercised by every M2 real-video B-run (B6 through B11), so we
 // don't unit-test it here — would require mocking axios + ffprobe + the
 // streaming pipeline, with marginal value over the integration verification.
+
+// ── PR-E: heicConvert return field (no HEIC = zeros, no failures) ──────
+
+test('downloadBrollAssets: PR-E — heicConvert stats are zero when no HEIC rows are picked', async () => {
+  const stockRow = {
+    asset_id: 'px-video-1', file_url: 'https://x', storage_url: null,
+    provenance: 'pixabay', localPath: '/tmp/x/1.mp4',
+    sourceDurSec: 5, hasVideo: true, hasAudio: false, width: 1280, height: 720,
+  };
+  const result = await downloadBrollAssets(
+    [{ startSec: 0, endSec: 5, asset_id: 'px-video-1' }],
+    [stockRow],
+    '/tmp/unused',
+  );
+  assert.ok(result.heicConvert);
+  assert.equal(result.heicConvert.attempted, 0);
+  assert.equal(result.heicConvert.converted, 0);
+  assert.equal(result.heicConvert.failed, 0);
+  assert.equal(result.heicConvert.ms, 0);
+  assert.deepEqual(result.heicConvert.failures, []);
+});
+
+test('downloadBrollAssets: PR-E — return shape includes both `assets` and `heicConvert`', async () => {
+  // Lock the new shape so a future refactor doesn't accidentally drop the
+  // heicConvert field.
+  const result = await downloadBrollAssets([], [], '/tmp/unused');
+  assert.ok(Array.isArray(result.assets));
+  assert.ok(result.heicConvert);
+  assert.equal(typeof result.heicConvert.attempted, 'number');
+  assert.equal(typeof result.heicConvert.converted, 'number');
+  assert.equal(typeof result.heicConvert.failed, 'number');
+  assert.ok(Array.isArray(result.heicConvert.failures));
+});
+
+// Note: the actual conversion path (client-row branch + HEIC conversion via
+// heic-convert) is integration-tested by Phil's Railway rerun — mocking it
+// here would require also mocking axios stream + writeFile + ffprobe, which
+// duplicates the M2 B-run verification with marginal value.
+// `lib/heic_to_jpg.js` itself has direct unit coverage in
+// test/heic_to_jpg.test.js (12 cases including injectable convertImpl).

@@ -2,9 +2,18 @@
  * test/broll_filter.test.js
  *
  * Pure-function tests for filterUnsupportedBrollAssets — the URL-class
- * filter that drops HEIC/HEIF assets from the broll library before the
- * picker sees them. PR #110 short-term unblock for Phil/Chelsea & Phil's
- * mixed `.mov` + `.heic` library.
+ * classifier for broll library rows.
+ *
+ * History:
+ *   PR #110 (2026-05-08): filter HARD-DROPPED HEIC/HEIF rows so the picker
+ *     never saw them. Phil's mixed .mov + .heic library was the trigger.
+ *   PR-E (2026-05-09): flipped to TAG-AND-PASS-THROUGH. HEIC rows now get
+ *     `needsHeicConversion: true` and reach the picker; the orchestrator
+ *     converts them at brollDownload via lib/heic_to_jpg.js.
+ *
+ * These tests lock the new contract: HEIC rows are kept (not dropped),
+ * tagged for conversion, and the legacy `droppedHeicCount` field stays in
+ * the return shape (always 0) for callers that haven't migrated yet.
  */
 
 import test from 'node:test';
@@ -23,14 +32,15 @@ function row(opts = {}) {
 
 // ── happy path ─────────────────────────────────────────────────────────
 
-test('filter: empty input → empty output, no warnings', () => {
+test('filter: empty input → empty output, no warnings, zero counts', () => {
   const out = filterUnsupportedBrollAssets([]);
   assert.deepEqual(out.rows, []);
   assert.deepEqual(out.warnings, []);
   assert.equal(out.droppedHeicCount, 0);
+  assert.equal(out.convertibleHeicCount, 0);
 });
 
-test('filter: all supported (.mov, .mp4, .jpg, .png) → pass through unchanged', () => {
+test('filter: all supported (.mov, .mp4, .jpg, .png) → pass through unchanged, no needsHeicConversion tag', () => {
   const rows = [
     row({ asset_id: 'a', storage_url: 'https://x.supabase.co/storage/v1/object/public/x/clip.mov' }),
     row({ asset_id: 'b', storage_url: 'https://x.supabase.co/storage/v1/object/public/x/photo.jpg' }),
@@ -40,74 +50,68 @@ test('filter: all supported (.mov, .mp4, .jpg, .png) → pass through unchanged'
   const out = filterUnsupportedBrollAssets(rows);
   assert.equal(out.rows.length, 4);
   assert.deepEqual(out.rows.map((r) => r.asset_id), ['a', 'b', 'c', 'd']);
-  assert.deepEqual(out.warnings, []);
+  for (const r of out.rows) {
+    assert.notEqual(r.needsHeicConversion, true, `${r.asset_id} should not be tagged`);
+  }
   assert.equal(out.droppedHeicCount, 0);
+  assert.equal(out.convertibleHeicCount, 0);
 });
 
-// ── HEIC/HEIF dropping ─────────────────────────────────────────────────
+// ── HEIC/HEIF tagging (PR-E new contract) ─────────────────────────────
 
-test('filter: drops .heic asset, surfaces warning with count', () => {
+test('filter: PR-E — keeps .heic asset and tags it needsHeicConversion=true', () => {
   const rows = [
     row({ asset_id: 'mov1', storage_url: 'https://x.supabase.co/x/clip.mov' }),
     row({ asset_id: 'heic1', storage_url: 'https://x.supabase.co/x/photo.heic' }),
   ];
   const out = filterUnsupportedBrollAssets(rows);
-  assert.equal(out.rows.length, 1);
-  assert.equal(out.rows[0].asset_id, 'mov1');
-  assert.equal(out.droppedHeicCount, 1);
-  assert.equal(out.warnings.length, 1);
-  assert.match(out.warnings[0], /Skipped 1 HEIC\/HEIF broll asset\b/);
-  assert.match(out.warnings[0], /image conversion is not supported yet/);
+  assert.equal(out.rows.length, 2);
+  const heicRow = out.rows.find((r) => r.asset_id === 'heic1');
+  assert.ok(heicRow);
+  assert.equal(heicRow.needsHeicConversion, true);
+  const movRow = out.rows.find((r) => r.asset_id === 'mov1');
+  assert.notEqual(movRow.needsHeicConversion, true);
+  assert.equal(out.convertibleHeicCount, 1);
+  // backward-compat: dropped count stays 0 (no pre-drop anymore)
+  assert.equal(out.droppedHeicCount, 0);
+  // and the legacy "Skipped N HEIC..." warning is no longer emitted by this layer
+  assert.deepEqual(out.warnings, []);
 });
 
-test('filter: drops .heif asset (alternate extension)', () => {
+test('filter: PR-E — keeps .heif asset (alternate extension)', () => {
   const rows = [
     row({ asset_id: 'heif1', storage_url: 'https://x.supabase.co/x/photo.heif' }),
   ];
   const out = filterUnsupportedBrollAssets(rows);
-  assert.equal(out.rows.length, 0);
-  assert.equal(out.droppedHeicCount, 1);
+  assert.equal(out.rows.length, 1);
+  assert.equal(out.rows[0].needsHeicConversion, true);
+  assert.equal(out.convertibleHeicCount, 1);
 });
 
-test('filter: case-insensitive (.HEIC, .Heic, .HEIF all match)', () => {
+test('filter: PR-E — case-insensitive (.HEIC, .Heic, .HEIF all tagged)', () => {
   const rows = [
     row({ asset_id: 'a', storage_url: 'https://x/photo.HEIC' }),
     row({ asset_id: 'b', storage_url: 'https://x/photo.Heic' }),
     row({ asset_id: 'c', storage_url: 'https://x/photo.HEIF' }),
   ];
   const out = filterUnsupportedBrollAssets(rows);
-  assert.equal(out.rows.length, 0);
-  assert.equal(out.droppedHeicCount, 3);
-});
-
-test('filter: warning text uses singular for 1, plural for >1', () => {
-  // Only the COUNT-context word should change between singular/plural —
-  // the rest of the warning text (which legitimately mentions "assets are
-  // processed") stays the same. Anchor regex to the count phrase only.
-  const oneHeic = filterUnsupportedBrollAssets([
-    row({ storage_url: 'https://x/a.heic' }),
-  ]);
-  assert.match(oneHeic.warnings[0], /Skipped 1 HEIC\/HEIF broll asset because/);
-
-  const multipleHeic = filterUnsupportedBrollAssets([
-    row({ storage_url: 'https://x/a.heic' }),
-    row({ storage_url: 'https://x/b.heic' }),
-    row({ storage_url: 'https://x/c.heif' }),
-  ]);
-  assert.match(multipleHeic.warnings[0], /Skipped 3 HEIC\/HEIF broll assets because/);
+  assert.equal(out.rows.length, 3);
+  assert.equal(out.rows.every((r) => r.needsHeicConversion === true), true);
+  assert.equal(out.convertibleHeicCount, 3);
 });
 
 // ── URL resolution order (file_url first, then storage_url) ────────────
 
 test('filter: prefers file_url over storage_url for class detection', () => {
   // Mirrors `file_url ?? storage_url` resolve order in downloadBrollAssets.
-  // If file_url is .mov but storage_url is .heic, the row is supported.
+  // If file_url is .mov but storage_url is .heic, the row is treated as a video.
   const rows = [
     row({ asset_id: 'a', file_url: 'https://x/clip.mov', storage_url: 'https://x/preview.heic' }),
   ];
   const out = filterUnsupportedBrollAssets(rows);
-  assert.equal(out.rows.length, 1, 'file_url is .mov so the row should pass');
-  assert.equal(out.droppedHeicCount, 0);
+  assert.equal(out.rows.length, 1, 'file_url is .mov so the row should pass without conversion tag');
+  assert.notEqual(out.rows[0].needsHeicConversion, true);
+  assert.equal(out.convertibleHeicCount, 0);
 });
 
 test('filter: file_url=null falls back to storage_url for class detection', () => {
@@ -115,37 +119,40 @@ test('filter: file_url=null falls back to storage_url for class detection', () =
     row({ asset_id: 'a', file_url: null, storage_url: 'https://x/photo.heic' }),
   ];
   const out = filterUnsupportedBrollAssets(rows);
-  assert.equal(out.rows.length, 0);
-  assert.equal(out.droppedHeicCount, 1);
+  assert.equal(out.rows.length, 1);
+  assert.equal(out.rows[0].needsHeicConversion, true);
+  assert.equal(out.convertibleHeicCount, 1);
 });
 
 // ── edge cases ─────────────────────────────────────────────────────────
 
-test('filter: extension followed by query string still matches (.heic?token=...)', () => {
+test('filter: extension followed by query string still tagged (.heic?token=...)', () => {
   // Signed Supabase URLs append ?token=... — make sure we catch the class
   // before the query string.
   const rows = [
     row({ storage_url: 'https://x/photo.heic?token=abc&signature=xyz' }),
   ];
   const out = filterUnsupportedBrollAssets(rows);
-  assert.equal(out.rows.length, 0);
-  assert.equal(out.droppedHeicCount, 1);
+  assert.equal(out.rows.length, 1);
+  assert.equal(out.rows[0].needsHeicConversion, true);
+  assert.equal(out.convertibleHeicCount, 1);
 });
 
-test('filter: heic appearing mid-path (NOT as extension) does NOT trigger drop', () => {
-  // `heic_demo` in a folder name shouldn't accidentally drop a valid .mp4.
+test('filter: heic appearing mid-path (NOT as extension) does NOT trigger conversion tag', () => {
+  // `heic_demo` in a folder name shouldn't accidentally tag a valid .mp4.
   const rows = [
     row({ asset_id: 'safe', storage_url: 'https://x/uploads/heic_demo/clip.mp4' }),
   ];
   const out = filterUnsupportedBrollAssets(rows);
   assert.equal(out.rows.length, 1);
   assert.equal(out.rows[0].asset_id, 'safe');
-  assert.equal(out.droppedHeicCount, 0);
+  assert.notEqual(out.rows[0].needsHeicConversion, true);
+  assert.equal(out.convertibleHeicCount, 0);
 });
 
 test('filter: row with no URLs at all passes through unchanged', () => {
   // The "no URL" filter is upstream in fetchBrollLibrary — this helper's
-  // job is ONLY URL-class filtering. Don't double-filter no-URL rows here;
+  // job is ONLY URL-class classification. Don't double-filter no-URL rows here;
   // they'd have been dropped earlier.
   const rows = [
     row({ asset_id: 'no-url', file_url: null, storage_url: null }),
@@ -153,23 +160,29 @@ test('filter: row with no URLs at all passes through unchanged', () => {
   const out = filterUnsupportedBrollAssets(rows);
   assert.equal(out.rows.length, 1);
   assert.equal(out.rows[0].asset_id, 'no-url');
+  assert.notEqual(out.rows[0].needsHeicConversion, true);
 });
 
-test('filter: preserves input row order', () => {
+test('filter: preserves input row order (mixed .mov and .heic)', () => {
   const rows = [
     row({ asset_id: '1', storage_url: 'https://x/a.mov' }),
-    row({ asset_id: '2', storage_url: 'https://x/b.heic' }),     // dropped
+    row({ asset_id: '2', storage_url: 'https://x/b.heic' }),     // tagged
     row({ asset_id: '3', storage_url: 'https://x/c.mp4' }),
-    row({ asset_id: '4', storage_url: 'https://x/d.heif' }),     // dropped
+    row({ asset_id: '4', storage_url: 'https://x/d.heif' }),     // tagged
     row({ asset_id: '5', storage_url: 'https://x/e.jpg' }),
   ];
   const out = filterUnsupportedBrollAssets(rows);
-  assert.deepEqual(out.rows.map((r) => r.asset_id), ['1', '3', '5']);
-  assert.equal(out.droppedHeicCount, 2);
+  // PR-E: ALL rows kept now, in original order.
+  assert.deepEqual(out.rows.map((r) => r.asset_id), ['1', '2', '3', '4', '5']);
+  assert.equal(out.convertibleHeicCount, 2);
+  assert.equal(out.rows.find((r) => r.asset_id === '2').needsHeicConversion, true);
+  assert.equal(out.rows.find((r) => r.asset_id === '4').needsHeicConversion, true);
+  assert.notEqual(out.rows.find((r) => r.asset_id === '1').needsHeicConversion, true);
 });
 
-test('filter: defensive — non-array input returns empty', () => {
-  assert.deepEqual(filterUnsupportedBrollAssets(null), { rows: [], warnings: [], droppedHeicCount: 0 });
-  assert.deepEqual(filterUnsupportedBrollAssets(undefined), { rows: [], warnings: [], droppedHeicCount: 0 });
-  assert.deepEqual(filterUnsupportedBrollAssets({}), { rows: [], warnings: [], droppedHeicCount: 0 });
+test('filter: defensive — non-array input returns empty + zero counts', () => {
+  const empty = { rows: [], warnings: [], droppedHeicCount: 0, convertibleHeicCount: 0 };
+  assert.deepEqual(filterUnsupportedBrollAssets(null), empty);
+  assert.deepEqual(filterUnsupportedBrollAssets(undefined), empty);
+  assert.deepEqual(filterUnsupportedBrollAssets({}), empty);
 });

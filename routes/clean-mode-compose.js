@@ -94,6 +94,23 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
       if (body.options.brollDensity != null && (typeof body.options.brollDensity !== 'number' || body.options.brollDensity <= 0 || body.options.brollDensity > 1)) {
         return res.status(400).json({ jobId, step: 'validate', error: 'options.brollDensity must be in (0, 1]' });
       }
+      // PR #129: per-job source-balance ratio overrides. Both must be in
+      // (0, 1] and blend ≤ max (otherwise the math is contradictory —
+      // the picker's target would exceed the trim ceiling).
+      const blendRaw = body.options.brollStockBlendRatio;
+      const maxRaw = body.options.brollMaxStockRatio;
+      if (blendRaw != null && (typeof blendRaw !== 'number' || blendRaw <= 0 || blendRaw > 1)) {
+        return res.status(400).json({ jobId, step: 'validate', error: 'options.brollStockBlendRatio must be in (0, 1]' });
+      }
+      if (maxRaw != null && (typeof maxRaw !== 'number' || maxRaw <= 0 || maxRaw > 1)) {
+        return res.status(400).json({ jobId, step: 'validate', error: 'options.brollMaxStockRatio must be in (0, 1]' });
+      }
+      if (blendRaw != null && maxRaw != null && blendRaw > maxRaw) {
+        return res.status(400).json({
+          jobId, step: 'validate',
+          error: `options.brollStockBlendRatio (${blendRaw}) must be <= options.brollMaxStockRatio (${maxRaw})`,
+        });
+      }
     }
 
     // PR-I v2: callback shape validation. The async-mode contract requires

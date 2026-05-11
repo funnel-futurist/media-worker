@@ -180,3 +180,53 @@ test('route: both ratios null/undefined falls back to env defaults (no validatio
     assert.doesNotMatch(res._body.error ?? '', /brollStockBlendRatio|brollMaxStockRatio/);
   }
 });
+
+// ── PR #130: brollClientPreference enum validation ────────────────────
+
+test("route: accepts brollClientPreference='balanced'", async () => {
+  const handler = getHandler();
+  const req = { body: { ...baseBody(), options: { brollClientPreference: 'balanced' } } };
+  const res = fakeRes();
+  await handler(req, res);
+  if (res._status === 400) {
+    assert.doesNotMatch(res._body.error ?? '', /brollClientPreference/);
+  }
+});
+
+test("route: accepts brollClientPreference='minimal'", async () => {
+  const handler = getHandler();
+  const req = { body: { ...baseBody(), options: { brollClientPreference: 'minimal' } } };
+  const res = fakeRes();
+  await handler(req, res);
+  if (res._status === 400) {
+    assert.doesNotMatch(res._body.error ?? '', /brollClientPreference/);
+  }
+});
+
+test('route: rejects unknown brollClientPreference values', async () => {
+  const handler = getHandler();
+  const req = { body: { ...baseBody(), options: { brollClientPreference: 'aggressive' } } };
+  const res = fakeRes();
+  await handler(req, res);
+  assert.equal(res._status, 400);
+  assert.match(res._body.error, /brollClientPreference must be 'balanced' or 'minimal'/);
+});
+
+test('route: rejects non-string brollClientPreference', async () => {
+  const handler = getHandler();
+  const req = { body: { ...baseBody(), options: { brollClientPreference: 1 } } };
+  const res = fakeRes();
+  await handler(req, res);
+  assert.equal(res._status, 400);
+  assert.match(res._body.error, /brollClientPreference/);
+});
+
+test('route: brollClientPreference omitted is fine (falls back to balanced)', async () => {
+  const handler = getHandler();
+  const req = { body: baseBody() };          // no clientPreference set
+  const res = fakeRes();
+  await handler(req, res);
+  if (res._status === 400) {
+    assert.doesNotMatch(res._body.error ?? '', /brollClientPreference/);
+  }
+});

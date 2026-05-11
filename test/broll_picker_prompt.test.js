@@ -105,3 +105,65 @@ test('buildPrompts: density target + variety + duration constraints stay intact 
   assert.match(userPrompt, /\[2\.5s, 5\.0s\]/);
   assert.match(userPrompt, /Min 4s spacing/);
 });
+
+// ── PR #130: clientPreference modes ─────────────────────────────────
+
+test("buildPrompts: clientPreference='balanced' (default) uses the AI-blend USE BOTH rule", () => {
+  const { userPrompt: defaultPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.4,
+  });
+  const { userPrompt: explicitBalanced } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.4,
+    clientPreference: 'balanced',
+  });
+  // Default and explicit-balanced produce the same prompt.
+  assert.equal(defaultPrompt, explicitBalanced);
+  // Both contain the "USE BOTH" wording.
+  assert.match(defaultPrompt, /USE BOTH/);
+  assert.match(defaultPrompt, /healthy mix/i);
+  // Neither contains the minimal-mode language.
+  assert.doesNotMatch(defaultPrompt, /MINIMAL-CLIENT MODE/);
+  assert.doesNotMatch(defaultPrompt, /STRONGLY PREFER Pixabay stock/);
+});
+
+test("buildPrompts: clientPreference='minimal' injects strong stock-bias language", () => {
+  const { userPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.4,
+    clientPreference: 'minimal',
+  });
+  // Stock-bias anchors that lock the wording so a future rewrite can't
+  // silently weaken the rule.
+  assert.match(userPrompt, /MINIMAL-CLIENT MODE/);
+  assert.match(userPrompt, /STRONGLY PREFER Pixabay stock/);
+  assert.match(userPrompt, /at most 1-2 client picks per video/);
+  assert.match(userPrompt, /Default to STOCK for all other moments/);
+  assert.match(userPrompt, /Do NOT over-pick client b-roll/);
+  // The default "USE BOTH" wording is REPLACED, not appended.
+  assert.doesNotMatch(userPrompt, /USE BOTH\./);
+});
+
+test("buildPrompts: clientPreference='minimal' keeps the ASSET ID FIDELITY rule intact (regression)", () => {
+  // Mode switch must not drop the existing constraints — only swap the
+  // source-mix clause.
+  const { userPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.4,
+    clientPreference: 'minimal',
+  });
+  assert.match(userPrompt, /ASSET ID FIDELITY/);
+  assert.match(userPrompt, /full asset_id/i);
+  assert.match(userPrompt, /Min 4s spacing/);
+  assert.match(userPrompt, /\[2\.5s, 5\.0s\]/);
+});
+
+test("buildPrompts: unrecognized clientPreference falls back to 'balanced' (defensive)", () => {
+  // Future-proofing — if someone passes a string that isn't an
+  // accepted mode, we default to the safe 'balanced' rule rather than
+  // emitting a half-built prompt. (Route validation rejects invalid
+  // values upstream, so this is a belt-and-braces guard.)
+  const { userPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.4,
+    clientPreference: 'aggressive',
+  });
+  assert.match(userPrompt, /USE BOTH/);
+  assert.doesNotMatch(userPrompt, /MINIMAL-CLIENT MODE/);
+});

@@ -230,3 +230,60 @@ test('route: brollClientPreference omitted is fine (falls back to balanced)', as
     assert.doesNotMatch(res._body.error ?? '', /brollClientPreference/);
   }
 });
+
+// ── PR-131 Option B: brollMaxClientCount validation ───────────────────
+
+test('route: accepts brollMaxClientCount=2 (Phil intended value)', async () => {
+  const handler = getHandler();
+  const req = { body: { ...baseBody(), options: { brollMaxClientCount: 2 } } };
+  const res = fakeRes();
+  await handler(req, res);
+  if (res._status === 400) {
+    assert.doesNotMatch(res._body.error ?? '', /brollMaxClientCount/);
+  }
+});
+
+test('route: accepts brollMaxClientCount=0 (full-stock mode)', async () => {
+  const handler = getHandler();
+  const req = { body: { ...baseBody(), options: { brollMaxClientCount: 0 } } };
+  const res = fakeRes();
+  await handler(req, res);
+  if (res._status === 400) {
+    assert.doesNotMatch(res._body.error ?? '', /brollMaxClientCount/);
+  }
+});
+
+test('route: rejects negative brollMaxClientCount', async () => {
+  const handler = getHandler();
+  const req = { body: { ...baseBody(), options: { brollMaxClientCount: -1 } } };
+  const res = fakeRes();
+  await handler(req, res);
+  assert.equal(res._status, 400);
+  assert.match(res._body.error, /brollMaxClientCount must be a non-negative integer/);
+});
+
+test('route: rejects non-integer brollMaxClientCount (float)', async () => {
+  const handler = getHandler();
+  const req = { body: { ...baseBody(), options: { brollMaxClientCount: 1.5 } } };
+  const res = fakeRes();
+  await handler(req, res);
+  assert.equal(res._status, 400);
+});
+
+test('route: rejects non-number brollMaxClientCount', async () => {
+  const handler = getHandler();
+  const req = { body: { ...baseBody(), options: { brollMaxClientCount: 'two' } } };
+  const res = fakeRes();
+  await handler(req, res);
+  assert.equal(res._status, 400);
+});
+
+test('route: brollMaxClientCount omitted is fine (cap disabled)', async () => {
+  const handler = getHandler();
+  const req = { body: baseBody() };          // no cap set
+  const res = fakeRes();
+  await handler(req, res);
+  if (res._status === 400) {
+    assert.doesNotMatch(res._body.error ?? '', /brollMaxClientCount/);
+  }
+});

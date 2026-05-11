@@ -9,15 +9,19 @@
  * The compose function isn't exported (orchestrator-internal), so we test
  * the source file content directly. This is a deliberate source-snapshot
  * test — same pattern as subtitle_burn's "does NOT regress to old 50pt size"
- * lock-in. If the filter logic ever moves to a separate helper, swap this
- * for a behavior test against the helper's output.
+ * lock-in.
+ *
+ * Per-job output resolution: the source now uses template literals
+ * (`scale=${outputWidth}:${outputHeight}:...`) so any supported pair (1080×1920
+ * reels, 1080×1350 ads) renders through the same code path. Assertions match
+ * the template-literal shape, not the runtime-resolved numeric values.
  *
  * What we DON'T touch:
  *   - The contact-sheet thumbnail filter (`generateContactSheet`) intentionally
  *     keeps `decrease,pad=...` because letterbox is acceptable for the
- *     internal QA index. Its filter operates at 270×480 so it's
- *     size-distinct from the production 1080×1920 chain — no slicing needed
- *     to scope the assertions.
+ *     internal QA index. Its filter operates at 270×480 (hardcoded by design,
+ *     separate from production output) so it's size-distinct from the
+ *     production chain — no aliasing with these assertions.
  */
 
 import test from 'node:test';
@@ -30,82 +34,89 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SOURCE_PATH = join(__dirname, '..', 'lib', 'clean_mode_pipeline.js');
 const SOURCE = readFileSync(SOURCE_PATH, 'utf8');
 
-// ── PR #111: fill-crop reframing (production 1080×1920 path) ──────────
+// ── PR #111: fill-crop reframing (production path, dim-parameterized) ─
 
-test('compose filter: uses fill-crop (increase + crop=1080:1920) — PR #111', () => {
+test('compose filter: uses fill-crop scale chain (parameterized W/H) — PR #111 + per-job resolution', () => {
   // Both face and broll branches in composeFaceAndBrolls use the fill-crop
-  // chain. PR #114 made the FACE branch use a dynamic x-expression coming
-  // from face_detect.js (`crop=1080:1920:<expr>:0`); the broll branch keeps
-  // the simple `crop=1080:1920` because brolls are iPhone portrait content
-  // already at the target aspect (the crop is a no-op there). So we expect:
-  //   - the scale+crop prefix appears exactly twice
-  //   - one occurrence is followed by a `:` (face branch with dynamic offset)
-  //   - one occurrence is followed by a `,` (broll branch, plain crop)
-  const FILL_CROP_PREFIX = /scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920/g;
-  const matches = SOURCE.match(FILL_CROP_PREFIX) || [];
-  assert.equal(
-    matches.length,
-    2,
-    `expected fill-crop prefix to appear exactly twice (face + broll segments); ` +
-    `found ${matches.length} occurrence(s)`,
+  // chain. After per-job output resolution landed, the literal `1080:1920`
+  // was replaced with `${outputWidth}:${outputHeight}` template tokens so
+  // 4:5 ad output (1080×1350) and 9:16 reel output (1080×1920) share the
+  // same code path. We expect:
+  //   - the parameterized scale-increase prefix appears at least twice
+  //   - the parameterized crop appears at least twice (face + broll branches)
+  const FILL_CROP_SCALE = /scale=\$\{outputWidth\}:\$\{outputHeight\}:force_original_aspect_ratio=increase/g;
+  const FILL_CROP_CROP = /crop=\$\{outputWidth\}:\$\{outputHeight\}/g;
+  const scaleMatches = SOURCE.match(FILL_CROP_SCALE) || [];
+  const cropMatches = SOURCE.match(FILL_CROP_CROP) || [];
+  assert.ok(
+    scaleMatches.length >= 2,
+    `expected parameterized scale-increase prefix in at least both face + broll branches; ` +
+    `found ${scaleMatches.length} occurrence(s)`,
+  );
+  assert.ok(
+    cropMatches.length >= 2,
+    `expected parameterized crop=\${outputWidth}:\${outputHeight} in at least both face + broll branches; ` +
+    `found ${cropMatches.length} occurrence(s)`,
   );
 });
 
-test('compose filter: face branch uses face-aware crop expression — PR #114', () => {
+test('compose filter: face branch uses face-aware crop expression with outputWidth — PR #114 + per-job resolution', () => {
   // The face branch must apply the face_detect-driven horizontal offset.
-  // Match the shape `crop=1080:1920:<expr>:0` where <expr> is the ffmpeg
-  // expression produced by buildCropXExpression — `max(0\,min(iw-1080\,...))`.
+  // After parameterization the shape is `crop=${outputWidth}:${outputHeight}:${cropXExpr}:0`.
   // Catches a regression where someone reverts the dynamic offset and
   // pushes off-center subjects to the edge again.
-  const DYNAMIC_FACE_CROP = /crop=1080:1920:\$\{cropXExpr\}:0/;
+  const DYNAMIC_FACE_CROP = /crop=\$\{outputWidth\}:\$\{outputHeight\}:\$\{cropXExpr\}:0/;
   assert.match(
     SOURCE,
     DYNAMIC_FACE_CROP,
-    'face segment must use crop=1080:1920:${cropXExpr}:0 (PR #114) so the ' +
-    'face_detect offset reaches ffmpeg',
+    'face segment must use crop=${outputWidth}:${outputHeight}:${cropXExpr}:0 ' +
+    '(PR #114 + per-job resolution) so the face_detect offset reaches ffmpeg ' +
+    'at the requested target dimensions',
   );
-  // And buildCropXExpression must be imported and used.
+  // buildCropXExpression must be called with the outputWidth so the crop
+  // math centers on the correct half-width (1080/2=540 by default).
   assert.match(
     SOURCE,
-    /buildCropXExpression\(faceCropOffsetX\)/,
-    'composeFaceAndBrolls must call buildCropXExpression(faceCropOffsetX) ' +
-    'to render the dynamic crop expression',
+    /buildCropXExpression\(faceCropOffsetX,\s*outputWidth\)/,
+    'composeFaceAndBrolls must call buildCropXExpression(faceCropOffsetX, outputWidth) ' +
+    'so the crop expression matches the requested output width',
   );
 });
 
 test('compose filter: broll branch keeps plain center crop (no offset needed) — PR #114', () => {
-  // Brolls are iPhone portrait content (rotate=90 metadata) → already 9:16
-  // effective. Adding a horizontal crop offset would be meaningless and
-  // could destabilize the broll path. Keep the broll branch with the simple
-  // `crop=1080:1920,setsar=1` chain.
+  // Brolls don't need a face-aware offset; the broll branch uses a plain
+  // center crop. After parameterization, the shape is
+  // `scale=${W}:${H}:...,crop=${W}:${H},setsar=...`.
   assert.match(
     SOURCE,
-    /\$\{inputChain\},setpts=PTS-STARTPTS,[\s\S]*?scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,/,
-    'broll branch must keep plain `crop=1080:1920,` (no dynamic offset)',
+    /\$\{inputChain\},setpts=PTS-STARTPTS,[\s\S]*?scale=\$\{outputWidth\}:\$\{outputHeight\}:force_original_aspect_ratio=increase,[\s\S]*?crop=\$\{outputWidth\}:\$\{outputHeight\},/,
+    'broll branch must use plain `crop=${outputWidth}:${outputHeight},` (no face-offset suffix)',
   );
 });
 
-test('compose filter: does NOT regress to letterbox-pad at production 1080×1920 — PR #111', () => {
+test('compose filter: does NOT regress to letterbox-pad — PR #111', () => {
   // Defends against drift back to the pre-PR #111 letterbox-pad approach
   // that left black bars top/bottom on landscape talking-head sources.
-  // Phil B7 frame at 5s on 2026-05-08 is the canonical evidence we're
-  // guarding against. Search for either the full pad chain or the bare
-  // pad invocation at production size — both must be absent from this
-  // file's 1080×1920 path. Contact-sheet is size-distinct (270×480) so
-  // it isn't matched by these patterns.
-  const LETTERBOX_FULL = /scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920/g;
-  const LETTERBOX_BARE = /pad=1080:1920:\(ow-iw\)\/2:\(oh-ih\)\/2/g;
+  // Both the hardcoded-1080:1920 form AND the new parameterized form
+  // must be absent from the production compose chain.
+  // (Contact-sheet at 270×480 is size-distinct and excluded by these patterns.)
+  const LETTERBOX_HARDCODED = /scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920/g;
+  const LETTERBOX_PARAMETERIZED = /scale=\$\{outputWidth\}:\$\{outputHeight\}:force_original_aspect_ratio=decrease,pad=\$\{outputWidth\}:\$\{outputHeight\}/g;
+  const LETTERBOX_BARE = /pad=\$?\{?(?:outputWidth|1080)\}?:\$?\{?(?:outputHeight|1920)\}?:\(ow-iw\)\/2:\(oh-ih\)\/2/g;
   assert.equal(
-    (SOURCE.match(LETTERBOX_FULL) || []).length,
+    (SOURCE.match(LETTERBOX_HARDCODED) || []).length,
     0,
-    'pre-PR #111 letterbox filter "scale=1080:1920:...decrease,pad=1080:1920" must NOT ' +
-    'appear at production size — it left ~656px of black on landscape sources',
+    'pre-PR #111 hardcoded letterbox "scale=1080:1920:...decrease,pad=1080:1920" must NOT appear',
+  );
+  assert.equal(
+    (SOURCE.match(LETTERBOX_PARAMETERIZED) || []).length,
+    0,
+    'parameterized letterbox "scale=${outputWidth}:${outputHeight}:...decrease,pad=${outputWidth}:${outputHeight}" must NOT appear in the production chain',
   );
   assert.equal(
     (SOURCE.match(LETTERBOX_BARE) || []).length,
     0,
-    'bare pad expression "pad=1080:1920:(ow-iw)/2:(oh-ih)/2" must NOT appear ' +
-    '(regression guard against partial reverts that swap one branch back)',
+    'bare letterbox pad expression must NOT appear (regression guard)',
   );
 });
 
@@ -114,30 +125,51 @@ test('compose filter: contact-sheet helper still uses letterbox-pad at 270×480 
   // The contact-sheet thumbnail (270×480) keeps letterbox-pad because it's
   // an internal QA index where seeing the original aspect is more useful
   // than filling the thumbnail. This test confirms the contact-sheet path
-  // wasn't accidentally swept up in the change.
+  // wasn't accidentally swept up by parameterization either.
   assert.match(
     SOURCE,
     /scale=270:480:force_original_aspect_ratio=decrease,pad=270:480/,
     'contact-sheet helper must keep its letterbox-pad filter at 270×480 — ' +
-    'PR #111 only changes the production 1080×1920 output path',
+    'parameterization only touches the production output chain',
   );
 });
 
+test('compose filter: production scale chain does not contain hardcoded 1080:1920 literals (parameterization gate)', () => {
+  // After parameterization, the production scale+crop chain should reference
+  // ${outputWidth}:${outputHeight}, not literal 1080:1920. The only places
+  // 1080:1920 should still appear are: comments/docstrings, the default
+  // function-parameter line, and any pre-existing buildCropXExpression
+  // doc comment math. The actual filter strings must be dim-agnostic.
+  const FACE_HARDCODED = /scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920:\$\{cropXExpr\}:0/;
+  const BROLL_HARDCODED = /scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar/;
+  assert.doesNotMatch(SOURCE, FACE_HARDCODED,
+    'face branch filter must use ${outputWidth}:${outputHeight}, not literal 1080:1920');
+  assert.doesNotMatch(SOURCE, BROLL_HARDCODED,
+    'broll branch filter must use ${outputWidth}:${outputHeight}, not literal 1080:1920');
+});
+
 test('compose filter: still applies setsar=1 + yuv420p (post-scale formatting intact)', () => {
-  // The crop swap should not have stripped the post-scale formatting
+  // The parameterization should not have stripped the post-scale formatting
   // (setsar=1 normalises the pixel aspect, format=yuv420p ensures the
-  // x264 encoder downstream gets a compatible pixel format). We can't
-  // assert adjacency in the source-file text because the production
-  // filter is built from concatenated template literals across multiple
-  // source lines — the runtime filter string IS adjacent, but the source
-  // text isn't. So instead: assert the formatting tokens appear at least
-  // twice (once per face + broll segment) somewhere in the file. That's
-  // weaker than a sequence check but enough to catch a wholesale removal.
+  // x264 encoder downstream gets a compatible pixel format).
   const SETSAR_FORMAT = /setsar=1,format=yuv420p/g;
   const matches = SOURCE.match(SETSAR_FORMAT) || [];
   assert.ok(
     matches.length >= 2,
     `expected setsar=1,format=yuv420p in at least both face + broll branches; ` +
     `found ${matches.length} occurrence(s)`,
+  );
+});
+
+test('compose filter: composeFaceAndBrolls signature accepts outputWidth/outputHeight with reel defaults', () => {
+  // Regression guard: per-job resolution must thread through the function
+  // signature with safe reel defaults. Without defaults, callers that don't
+  // pass dimensions would crash; without correct defaults, the reel path
+  // would silently re-render at the wrong aspect.
+  assert.match(
+    SOURCE,
+    /async function composeFaceAndBrolls\(\{[\s\S]*?outputWidth\s*=\s*1080[\s\S]*?outputHeight\s*=\s*1920[\s\S]*?\}\)/,
+    'composeFaceAndBrolls must destructure outputWidth=1080 and outputHeight=1920 ' +
+    'with defaults so callers that omit them get the existing reel behavior',
   );
 });

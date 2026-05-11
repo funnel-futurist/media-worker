@@ -311,3 +311,68 @@ test('warnings: arrow-notation also silent when libass falls back from Black to 
   const warnings = extractSubtitleWarnings(stderr);
   assert.ok(!warnings.some((w) => /resolved/i.test(w)));
 });
+
+// ── 2026-05-11: overlapping cuts must merge (subtitle drift regression) ──
+
+test('remap: overlapping cuts merge — subtitle does NOT drift early (Phil bug)', () => {
+  // Real-world repro from content_item 5d69189c-be10-43d0-b4ff-0277cb2052e3:
+  //   slate_intro:  [0,    5.76]
+  //   silence:      [0.15, 0.912]   ← INSIDE slate
+  //   silence:      [4.45, 5.71]    ← INSIDE slate
+  // ffmpeg's buildKeepSegments merges all three to remove 5.76s.
+  // Pre-fix remap summed them as 5.76 + 0.762 + 1.26 = 7.78s → a word at
+  // original t=10s landed at cut.mp4 t=2.22s instead of the correct
+  // t=4.24s. Subtitles ran ~2s ahead of the speaker.
+  const words = [w('hello', 10.0, 10.5)];
+  const cuts = [
+    { start: 0,    end: 5.76  },
+    { start: 0.15, end: 0.912 },
+    { start: 4.45, end: 5.71  },
+  ];
+  const out = remapWordsThroughCuts(words, cuts);
+  assert.equal(out.length, 1);
+  // Real shift = 5.76s (merged). Word at 10s lands at 4.24s.
+  assert.equal(out[0].start_ms, Math.round((10.0 - 5.76) * 1000));
+  assert.equal(out[0].end_ms,   Math.round((10.5 - 5.76) * 1000));
+});
+
+test('remap: two overlapping silence cuts collapse — no over-subtraction', () => {
+  // Smaller, focused unit case. Without merge: 5+5=10s shift. With merge: 7s shift.
+  const words = [w('keep', 20, 21)];
+  const cuts = [
+    { start: 10, end: 15 },
+    { start: 13, end: 17 },   // overlaps with first → merge to [10, 17] = 7s
+  ];
+  const out = remapWordsThroughCuts(words, cuts);
+  assert.equal(out.length, 1);
+  // Word at 20s in source → 20 - 7 = 13s in cut.mp4 (NOT 10s).
+  assert.equal(out[0].start_ms, 13_000);
+  assert.equal(out[0].end_ms,   14_000);
+});
+
+test('remap: fully-contained cut + outer cut → outer dominates', () => {
+  // Silence [3, 5] is fully inside slate [0, 10]. ffmpeg removes 10s.
+  // Pre-fix: 10 + 2 = 12s. Post-fix: 10s.
+  const words = [w('keep', 30, 31)];
+  const cuts = [
+    { start: 0, end: 10 },
+    { start: 3, end: 5 },     // contained
+  ];
+  const out = remapWordsThroughCuts(words, cuts);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].start_ms, 20_000);
+  assert.equal(out[0].end_ms,   21_000);
+});
+
+test('remap: word inside overlap-merged region is still dropped', () => {
+  // Word at t=4.5s falls inside the merged slate [0, 5.76] (whose pre-merge
+  // had cuts [0, 5.76] + [4.45, 5.71]). Must be dropped, not erroneously
+  // kept by some merge edge case.
+  const words = [w('drop', 4.5, 4.7)];
+  const cuts = [
+    { start: 0,    end: 5.76 },
+    { start: 4.45, end: 5.71 },
+  ];
+  const out = remapWordsThroughCuts(words, cuts);
+  assert.equal(out.length, 0);
+});

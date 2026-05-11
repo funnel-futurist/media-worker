@@ -56,7 +56,14 @@ const EDITED_URL_TTL_SEC = 60 * 60 * 24 * 365;
  *     options?: {
  *       model?: string, brollDensity?: number, cutProfile?: string,
  *       skipBroll?: boolean, skipSubtitles?: boolean,
- *       pixabayEnabled?: boolean, bgmEnabled?: boolean, ...
+ *       pixabayEnabled?: boolean, bgmEnabled?: boolean,
+ *       // Per-job output frame size. Defaults to 1080×1920 (9:16 reel).
+ *       // Supported: (1080, 1920) reels, (1080, 1350) ads. Both must be
+ *       // specified together (or both omitted to use default). All
+ *       // compose stages (face crop, b-roll fill, subtitle PlayRes,
+ *       // caption MarginV) render at this target — no post-render crop.
+ *       outputWidth?: number, outputHeight?: number,
+ *       ...
  *     },
  *     output: { bucket: string, pathPrefix: string },
  *     callback?: { url: string, apiKey: string }   // PR-I v2: opt-in async mode
@@ -131,6 +138,38 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
           jobId, step: 'validate',
           error: 'options.brollMaxClientCount must be a non-negative integer',
         });
+      }
+      // Per-job output resolution (default 1080×1920 reel). Whitelist:
+      //   (1080, 1920) — 9:16 reel (current default)
+      //   (1080, 1350) — 4:5 ad (new)
+      // Restricted to known-supported pairs for now; widen later when more
+      // aspects are validated end-to-end. Both must be present together to
+      // avoid half-specified inputs that would silently yield the default.
+      const wRaw = body.options.outputWidth;
+      const hRaw = body.options.outputHeight;
+      const wPresent = wRaw != null;
+      const hPresent = hRaw != null;
+      if (wPresent !== hPresent) {
+        return res.status(400).json({
+          jobId, step: 'validate',
+          error: 'options.outputWidth and options.outputHeight must be specified together (or both omitted to use the 1080×1920 default)',
+        });
+      }
+      if (wPresent && hPresent) {
+        if (!Number.isInteger(wRaw) || !Number.isInteger(hRaw)) {
+          return res.status(400).json({
+            jobId, step: 'validate',
+            error: 'options.outputWidth and options.outputHeight must be integers',
+          });
+        }
+        const SUPPORTED = [[1080, 1920], [1080, 1350]];
+        const matched = SUPPORTED.some(([w, h]) => w === wRaw && h === hRaw);
+        if (!matched) {
+          return res.status(400).json({
+            jobId, step: 'validate',
+            error: `options.outputWidth × options.outputHeight = ${wRaw}×${hRaw} is not a supported output size. Allowed: ${SUPPORTED.map(([w, h]) => `${w}×${h}`).join(', ')}`,
+          });
+        }
       }
     }
 

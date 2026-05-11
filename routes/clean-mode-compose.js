@@ -111,6 +111,14 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
           error: `options.brollStockBlendRatio (${blendRaw}) must be <= options.brollMaxStockRatio (${maxRaw})`,
         });
       }
+      // PR #130: clientPreference enum validation.
+      const prefRaw = body.options.brollClientPreference;
+      if (prefRaw != null && prefRaw !== 'balanced' && prefRaw !== 'minimal') {
+        return res.status(400).json({
+          jobId, step: 'validate',
+          error: `options.brollClientPreference must be 'balanced' or 'minimal' (got ${JSON.stringify(prefRaw)})`,
+        });
+      }
     }
 
     // PR-I v2: callback shape validation. The async-mode contract requires

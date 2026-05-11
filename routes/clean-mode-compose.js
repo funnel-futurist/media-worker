@@ -2,23 +2,35 @@
  * routes/clean-mode-compose.js
  *
  * Milestone 2: full clean-mode reel pipeline. Source MP4 in, final
- * captioned-and-brolled MP4 out. Synchronous response (M2 test mode) — long
- * videos may take 5+ minutes; clients must use a generous timeout. M3 will
- * switch to async fire-and-forget with status writes on cs.content_items.
+ * captioned-and-brolled MP4 out.
+ *
+ * Two response modes (PR-I 2026-05-09):
+ *   1. **Synchronous** (legacy / manual curl): no `callback` in body. The
+ *      route blocks until the pipeline finishes and returns the full result.
+ *      Wall-clock ~150s; clients must use a generous timeout.
+ *   2. **Accept-and-async** (portal-triggered): `callback: { url, secret }`
+ *      in body. Route validates, responds 202 immediately, runs the pipeline
+ *      in the background, then POSTs the result envelope to `callback.url`
+ *      with an HMAC-SHA256 signature in `x-worker-signature`. The original
+ *      caller never sees the pipeline output directly — they get the
+ *      eventual webhook instead. This unblocks Vercel route handlers
+ *      (which have a 60s timeout) from auto-triggering edits on upload.
  *
  * Auth: bearer WORKER_SECRET (handled by global middleware in server.js).
  *
  * Pipeline operator directive (per M2 plan):
- *   - No portal repo touchpoints
- *   - No Vercel cron, no schema migrations
+ *   - No portal repo touchpoints inside the orchestrator itself
  *   - All internal Storage I/O via service-role REST
  *   - Default model: gemini-3.1-pro-preview
- *   - Math-remap subtitles (no second Scribe call per job)
- *   - file_url required on every broll asset (no Drive OAuth resolution)
  */
 
 import { Router } from 'express';
 import { runCleanModePipeline } from '../lib/clean_mode_pipeline.js';
+import {
+  postEditCompleteToPortal,
+  buildSuccessEnvelope,
+  buildFailureEnvelope,
+} from '../lib/portal_webhook.js';
 
 export const cleanModeComposeRouter = Router();
 
@@ -36,21 +48,31 @@ export const cleanModeComposeRouter = Router();
  *       cutProfile?: string,
  *       skipBroll?: boolean,
  *       skipSubtitles?: boolean,
+ *       pixabayEnabled?: boolean,
+ *       bgmEnabled?: boolean,
+ *       ...
  *     },
  *     output: { bucket: string, pathPrefix: string },
+ *     callback?: { url: string, secret: string },   // PR-I: opt-in async mode
  *   }
  *
- * 200: see lib/clean_mode_pipeline.runCleanModePipeline return shape
- * 4xx/5xx: { jobId, step, error, upstream?, warnings? }
+ * Sync mode (no callback):
+ *   200: see lib/clean_mode_pipeline.runCleanModePipeline return shape
+ *   4xx/5xx: { jobId, step, error, ... }
+ *
+ * Async mode (callback present):
+ *   202: { jobId, accepted: true, mode: 'async' }
+ *   4xx:  shape validation failures still 4xx synchronously
+ *   Eventual callback POSTs SuccessEnvelope or FailureEnvelope (see
+ *   lib/portal_webhook.js).
  */
 cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
   const body = req.body || {};
   const jobId = typeof body.jobId === 'string' ? body.jobId : undefined;
 
-  // Body-shape validation runs here (returns 400 with `step:'validate'`).
-  // Pipeline failures are caught INSIDE runCleanModePipeline (PR #103) and
-  // returned as a partial-data shape with an `error` field — which lets the
-  // operator see what data was collected before the throw.
+  // Body-shape validation always runs synchronously (returns 400 even in
+  // async mode — the portal needs immediate feedback if the request was
+  // malformed).
   try {
     if (!jobId) return res.status(400).json({ error: 'jobId is required (non-empty string)' });
     if (!body.sourceMP4 || typeof body.sourceMP4.bucket !== 'string' || typeof body.sourceMP4.path !== 'string') {
@@ -68,7 +90,41 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
       }
     }
 
-    console.log(`[clean-mode-compose] job=${jobId} client=${body.clientId} src=${body.sourceMP4.bucket}/${body.sourceMP4.path}`);
+    // PR-I: callback shape validation if present.
+    const callback = body.callback;
+    const asyncMode = !!(callback && typeof callback === 'object');
+    if (asyncMode) {
+      if (typeof callback.url !== 'string' || !/^https?:\/\//.test(callback.url)) {
+        return res.status(400).json({ jobId, step: 'validate', error: 'callback.url must be an http(s) URL' });
+      }
+      if (typeof callback.secret !== 'string' || callback.secret.length === 0) {
+        return res.status(400).json({ jobId, step: 'validate', error: 'callback.secret is required when callback.url is present' });
+      }
+    }
+
+    if (asyncMode) {
+      // ── Accept-and-async mode ────────────────────────────────────────
+      // 1. Acknowledge to the caller immediately so Vercel doesn't time out.
+      // 2. Continue running the pipeline AFTER the response has been sent.
+      // 3. POST the result envelope to callback.url when the pipeline finishes.
+      console.log(`[clean-mode-compose] job=${jobId} ASYNC accepted (callback=${callback.url})`);
+      res.status(202).json({ jobId, accepted: true, mode: 'async' });
+
+      // Fire-and-forget — explicitly don't await. Any error inside is caught
+      // and reported through the callback, never bubbled to the (already-sent)
+      // response. Wrap in a setImmediate so the response flush completes
+      // before the heavy pipeline work starts; helps the OS hand back the
+      // socket promptly under load.
+      setImmediate(() => {
+        runAsyncJob(body, jobId, callback).catch((err) => {
+          console.error(`[clean-mode-compose] job=${jobId} runAsyncJob crashed:`, err?.stack ?? err);
+        });
+      });
+      return;
+    }
+
+    // ── Synchronous mode (legacy / curl) ────────────────────────────────
+    console.log(`[clean-mode-compose] job=${jobId} SYNC client=${body.clientId} src=${body.sourceMP4.bucket}/${body.sourceMP4.path}`);
     const result = await runCleanModePipeline(body);
 
     // PR #103: orchestrator's catch returns a partial-data response with an
@@ -98,6 +154,61 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
     });
   }
 });
+
+/**
+ * PR-I async-mode pipeline runner. Lives outside the route handler so the
+ * response can be flushed before the heavy work begins.
+ *
+ * Sends EXACTLY ONE callback POST per request — either success or failure.
+ * Logs loudly on callback delivery failure; the caller (portal) has its own
+ * cron sweep that recovers stuck rows after 15 min.
+ */
+async function runAsyncJob(body, jobId, callback) {
+  let envelope;
+  try {
+    const result = await runCleanModePipeline(body);
+    if (result?.error) {
+      // Partial-data path (orchestrator caught an internal throw)
+      envelope = buildFailureEnvelope(jobId, {
+        step: result.error.step ?? 'pipeline',
+        message: result.error.message ?? '(no message)',
+      });
+      console.error(
+        `[clean-mode-compose] job=${jobId} ASYNC step=${result.error.step ?? '?'} ` +
+        `error: ${result.error.message ?? '(no message)'} — posting failure callback`,
+      );
+    } else {
+      envelope = buildSuccessEnvelope(jobId, result);
+      console.log(
+        `[clean-mode-compose] job=${jobId} ASYNC OK in ${result.processingMs}ms — posting success callback`,
+      );
+    }
+  } catch (err) {
+    // Hit only when the orchestrator throws OUTSIDE its own catch (very rare
+    // — validation throws synchronously, pipeline-internal throws are caught
+    // by PR #103). Treat as a hard pipeline failure.
+    envelope = buildFailureEnvelope(jobId, {
+      step: 'pipeline',
+      message: err?.message ?? String(err),
+    });
+    console.error(`[clean-mode-compose] job=${jobId} ASYNC hard error:`, err?.stack ?? err);
+  }
+
+  const post = await postEditCompleteToPortal({
+    callbackUrl: callback.url,
+    callbackSecret: callback.secret,
+    payload: envelope,
+  });
+  if (!post.ok) {
+    console.error(
+      `[clean-mode-compose] job=${jobId} ASYNC callback delivery FAILED ` +
+      `(attempts=${post.attempts} status=${post.status ?? '-'} err=${post.error ?? '-'}). ` +
+      `Portal cron will recover via the stuck-editing sweep after 15 min.`,
+    );
+  } else {
+    console.log(`[clean-mode-compose] job=${jobId} ASYNC callback delivered (status=${post.status})`);
+  }
+}
 
 /**
  * Status code policy (matches the prior `pickStatusFromError`):

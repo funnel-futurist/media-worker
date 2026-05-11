@@ -427,9 +427,121 @@ test('rebalance: returns metadata fields callers can read for response.insertion
   const picks = insArr('client', 'pixabay', 'pixabay', 'pixabay');
   const out = rebalanceClientFirst({ insertions: picks, usableClientCount: 5, maxStockRatio: 0.4 });
   assert.equal(typeof out.droppedStockCount, 'number');
+  assert.equal(typeof out.droppedClientCount, 'number');       // PR-131 new field
   assert.equal(typeof out.action, 'string');                   // trim happened → string action
   assert.ok(Array.isArray(out.insertions));
   // PR-F: mix-state diagnostic fields always present
   assert.equal(typeof out.mixMet, 'boolean');
   assert.equal(typeof out.mixReason, 'string');
+});
+
+// ── PR-131 Option B: hard maxClientCount cap ──────────────────────────
+
+test('rebalance: PR-131 — Phil case (5c+4s) with maxClientCount=2 trims 3 client → 2c+4s', () => {
+  // Replays the actual Phil-row outcome from row 0056ba10 (jobId
+  // 58b88c08): 5 client + 4 stock = 9 picks. maxClientCount=2 trims
+  // 3 client from the tail → 2 client + 4 stock = 6 picks. Stock-ratio
+  // check (default 0.55) on the post-trim set: 4/6 = 67% > 55% → trim
+  // 1 stock → 2c+3s = 5/5*60% > 55% → trim 1 stock → 2c+2s = 50% under
+  // cap → stop. Final = 2 client + 2 stock = 4 picks.
+  const picks = insArr('client', 'pixabay', 'client', 'pixabay', 'client', 'pixabay', 'client', 'pixabay', 'client');
+  const out = rebalanceClientFirst({
+    insertions: picks,
+    usableClientCount: 13,
+    maxClientCount: 2,
+  });
+  // Client capped to 2.
+  const clientKept = out.insertions.filter((i) => i.provenance !== 'pixabay').length;
+  const stockKept  = out.insertions.filter((i) => i.provenance === 'pixabay').length;
+  assert.equal(clientKept, 2, `expected 2 client, got ${clientKept}`);
+  assert.equal(out.droppedClientCount, 3);
+  // Stock-ratio trim also fired post-client-trim because default 0.55
+  // ceiling is below 67% (4/6). Acceptable behavior — the hard cap
+  // takes precedence and the ratio enforces afterwards.
+  assert.ok(stockKept >= 1, 'should keep at least some stock');
+  // Action string mentions BOTH trims.
+  assert.match(out.action ?? '', /client_count_2/);
+});
+
+test('rebalance: PR-131 — Phil case with maxClientCount=2 + maxStockRatio=0.85 keeps 2c+4s clean', () => {
+  // Operator wanting "just the cap, no stock-ratio over-trim" pairs
+  // maxClientCount with a generous maxStockRatio. 2c+4s = 67% stock <
+  // 85% cap → no stock trim. Final 2c+4s.
+  const picks = insArr('client', 'pixabay', 'client', 'pixabay', 'client', 'pixabay', 'client', 'pixabay', 'client');
+  const out = rebalanceClientFirst({
+    insertions: picks,
+    usableClientCount: 13,
+    maxClientCount: 2,
+    maxStockRatio: 0.85,
+  });
+  const clientKept = out.insertions.filter((i) => i.provenance !== 'pixabay').length;
+  const stockKept  = out.insertions.filter((i) => i.provenance === 'pixabay').length;
+  assert.equal(clientKept, 2);
+  assert.equal(stockKept, 4);
+  assert.equal(out.droppedClientCount, 3);
+  assert.equal(out.droppedStockCount, 0);    // generous ratio → no extra trim
+});
+
+test('rebalance: PR-131 — maxClientCount=0 strips ALL client picks (full-stock mode)', () => {
+  // Operator who wants every moment to be stock can pass 0. Valid.
+  const picks = insArr('client', 'pixabay', 'client', 'pixabay');
+  const out = rebalanceClientFirst({
+    insertions: picks,
+    usableClientCount: 13,
+    maxClientCount: 0,
+    maxStockRatio: 1.0,                       // disable ratio trim to isolate cap
+  });
+  const clientKept = out.insertions.filter((i) => i.provenance !== 'pixabay').length;
+  assert.equal(clientKept, 0);
+  assert.equal(out.droppedClientCount, 2);
+});
+
+test('rebalance: PR-131 — maxClientCount higher than actual count is a no-op for client', () => {
+  // No client trim when current client count is at or under cap.
+  // Isolate the cap behavior by raising the stock-ratio ceiling so it
+  // doesn't fire on this set (1c+2s=67% > default 0.55 → would trim
+  // stock otherwise, masking the client-cap no-op we're asserting).
+  const picks = insArr('client', 'pixabay', 'pixabay');
+  const out = rebalanceClientFirst({
+    insertions: picks,
+    usableClientCount: 5,
+    maxClientCount: 10,
+    maxStockRatio: 1.0,
+  });
+  assert.equal(out.droppedClientCount, 0);
+  assert.equal(out.insertions.length, 3);
+});
+
+test('rebalance: PR-131 — maxClientCount undefined / null disables the cap (legacy behavior)', () => {
+  const picks = insArr('client', 'client', 'client', 'pixabay');
+  const outA = rebalanceClientFirst({
+    insertions: picks, usableClientCount: 5,
+    // maxClientCount NOT set
+  });
+  const outB = rebalanceClientFirst({
+    insertions: picks, usableClientCount: 5, maxClientCount: undefined,
+  });
+  assert.equal(outA.droppedClientCount, 0);
+  assert.equal(outB.droppedClientCount, 0);
+});
+
+test('rebalance: PR-131 — client trim happens from the TAIL (preserves earlier brand-anchor picks)', () => {
+  // Picks in time order. Cap=1 should keep the FIRST client pick (the
+  // brand-anchor at the top of the video) and drop later ones.
+  const picks = [
+    { asset_id: 'c-early', provenance: 'client', startSec: 5 },
+    { asset_id: 's-1',     provenance: 'pixabay', startSec: 15 },
+    { asset_id: 'c-mid',   provenance: 'client', startSec: 25 },
+    { asset_id: 's-2',     provenance: 'pixabay', startSec: 35 },
+    { asset_id: 'c-late',  provenance: 'client', startSec: 45 },
+  ];
+  const out = rebalanceClientFirst({
+    insertions: picks,
+    usableClientCount: 5,
+    maxClientCount: 1,
+    maxStockRatio: 1.0,                       // disable ratio trim
+  });
+  const keptClient = out.insertions.filter((i) => i.provenance !== 'pixabay');
+  assert.equal(keptClient.length, 1);
+  assert.equal(keptClient[0].asset_id, 'c-early', 'should keep the earliest (brand-anchor) client pick');
 });

@@ -119,6 +119,19 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
           error: `options.brollClientPreference must be 'balanced' or 'minimal' (got ${JSON.stringify(prefRaw)})`,
         });
       }
+      // PR-131 Option B: hard client-count cap. Non-negative integer.
+      // 0 = no client picks at all (full-stock); 1+ = cap to N client picks.
+      // Floats and negatives rejected — the cap is a count, not a ratio.
+      const maxClientRaw = body.options.brollMaxClientCount;
+      if (
+        maxClientRaw != null &&
+        (typeof maxClientRaw !== 'number' || !Number.isInteger(maxClientRaw) || maxClientRaw < 0)
+      ) {
+        return res.status(400).json({
+          jobId, step: 'validate',
+          error: 'options.brollMaxClientCount must be a non-negative integer',
+        });
+      }
     }
 
     // PR-I v2: callback shape validation. The async-mode contract requires

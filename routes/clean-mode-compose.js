@@ -171,6 +171,49 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
           });
         }
       }
+      // PR-K: per-job b-roll insertion duration controls. Defaults 6/7/8s
+      // (min/target/max) live at the use sites; the route only validates
+      // shape + the min <= target <= max consistency contract so a bad
+      // body doesn't silently produce contradictory bounds downstream.
+      const checkDurField = (name) => {
+        const v = body.options[name];
+        if (v == null) return null;
+        if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0 || v > 30) {
+          return `options.${name} must be a number in (0, 30]`;
+        }
+        return null;
+      };
+      const minDurErr = checkDurField('brollMinDurationSec');
+      if (minDurErr) return res.status(400).json({ jobId, step: 'validate', error: minDurErr });
+      const targetDurErr = checkDurField('brollTargetDurationSec');
+      if (targetDurErr) return res.status(400).json({ jobId, step: 'validate', error: targetDurErr });
+      const maxDurErr = checkDurField('brollMaxDurationSec');
+      if (maxDurErr) return res.status(400).json({ jobId, step: 'validate', error: maxDurErr });
+      // Consistency: each provided pair must hold min <= target <= max.
+      // We check across whatever subset the caller supplied — undefined
+      // values fall through to defaults at the use sites and don't
+      // participate in the comparison.
+      const minD = body.options.brollMinDurationSec;
+      const targetD = body.options.brollTargetDurationSec;
+      const maxD = body.options.brollMaxDurationSec;
+      if (minD != null && targetD != null && minD > targetD) {
+        return res.status(400).json({
+          jobId, step: 'validate',
+          error: `options.brollMinDurationSec (${minD}) must be <= options.brollTargetDurationSec (${targetD})`,
+        });
+      }
+      if (targetD != null && maxD != null && targetD > maxD) {
+        return res.status(400).json({
+          jobId, step: 'validate',
+          error: `options.brollTargetDurationSec (${targetD}) must be <= options.brollMaxDurationSec (${maxD})`,
+        });
+      }
+      if (minD != null && maxD != null && minD > maxD) {
+        return res.status(400).json({
+          jobId, step: 'validate',
+          error: `options.brollMinDurationSec (${minD}) must be <= options.brollMaxDurationSec (${maxD})`,
+        });
+      }
     }
 
     // PR-I v2: callback shape validation. The async-mode contract requires

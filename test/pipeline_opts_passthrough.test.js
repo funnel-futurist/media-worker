@@ -76,6 +76,10 @@ test('buildPipelineOpts: missing overrides remain undefined (so use-site default
   assert.equal(opts.brollMaxStockRatio, undefined);
   assert.equal(opts.brollClientPreference, undefined);
   assert.equal(opts.brollMaxClientCount, undefined);
+  // PR-K: duration overrides also fall through to use-site defaults when absent
+  assert.equal(opts.brollMinDurationSec, undefined);
+  assert.equal(opts.brollTargetDurationSec, undefined);
+  assert.equal(opts.brollMaxDurationSec, undefined);
 });
 
 test('buildPipelineOpts: handles missing req.options entirely', () => {
@@ -84,9 +88,42 @@ test('buildPipelineOpts: handles missing req.options entirely', () => {
   assert.equal(opts.brollMaxStockRatio, undefined);
   assert.equal(opts.brollClientPreference, undefined);
   assert.equal(opts.brollMaxClientCount, undefined);
+  assert.equal(opts.brollMinDurationSec, undefined);
+  assert.equal(opts.brollTargetDurationSec, undefined);
+  assert.equal(opts.brollMaxDurationSec, undefined);
   // Sanity: legacy fields still resolve to their defaults
   assert.equal(opts.outputWidth, 1080);
   assert.equal(opts.outputHeight, 1920);
+});
+
+// ── PR-K: b-roll duration override pass-through ──────────────────────
+
+test('buildPipelineOpts: passes brollMinDurationSec through from req.options', () => {
+  const opts = buildPipelineOpts({ options: { brollMinDurationSec: 6.0 } });
+  assert.equal(opts.brollMinDurationSec, 6.0);
+});
+
+test('buildPipelineOpts: passes brollTargetDurationSec through from req.options', () => {
+  const opts = buildPipelineOpts({ options: { brollTargetDurationSec: 7.0 } });
+  assert.equal(opts.brollTargetDurationSec, 7.0);
+});
+
+test('buildPipelineOpts: passes brollMaxDurationSec through from req.options', () => {
+  const opts = buildPipelineOpts({ options: { brollMaxDurationSec: 8.0 } });
+  assert.equal(opts.brollMaxDurationSec, 8.0);
+});
+
+test('buildPipelineOpts: passes all three duration overrides simultaneously (canonical PR-K body)', () => {
+  const opts = buildPipelineOpts({
+    options: {
+      brollMinDurationSec: 6.0,
+      brollTargetDurationSec: 7.0,
+      brollMaxDurationSec: 8.0,
+    },
+  });
+  assert.equal(opts.brollMinDurationSec, 6.0);
+  assert.equal(opts.brollTargetDurationSec, 7.0);
+  assert.equal(opts.brollMaxDurationSec, 8.0);
 });
 
 // ── 2. INTEGRATION WITH REBALANCER ───────────────────────────────────

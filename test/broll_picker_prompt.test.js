@@ -97,13 +97,41 @@ test('buildPrompts: PR-G — explicit asset_id-fidelity instruction is present',
 
 test('buildPrompts: density target + variety + duration constraints stay intact (regression guard)', () => {
   // PR-F changed the source-selection rule; existing rules must not have regressed.
+  // PR-K (2026-05-12) bumped insertion duration from [2.5s, 5.0s] → [6.0s, 8.0s]
+  // with a ~7s target. The old short-flash range is no longer the policy.
   const { userPrompt } = buildPrompts({
     transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.4,
   });
   assert.match(userPrompt, /Density target/);
   assert.match(userPrompt, /never reuse the same asset_id/);
-  assert.match(userPrompt, /\[2\.5s, 5\.0s\]/);
+  assert.match(userPrompt, /\[6\.0s, 8\.0s\]/);
+  assert.match(userPrompt, /aim for ~7\.0s/);
   assert.match(userPrompt, /Min 4s spacing/);
+  // The pre-PR-K shorter range is GONE — guard against silent revert.
+  assert.doesNotMatch(userPrompt, /\[2\.5s, 5\.0s\]/);
+});
+
+// ── PR-K: per-job duration overrides ─────────────────────────────────
+
+test('buildPrompts: PR-K — per-job brollMinDurationSec / target / max are substituted into the prompt', () => {
+  const { userPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.4,
+    brollMinDurationSec: 5.0,
+    brollTargetDurationSec: 6.5,
+    brollMaxDurationSec: 9.0,
+  });
+  assert.match(userPrompt, /\[5\.0s, 9\.0s\]/);
+  assert.match(userPrompt, /aim for ~6\.5s/);
+  assert.match(userPrompt, /sub-5\.0s flashes/);
+});
+
+test('buildPrompts: PR-K — when overrides omitted, defaults (6/7/8) appear', () => {
+  const { userPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.4,
+  });
+  assert.match(userPrompt, /\[6\.0s, 8\.0s\]/);
+  assert.match(userPrompt, /aim for ~7\.0s/);
+  assert.match(userPrompt, /sub-6\.0s flashes/);
 });
 
 // ── PR #130: clientPreference modes ─────────────────────────────────
@@ -152,7 +180,8 @@ test("buildPrompts: clientPreference='minimal' keeps the ASSET ID FIDELITY rule 
   assert.match(userPrompt, /ASSET ID FIDELITY/);
   assert.match(userPrompt, /full asset_id/i);
   assert.match(userPrompt, /Min 4s spacing/);
-  assert.match(userPrompt, /\[2\.5s, 5\.0s\]/);
+  // PR-K: duration range is now [6.0s, 8.0s] (was [2.5s, 5.0s] pre-PR-K).
+  assert.match(userPrompt, /\[6\.0s, 8\.0s\]/);
 });
 
 test("buildPrompts: unrecognized clientPreference falls back to 'balanced' (defensive)", () => {

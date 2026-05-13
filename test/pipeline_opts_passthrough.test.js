@@ -139,6 +139,41 @@ test('buildPipelineOpts: passes all three duration overrides simultaneously (can
   assert.equal(opts.brollMaxDurationSec, 8.0);
 });
 
+// ── PR-L: intro hook option pass-through ─────────────────────────────
+
+test('PR-L: introHookEnabled defaults to false (opt-in rollout)', () => {
+  const opts = buildPipelineOpts({ options: {} });
+  assert.equal(opts.introHookEnabled, false);
+});
+
+test('PR-L: introHookEnabled: true flows through', () => {
+  const opts = buildPipelineOpts({ options: { introHookEnabled: true } });
+  assert.equal(opts.introHookEnabled, true);
+});
+
+test('PR-L: introHookEnabled coerces non-boolean to false (defense-in-depth — route also validates)', () => {
+  const opts = buildPipelineOpts({ options: { introHookEnabled: 'yes' } });
+  assert.equal(opts.introHookEnabled, false);
+});
+
+test('PR-L: introDurationSec defaults to 5.0', () => {
+  const opts = buildPipelineOpts({ options: {} });
+  assert.equal(opts.introDurationSec, 5.0);
+});
+
+test('PR-L: introDurationSec custom value flows through', () => {
+  const opts = buildPipelineOpts({ options: { introDurationSec: 7.5 } });
+  assert.equal(opts.introDurationSec, 7.5);
+});
+
+test('PR-L: both intro fields together (full PR-L body)', () => {
+  const opts = buildPipelineOpts({
+    options: { introHookEnabled: true, introDurationSec: 4.0 },
+  });
+  assert.equal(opts.introHookEnabled, true);
+  assert.equal(opts.introDurationSec, 4.0);
+});
+
 // ── 2. INTEGRATION WITH REBALANCER ───────────────────────────────────
 // The exact failure mode that motivated this PR: route accepts a body,
 // pipeline builds opts, opts.brollMaxClientCount flows into the

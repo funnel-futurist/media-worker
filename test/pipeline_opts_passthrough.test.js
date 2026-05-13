@@ -94,6 +94,19 @@ test('buildPipelineOpts: handles missing req.options entirely', () => {
   // Sanity: legacy fields still resolve to their defaults
   assert.equal(opts.outputWidth, 1080);
   assert.equal(opts.outputHeight, 1920);
+  // PR-N: brollDensity default is now 0.55 (was 0.35 pre-PR-N).
+  // Lock the value so a silent revert breaks this test.
+  assert.equal(opts.brollDensity, 0.55);
+});
+
+test('PR-N: per-job brollDensity override wins over the 0.55 default', () => {
+  const opts = buildPipelineOpts({ options: { brollDensity: 0.7 } });
+  assert.equal(opts.brollDensity, 0.7);
+});
+
+test('PR-N: brollDensity falls back to 0.55 when options.brollDensity is missing', () => {
+  const opts = buildPipelineOpts({ options: {} });
+  assert.equal(opts.brollDensity, 0.55);
 });
 
 // ── PR-K: b-roll duration override pass-through ──────────────────────

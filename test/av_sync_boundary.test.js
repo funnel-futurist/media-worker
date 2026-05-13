@@ -171,3 +171,66 @@ test('checkStreamSyncDurations: float-noise cases at exact boundary all pass', (
     assert.equal(result.va, 0.200, `rounded drift should be 0.200`);
   }
 });
+
+// ── PR-P: 250ms tolerance — recalibrated after PR-K's longer insertions ──
+// 2026-05-13: Phil row 0056ba10 (jobId 6c41f004) failed at the compose
+// step with |video-audio|=0.219s against the old 0.2s tolerance. PR-K's
+// 6-8s b-roll insertions (up from 2.5-5s) push ffmpeg trim+concat to
+// accumulate ~10-20ms more drift per insertion. 0.25s absorbs that
+// without going beyond the human ~250ms perception threshold for
+// talking-head dialogue. These four tests lock the new boundary.
+
+test('PR-P: 0.219s drift (real Phil row 0056ba10 failure) passes at 0.25 tolerance', () => {
+  // The actual production failure that motivated this bump:
+  // video=110.520s, audio=110.301s, container=110.520s,
+  // |video-audio|=0.219s on brolled.mp4.
+  const result = checkStreamSyncDurations({
+    videoSec: 110.520,
+    audioSec: 110.301,
+    containerSec: 110.520,
+    toleranceSec: 0.25,
+  });
+  assert.equal(result.withinTolerance, true,
+    'real-world 219ms drift on Phil row should pass at the new 0.25s tolerance');
+  assert.equal(result.va, 0.219);
+});
+
+test('PR-P: 0.249s drift (just under new tolerance) passes at 0.25 tolerance', () => {
+  // Boundary case just under the new gate. Should pass cleanly.
+  const result = checkStreamSyncDurations({
+    videoSec: 100.000,
+    audioSec: 100.249,
+    containerSec: 100.249,
+    toleranceSec: 0.25,
+  });
+  assert.equal(result.withinTolerance, true);
+  assert.equal(result.va, 0.249);
+});
+
+test('PR-P: 0.251s drift (just over new tolerance) fails at 0.25 tolerance', () => {
+  // Boundary case just over the new gate. Must still trip — the safety
+  // function of the check (catch genuine compose desync) is preserved.
+  const result = checkStreamSyncDurations({
+    videoSec: 100.000,
+    audioSec: 100.251,
+    containerSec: 100.251,
+    toleranceSec: 0.25,
+  });
+  assert.equal(result.withinTolerance, false);
+  assert.equal(result.va, 0.251);
+});
+
+test('PR-P: 1.0s drift (m2-e2e-004 catastrophic-desync case) still fails at 0.25 tolerance', () => {
+  // The original failure this check was built to catch: ffmpeg compose
+  // producing a video stream 1+ second shorter than audio. The bump
+  // must not weaken protection against this.
+  const result = checkStreamSyncDurations({
+    videoSec: 100.000,
+    audioSec: 101.000,
+    containerSec: 101.000,
+    toleranceSec: 0.25,
+  });
+  assert.equal(result.withinTolerance, false,
+    'catastrophic 1s desync must still fail at 0.25s tolerance');
+  assert.equal(result.va, 1.000);
+});

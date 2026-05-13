@@ -20,6 +20,7 @@ import {
   validateHookText,
   generateHookText,
   FLASH_FALLBACK_MODEL,
+  extractJsonObject,
 } from '../lib/hook_generate.js';
 
 // Realistic transcript for prompt-substitution tests.
@@ -516,4 +517,206 @@ test('generateHookText: never throws on any failure path', async () => {
   // If the orchestrator stops doing that, we'd want to wrap inside
   // generateHookText too. For now, assert today's behavior:
   assert.equal(threw, true, 'callGemini throws propagate to caller; orchestrator must catch');
+});
+
+// ── PR-V: defensive JSON extraction ─────────────────────────────────
+// Real-world failure motivating this: jobId af9bdd6c on 2026-05-13.
+// Gemini 2.5 Flash returned "Here is the JSON request" before the JSON
+// even though responseMimeType: 'application/json' was set. The strict
+// JSON.parse fails on prose-wrapped output. extractJsonObject pulls
+// the first balanced {...} substring and retries parse.
+
+// extractJsonObject: pure helper tests
+
+test('PR-V extractJsonObject: clean JSON object returns itself', () => {
+  assert.equal(extractJsonObject('{"hookText": "Plan Early"}'), '{"hookText": "Plan Early"}');
+});
+
+test('PR-V extractJsonObject: prose preamble — extracts the JSON substring', () => {
+  // The exact failure mode from jobId af9bdd6c (Flash response).
+  const out = extractJsonObject('Here is the JSON request: {"hookText": "Plan Early"}');
+  assert.equal(out, '{"hookText": "Plan Early"}');
+});
+
+test('PR-V extractJsonObject: markdown fence (```json ... ```) — extracts the JSON', () => {
+  const text = '```json\n{"hookText": "Plan Early"}\n```';
+  assert.equal(extractJsonObject(text), '{"hookText": "Plan Early"}');
+});
+
+test('PR-V extractJsonObject: trailing prose — extracts only the object', () => {
+  const out = extractJsonObject('{"hookText": "Plan Early"} — hope this helps!');
+  assert.equal(out, '{"hookText": "Plan Early"}');
+});
+
+test('PR-V extractJsonObject: surrounding prose + trailing — extracts only the object', () => {
+  const out = extractJsonObject(
+    'Sure! Here is your hook: {"hookText": "Plan Early"} let me know if you need more.',
+  );
+  assert.equal(out, '{"hookText": "Plan Early"}');
+});
+
+test('PR-V extractJsonObject: object with string containing } — string-aware brace tracking', () => {
+  // The closing brace inside the string must NOT prematurely close the object.
+  const text = '{"hookText": "Plan now }for{ summer"}';
+  assert.equal(extractJsonObject(text), text);
+});
+
+test('PR-V extractJsonObject: object with escaped quotes — escape-aware scanning', () => {
+  const text = '{"hookText": "She said \\"plan now\\" loudly"}';
+  assert.equal(extractJsonObject(text), text);
+});
+
+test('PR-V extractJsonObject: nested object — extracts the OUTER balanced span', () => {
+  const text = '{"hookText": "Plan Early", "meta": {"src": "transcript"}}';
+  assert.equal(extractJsonObject(text), text);
+});
+
+test('PR-V extractJsonObject: unbalanced opening brace (truncated `{`) returns null', () => {
+  assert.equal(extractJsonObject('{'), null);
+});
+
+test('PR-V extractJsonObject: no opening brace anywhere returns null', () => {
+  assert.equal(extractJsonObject('just some prose with no JSON anywhere'), null);
+  assert.equal(extractJsonObject(''), null);
+});
+
+test('PR-V extractJsonObject: non-string input returns null', () => {
+  assert.equal(extractJsonObject(null), null);
+  assert.equal(extractJsonObject(undefined), null);
+  assert.equal(extractJsonObject(42), null);
+});
+
+// generateHookText integration: end-to-end through _tryOneModel
+
+test('PR-V integration: clean JSON parses directly without invoking extractor', async () => {
+  // Smoke test — happy path still works unchanged.
+  const r = await generateHookText({
+    transcriptText: TRANSCRIPT,
+    apiKey: 'k',
+    callGemini: fakeOk({ hookText: 'Plan Early This Summer' }),
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.hookText, 'Plan Early This Summer');
+});
+
+test('PR-V integration: prose-wrapped JSON from Pro is rescued by extractor → ok:true', async () => {
+  // Pre-PR-V: this would have failed with invalid_json.
+  // Post-PR-V: extractor pulls out the {...}, parse succeeds, returns Pro result.
+  const proResp = {
+    ok: true,
+    data: {
+      candidates: [
+        { content: { parts: [{ text: 'Here is the JSON request: {"hookText": "Plan Early Beat The Rush"}' }] } },
+      ],
+    },
+  };
+  const r = await generateHookText({
+    transcriptText: TRANSCRIPT,
+    apiKey: 'k',
+    callGemini: async () => proResp,
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.hookText, 'Plan Early Beat The Rush');
+  assert.equal(r.model, 'gemini-3.1-pro-preview', 'rescued at Pro — Flash should NOT be called');
+});
+
+test('PR-V integration: markdown-fenced JSON from Pro is rescued by extractor', async () => {
+  const proResp = {
+    ok: true,
+    data: {
+      candidates: [
+        { content: { parts: [{ text: '```json\n{"hookText": "One Call Changes Everything"}\n```' }] } },
+      ],
+    },
+  };
+  const r = await generateHookText({
+    transcriptText: TRANSCRIPT,
+    apiKey: 'k',
+    callGemini: async () => proResp,
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.hookText, 'One Call Changes Everything');
+});
+
+test('PR-V integration: prose-wrapped JSON from Flash fallback is rescued (real af9bdd6c case)', async () => {
+  // The exact production failure that motivated PR-V:
+  //   Pro: network_error (Gemini Pro down)
+  //   Flash: returned "Here is the JSON request: {...}"
+  // Post-PR-V: Pro fails → Flash retry → extractor rescues Flash's prose-
+  // wrapped output → Flash result returned → hook applied downstream.
+  const r = await generateHookText({
+    transcriptText: TRANSCRIPT,
+    apiKey: 'k',
+    callGemini: fakeBranching({
+      proResp: fakeGeminiNetErr(),
+      flashResp: {
+        ok: true,
+        data: {
+          candidates: [
+            { content: { parts: [{ text: 'Here is the JSON request: {"hookText": "Plan Early Save Stress"}' }] } },
+          ],
+        },
+      },
+    }),
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.hookText, 'Plan Early Save Stress');
+  assert.equal(r.model, FLASH_FALLBACK_MODEL, 'Flash produced the rescued hook');
+});
+
+test('PR-V integration: truly malformed (no {...} anywhere) still fails with invalid_json', async () => {
+  const proResp = {
+    ok: true,
+    data: { candidates: [{ content: { parts: [{ text: 'just chatter, no json here at all' }] } }] },
+  };
+  const r = await generateHookText({
+    transcriptText: TRANSCRIPT,
+    apiKey: 'k',
+    enableFlashFallback: false, // isolate to direct path for clarity
+    callGemini: async () => proResp,
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'invalid_json');
+  assert.match(r.detail, /no extractable/);
+});
+
+test("PR-V integration: extracted substring still fails JSON.parse (e.g. broken syntax inside) → invalid_json", async () => {
+  // Extractor finds a BALANCED {...} (braces match) but the content
+  // inside is not valid JSON syntax (unquoted bareword). Both direct
+  // AND extracted parses fail → invalid_json with both reasons in detail.
+  const proResp = {
+    ok: true,
+    data: { candidates: [{ content: { parts: [{ text: 'Here: {bareword}' }] } }] },
+  };
+  const r = await generateHookText({
+    transcriptText: TRANSCRIPT,
+    apiKey: 'k',
+    enableFlashFallback: false,
+    callGemini: async () => proResp,
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'invalid_json');
+  // Detail mentions both failures: direct parse + extracted parse.
+  assert.match(r.detail, /direct.*extracted/);
+});
+
+test('PR-V integration: rescued JSON still goes through validateHookText → out-of-spec hooks rejected', async () => {
+  // Extract works, parse works, but the rescued hook violates spec
+  // (>8 words). Validator catches it → invalid_hook_text, no quality loss.
+  const proResp = {
+    ok: true,
+    data: {
+      candidates: [
+        { content: { parts: [{ text: 'Here: {"hookText": "One Two Three Four Five Six Seven Eight Nine"}' }] } },
+      ],
+    },
+  };
+  const r = await generateHookText({
+    transcriptText: TRANSCRIPT,
+    apiKey: 'k',
+    enableFlashFallback: false,
+    callGemini: async () => proResp,
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'invalid_hook_text');
 });

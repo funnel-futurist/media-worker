@@ -214,6 +214,25 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
           error: `options.brollMinDurationSec (${minD}) must be <= options.brollMaxDurationSec (${maxD})`,
         });
       }
+      // PR-L: intro hook validation. introHookEnabled is a boolean opt-in;
+      // introDurationSec is a number in (0, 15]. Both default to off / 5.0
+      // at the use site (buildPipelineOpts).
+      const introEnabledRaw = body.options.introHookEnabled;
+      if (introEnabledRaw != null && typeof introEnabledRaw !== 'boolean') {
+        return res.status(400).json({
+          jobId, step: 'validate',
+          error: 'options.introHookEnabled must be a boolean',
+        });
+      }
+      const introDurRaw = body.options.introDurationSec;
+      if (introDurRaw != null) {
+        if (typeof introDurRaw !== 'number' || !Number.isFinite(introDurRaw) || introDurRaw <= 0 || introDurRaw > 15) {
+          return res.status(400).json({
+            jobId, step: 'validate',
+            error: 'options.introDurationSec must be a number in (0, 15]',
+          });
+        }
+      }
     }
 
     // PR-I v2: callback shape validation. The async-mode contract requires

@@ -95,20 +95,101 @@ test('buildPrompts: PR-G — explicit asset_id-fidelity instruction is present',
   assert.match(userPrompt, /full asset_id/i);
 });
 
-test('buildPrompts: density target + variety + duration constraints stay intact (regression guard)', () => {
+test('buildPrompts: coverage floor + variety + duration constraints stay intact (regression guard)', () => {
   // PR-F changed the source-selection rule; existing rules must not have regressed.
   // PR-K (2026-05-12) bumped insertion duration from [2.5s, 5.0s] → [6.0s, 8.0s]
-  // with a ~7s target. The old short-flash range is no longer the policy.
+  // with a ~7s target.
+  // PR-N (2026-05-12) reframed density as a FLOOR (not target) and replaced
+  // "Density target" wording with "Minimum b-roll coverage". Lock the new
+  // anchors so a future rewrite can't silently revert.
   const { userPrompt } = buildPrompts({
     transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.4,
   });
-  assert.match(userPrompt, /Density target/);
+  assert.match(userPrompt, /Minimum b-roll coverage/);
+  assert.match(userPrompt, /this is a FLOOR, not a target/);
   assert.match(userPrompt, /never reuse the same asset_id/);
   assert.match(userPrompt, /\[6\.0s, 8\.0s\]/);
   assert.match(userPrompt, /aim for ~7\.0s/);
   assert.match(userPrompt, /Min 4s spacing/);
-  // The pre-PR-K shorter range is GONE — guard against silent revert.
+  // The pre-PR-K shorter range is GONE.
   assert.doesNotMatch(userPrompt, /\[2\.5s, 5\.0s\]/);
+  // The pre-PR-N "Density target" wording is GONE.
+  assert.doesNotMatch(userPrompt, /Density target/);
+});
+
+// ── PR-N: opportunity-driven b-roll selection ────────────────────────
+
+test('buildPrompts: PR-N — B-ROLL-WORTHY criteria list present (illustrate / metaphor / emotion / static stretch)', () => {
+  const { userPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.55,
+  });
+  assert.match(userPrompt, /B-ROLL-WORTHY/);
+  // The four worthy-moment criteria — anchors so the policy doesn't drift.
+  assert.match(userPrompt, /Illustrate something the speaker references/i);
+  assert.match(userPrompt, /abstract concept concrete via metaphor/i);
+  assert.match(userPrompt, /emotional beat/i);
+  assert.match(userPrompt, /long talking-head stretch/i);
+});
+
+test('PR-N: BETTER ON SPEAKER FACE criteria list present (expression / direct address / intimate / connective)', () => {
+  const { userPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.55,
+  });
+  assert.match(userPrompt, /BETTER ON SPEAKER FACE/);
+  assert.match(userPrompt, /speaker's expression IS the visual/i);
+  assert.match(userPrompt, /direct address to the viewer/i);
+  assert.match(userPrompt, /intimate and emotionally charged/i);
+  assert.match(userPrompt, /short connective phrase/i);
+});
+
+test('PR-N: coverage framed as FLOOR with no upper cap, exceed when script supports more', () => {
+  const { userPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.55,
+  });
+  assert.match(userPrompt, /COVERAGE FLOOR/);
+  assert.match(userPrompt, /AT LEAST/);
+  assert.match(userPrompt, /NO upper cap/i);
+  assert.match(userPrompt, /exceed the floor/i);
+  // Stop-at-floor language for low-opportunity scripts.
+  assert.match(userPrompt, /stop at the floor/i);
+});
+
+test('PR-N: ANTI-PADDING rule present (weak/generic/repetitive picks not allowed to hit floor)', () => {
+  const { userPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.55,
+  });
+  assert.match(userPrompt, /ANTI-PADDING/);
+  assert.match(userPrompt, /weak, generic, or repetitive/i);
+  assert.match(userPrompt, /Leaving the speaker on screen is ALWAYS better/i);
+  // Variety-by-concept (not just by asset_id) — repetition isn't just about IDs.
+  assert.match(userPrompt, /Repetitive picks/i);
+});
+
+test('PR-N: pre-PR-N restrictive language is GONE (abstract claims, transitions ban, density target)', () => {
+  // These three phrases pre-PR-N actively suppressed exactly the kinds
+  // of moments Shannon wants covered. Regression guard against silent
+  // revert.
+  const { userPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.55,
+  });
+  assert.doesNotMatch(userPrompt, /Pick brolls only at moments where the visual genuinely explains/i);
+  assert.doesNotMatch(userPrompt, /Do NOT insert during transitions, abstract claims, or pure talky moments/i);
+  assert.doesNotMatch(userPrompt, /Density target: ~/);
+});
+
+test('PR-N: floor value scales with brollDensity (per-job override still substitutes)', () => {
+  // Override should flow into the "Minimum b-roll coverage" line.
+  const { userPrompt: low } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 100, brollDensity: 0.3,
+  });
+  const { userPrompt: high } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 100, brollDensity: 0.7,
+  });
+  assert.match(low, /Minimum b-roll coverage: ~30\.00s.*\(30% of total\)/);
+  assert.match(high, /Minimum b-roll coverage: ~70\.00s.*\(70% of total\)/);
+  // Both still say it's a floor.
+  assert.match(low, /FLOOR, not a target/);
+  assert.match(high, /FLOOR, not a target/);
 });
 
 // ── PR-K: per-job duration overrides ─────────────────────────────────

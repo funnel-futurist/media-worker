@@ -19,6 +19,7 @@ import {
   buildHookPrompts,
   validateHookText,
   generateHookText,
+  FLASH_FALLBACK_MODEL,
 } from '../lib/hook_generate.js';
 
 // Realistic transcript for prompt-substitution tests.
@@ -265,6 +266,235 @@ test('generateHookText: hookText with question mark → invalid_hook_text', asyn
   });
   // Trailing question would also fail; pure mid-string ? is rejected too.
   assert.equal(r.ok, true); // no question mark in the text actually — let me re-do
+});
+
+// ── PR-U: Gemini Flash fallback ─────────────────────────────────────
+// Pro is the primary path; Flash is invoked ONLY when Pro fails with a
+// retryable reason (network_error, 429, 5xx, invalid_json, invalid_hook_text,
+// no_candidate). Non-retryable reasons (missing_api_key, empty_transcript)
+// skip Flash entirely because Flash won't fix those.
+
+test('PR-U: FLASH_FALLBACK_MODEL exports the expected default', () => {
+  // Snapshot lock: if Shannon wants to change the Flash model, update
+  // here AND verify the new model id resolves on Gemini's models endpoint.
+  assert.equal(FLASH_FALLBACK_MODEL, 'gemini-2.5-flash');
+});
+
+// Helper: build a callGemini mock that branches on the `model` arg so a
+// single mock can serve both the Pro attempt and the Flash retry. Each
+// branch can independently return ok/fail.
+function fakeBranching({ proResp, flashResp }) {
+  return async (sys, user, model) => {
+    if (model === FLASH_FALLBACK_MODEL) {
+      return flashResp ?? { ok: false, status: 0, body: 'flash branch not configured' };
+    }
+    return proResp ?? { ok: false, status: 0, body: 'pro branch not configured' };
+  };
+}
+
+function fakeGeminiOk(jsonShape) {
+  return { ok: true, data: { candidates: [{ content: { parts: [{ text: JSON.stringify(jsonShape) }] } }] } };
+}
+function fakeGeminiNetErr() {
+  return { ok: false, status: 0, body: 'ETIMEDOUT' };
+}
+function fakeGemini503() {
+  return { ok: false, status: 503, body: 'overloaded' };
+}
+function fakeGemini400() {
+  return { ok: false, status: 400, body: 'bad request' };
+}
+
+test('PR-U: Pro succeeds → Flash never called → returns Pro hookText + Pro model id', async () => {
+  let flashCalled = false;
+  const r = await generateHookText({
+    transcriptText: TRANSCRIPT,
+    apiKey: 'k',
+    callGemini: async (sys, user, model) => {
+      if (model === FLASH_FALLBACK_MODEL) { flashCalled = true; }
+      return fakeGeminiOk({ hookText: 'Planning Mistake Families Keep Making' });
+    },
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.hookText, 'Planning Mistake Families Keep Making');
+  assert.equal(r.model, 'gemini-3.1-pro-preview');
+  assert.equal(flashCalled, false, 'Flash must NOT be called when Pro succeeded');
+});
+
+test('PR-U: Pro fails network_error → Flash succeeds → returns Flash hookText + Flash model id', async () => {
+  const r = await generateHookText({
+    transcriptText: TRANSCRIPT,
+    apiKey: 'k',
+    callGemini: fakeBranching({
+      proResp: fakeGeminiNetErr(),
+      flashResp: fakeGeminiOk({ hookText: 'Quick Planning Saves Summer Stress' }),
+    }),
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.hookText, 'Quick Planning Saves Summer Stress');
+  assert.equal(r.model, FLASH_FALLBACK_MODEL, 'response.model surfaces which model produced the live hook');
+});
+
+test('PR-U: Pro fails gemini_503 → Flash succeeds → returns Flash result', async () => {
+  // Today's exact failure mode: Pro returns "This model is currently
+  // experiencing high demand". Flash should pick up.
+  const r = await generateHookText({
+    transcriptText: TRANSCRIPT,
+    apiKey: 'k',
+    callGemini: fakeBranching({
+      proResp: fakeGemini503(),
+      flashResp: fakeGeminiOk({ hookText: 'Plan Early Beat Summer Rush' }),
+    }),
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.hookText, 'Plan Early Beat Summer Rush');
+  assert.equal(r.model, FLASH_FALLBACK_MODEL);
+});
+
+test('PR-U: Pro fails invalid_json (truncated `{`) → Flash succeeds → returns Flash result', async () => {
+  // The exact failure we saw on jobId 7fb18534 today: Gemini Pro returned
+  // literally `{` and the JSON parse failed. Flash retries cleanly.
+  const r = await generateHookText({
+    transcriptText: TRANSCRIPT,
+    apiKey: 'k',
+    callGemini: fakeBranching({
+      proResp: { ok: true, data: { candidates: [{ content: { parts: [{ text: '{' }] } }] } },
+      flashResp: fakeGeminiOk({ hookText: 'Why Families Wait Too Long' }),
+    }),
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.hookText, 'Why Families Wait Too Long');
+  assert.equal(r.model, FLASH_FALLBACK_MODEL);
+});
+
+test('PR-U: Pro fails invalid_hook_text (model returned 10 words) → Flash succeeds with valid hook', async () => {
+  const r = await generateHookText({
+    transcriptText: TRANSCRIPT,
+    apiKey: 'k',
+    callGemini: fakeBranching({
+      proResp: fakeGeminiOk({ hookText: 'One Two Three Four Five Six Seven Eight Nine Ten' }),
+      flashResp: fakeGeminiOk({ hookText: 'Plan Early Beat The Rush' }),
+    }),
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.model, FLASH_FALLBACK_MODEL);
+});
+
+test('PR-U: Pro fails AND Flash fails → ok:false with triedFlash:true + both reasons in detail', async () => {
+  const r = await generateHookText({
+    transcriptText: TRANSCRIPT,
+    apiKey: 'k',
+    callGemini: fakeBranching({
+      proResp: fakeGeminiNetErr(),
+      flashResp: fakeGemini503(),
+    }),
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'network_error', 'primary reason from the Pro attempt');
+  assert.equal(r.triedFlash, true, 'triedFlash flag tells the orchestrator both models failed');
+  // Detail surfaces the secondary Flash reason too so logs/diagnostics
+  // make both failures visible.
+  assert.match(r.detail, /flash_fallback_gemini_503/);
+});
+
+test('PR-U: Pro fails non-retryable (gemini_400) → Flash NOT called (4xx other than 429 won\'t help)', async () => {
+  let flashCalled = false;
+  const r = await generateHookText({
+    transcriptText: TRANSCRIPT,
+    apiKey: 'k',
+    callGemini: async (sys, user, model) => {
+      if (model === FLASH_FALLBACK_MODEL) { flashCalled = true; }
+      return model === FLASH_FALLBACK_MODEL ? fakeGeminiOk({ hookText: 'Should Not Reach Here' }) : fakeGemini400();
+    },
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'gemini_400');
+  assert.equal(flashCalled, false, 'gemini_400 is a request-shape bug; Flash won\'t fix it');
+  assert.notEqual(r.triedFlash, true);
+});
+
+test('PR-U: Pro fails gemini_429 → Flash IS called (rate limit on Pro doesn\'t affect Flash quota)', async () => {
+  let flashCalled = false;
+  const r = await generateHookText({
+    transcriptText: TRANSCRIPT,
+    apiKey: 'k',
+    callGemini: async (sys, user, model) => {
+      if (model === FLASH_FALLBACK_MODEL) {
+        flashCalled = true;
+        return fakeGeminiOk({ hookText: 'Plan Now Save Stress Later' });
+      }
+      return { ok: false, status: 429, body: 'rate limited' };
+    },
+  });
+  assert.equal(r.ok, true);
+  assert.equal(flashCalled, true);
+  assert.equal(r.model, FLASH_FALLBACK_MODEL);
+});
+
+test('PR-U: enableFlashFallback:false disables Flash entirely → returns Pro\'s failure unchanged', async () => {
+  let flashCalled = false;
+  const r = await generateHookText({
+    transcriptText: TRANSCRIPT,
+    apiKey: 'k',
+    enableFlashFallback: false,
+    callGemini: async (sys, user, model) => {
+      if (model === FLASH_FALLBACK_MODEL) { flashCalled = true; }
+      return fakeGeminiNetErr();
+    },
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'network_error');
+  assert.equal(flashCalled, false);
+  assert.notEqual(r.triedFlash, true);
+});
+
+test('PR-U: empty transcript → Flash NOT called (non-retryable input error)', async () => {
+  let flashCalled = false;
+  const r = await generateHookText({
+    transcriptText: '',
+    apiKey: 'k',
+    callGemini: async (sys, user, model) => {
+      if (model === FLASH_FALLBACK_MODEL) { flashCalled = true; }
+      return fakeGeminiOk({ hookText: 'Should Not Reach' });
+    },
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'empty_transcript');
+  assert.equal(flashCalled, false);
+});
+
+test('PR-U: custom flashFallbackModel param is honored', async () => {
+  let modelSeen = null;
+  const r = await generateHookText({
+    transcriptText: TRANSCRIPT,
+    apiKey: 'k',
+    flashFallbackModel: 'gemini-2.0-flash',
+    callGemini: async (sys, user, model) => {
+      if (model !== 'gemini-3.1-pro-preview') {
+        modelSeen = model;
+        return fakeGeminiOk({ hookText: 'Plan Early Now' });
+      }
+      return fakeGeminiNetErr();
+    },
+  });
+  assert.equal(r.ok, true);
+  assert.equal(modelSeen, 'gemini-2.0-flash');
+  assert.equal(r.model, 'gemini-2.0-flash');
+});
+
+test('PR-U: callGemini receives modelName as 3rd arg (backward-compatible — old tests ignore it)', async () => {
+  // Locks the new signature so tests + production helpers can branch on
+  // model when needed.
+  let receivedModel = null;
+  await generateHookText({
+    transcriptText: TRANSCRIPT,
+    apiKey: 'k',
+    callGemini: async (sys, user, model) => {
+      receivedModel = model;
+      return fakeGeminiOk({ hookText: 'Plan Early Save Time' });
+    },
+  });
+  assert.equal(receivedModel, 'gemini-3.1-pro-preview', 'Pro is called first with its model id passed');
 });
 
 test('generateHookText: never throws on any failure path', async () => {

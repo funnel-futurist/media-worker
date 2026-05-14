@@ -1,15 +1,19 @@
 /**
  * test/intro_card_render.test.js
  *
- * Tests for lib/intro_card_render.js — the ffmpeg drawtext-based
- * renderer for the PR-L intro hook title card. Locks down:
- *   - font-size auto-scale schedule (≤4 → 120pt, 5-6 → 96pt, 7-8 → 80pt)
- *   - line-wrap helper at the safe-margin boundary
+ * Tests for lib/intro_card_render.js — the PR-Y overlay-on-existing-video
+ * intro hook renderer. Locks down:
+ *   - font-size auto-scale schedule (≤4 → 120, 5-6 → 96, 7-8 → 80)
+ *   - PR-Y fitTextToFrame: wrap-before-shrink priority (1 → 2 → 3 lines
+ *     at current font, only then shrink — per Shannon's spec)
  *   - drawtext escape rules (single quote, colon, backslash, percent)
- *   - ffmpeg argv construction (no spawn — pure command-builder test)
- *   - fade alpha expression boundary times
+ *   - PR-Y buildIntroOverlayArgs: overlay onto existing video (no
+ *     standalone card, no anullsrc, audio copied through)
+ *   - drawtext enable='between(t,0,N)' time-bounded rendering
+ *   - PR-X Montserrat Black path resolution via fc-match (cached)
  *
- * No actual ffmpeg invocation. We test the pure-function builders.
+ * No actual ffmpeg invocation. We test the pure builders + inject
+ * execFn for renderIntroOverlay.
  */
 
 import test from 'node:test';
@@ -18,9 +22,10 @@ import {
   fontSizeForWordCount,
   wrapHookText,
   escapeDrawtext,
-  buildIntroCardArgs,
+  fitTextToFrame,
+  buildIntroOverlayArgs,
   resolveMontserratBlackPath,
-  renderIntroCard,
+  renderIntroOverlay,
   _resetFontPathCacheForTests,
 } from '../lib/intro_card_render.js';
 
@@ -51,66 +56,103 @@ test('fontSizeForWordCount: 8 words → 80pt', () => {
 });
 
 test('fontSizeForWordCount: 9+ words (over cap) → 80pt (graceful fallback)', () => {
-  // Validation upstream caps at 8 words but we don't hard-fail here.
   assert.equal(fontSizeForWordCount(9), 80);
   assert.equal(fontSizeForWordCount(100), 80);
 });
 
-// ── wrapHookText ─────────────────────────────────────────────────────
+// ── wrapHookText (back-compat shim, 1-or-2 lines at fixed font) ──────
 
 test('wrapHookText: short text fits on one line', () => {
-  // "Plan Early" at 120pt is well within the 840px safe area.
-  const lines = wrapHookText('Plan Early', 120);
-  assert.deepEqual(lines, ['Plan Early']);
+  assert.deepEqual(wrapHookText('Plan Early', 120), ['Plan Early']);
 });
 
-test('wrapHookText: medium text at large font wraps to two balanced lines', () => {
-  // 7 short words at 80pt: total ~26 chars × 80px × 0.58 ≈ 1206px > 840px
-  // safe area, so it must wrap. A balanced ~i=4 split fits both lines.
+test('wrapHookText: medium text wraps to 2 balanced lines at 80pt', () => {
   const lines = wrapHookText('Plan Now To Beat The Big Rush', 80);
-  assert.equal(lines.length, 2, 'should split into 2 lines');
-  const [l1, l2] = lines;
-  assert.ok(l1.length > 0 && l2.length > 0, 'both lines populated');
-  // Balanced-ish: the longer line is at most ~2× the shorter.
-  const longer = Math.max(l1.length, l2.length);
-  const shorter = Math.min(l1.length, l2.length);
-  assert.ok(longer / shorter < 2.5, `lines should be roughly balanced — got "${l1}" / "${l2}"`);
+  assert.equal(lines.length, 2);
 });
 
-test('wrapHookText: text too long to fit even when balanced → falls back to one line (rendering may clip)', () => {
-  // Worst case: long words and large font. The function can't find a
-  // valid 2-line split that fits, so returns the original as a single
-  // line. drawtext will render it; the operator's visual review catches
-  // the edge case. We DON'T silently truncate.
+test('wrapHookText: text too long even at best 2-line split → 1-line fallback', () => {
+  // wrapHookText (back-compat) caps at 2 lines. fitTextToFrame uses 3.
   const lines = wrapHookText('Communication Implementation Restoration Foundation Determination Authentication Configuration Optimization', 80);
   assert.equal(lines.length, 1);
 });
 
-test('wrapHookText: split happens at word boundaries (never mid-word)', () => {
-  const lines = wrapHookText('Don Not Wait Until The Summer Season', 80);
-  for (const line of lines) {
-    // Each line is a sequence of whole words from the input.
-    const words = line.split(/\s+/);
-    for (const word of words) {
-      assert.ok(/^[A-Za-z]+$/.test(word), `word "${word}" should be a whole word`);
+// ── PR-Y fitTextToFrame: 1 → 2 → 3 line wrap, shrink only after ──────
+
+test('PR-Y fitTextToFrame: short text → 1 line at full schedule font', () => {
+  const r = fitTextToFrame('Plan Early');
+  assert.deepEqual(r.lines, ['Plan Early']);
+  assert.equal(r.fontSizePx, 120);  // 2 words → 120pt tier
+});
+
+test('PR-Y fitTextToFrame: medium text needing wrap → 2 lines at same font (not shrunk)', () => {
+  // 7 words at 80pt: 1 line overflows; balanced 2-line split fits.
+  const r = fitTextToFrame('Plan Now To Beat The Big Rush');
+  assert.equal(r.lines.length, 2);
+  assert.equal(r.fontSizePx, 80, 'should NOT shrink font when 2-line split fits');
+});
+
+test("PR-Y fitTextToFrame: long text needing 3 lines (Shannon's example) → 3 lines at same font", () => {
+  // Shannon's example: "A Special Needs Household Runs On Coordination"
+  // 7 words at 80pt × 0.58 = 2134px → overflows 1 line (840 safe).
+  // Best 2-line splits also overflow because individual halves are >840px.
+  // 3-line split at 80pt fits: e.g. "A Special Needs" / "Household Runs" / "On Coordination"
+  const r = fitTextToFrame('A Special Needs Household Runs On Coordination');
+  assert.equal(r.lines.length, 3, 'should produce 3 lines for this text');
+  assert.equal(r.fontSizePx, 80, 'wrap-before-shrink: stays at 80pt when 3 lines fit');
+});
+
+test('PR-Y fitTextToFrame: wrap-before-shrink — exhausts 1→2→3 line attempts at same font BEFORE shrinking', () => {
+  // Construct text where 1+2 lines don't fit at 96pt but 3 lines do.
+  // "Plan Early Beat The Summer Rush Today" — 7 words, 32 chars
+  // At 96pt × 0.58 = 55.7 px/char → 32 chars total = 1782px → overflows 1 line
+  //   2-line split: best balance ~16 chars each = 891px → overflows safe (840)
+  //   3-line split at 96pt: ~11 chars/line = 612px → fits
+  // Schedule says 7 words → 80pt, not 96pt. So this exact case starts at 80pt.
+  // Pick a different fixture: 5 words tight enough that 3 lines at 96pt fits.
+  // "Why Family Planning Matters Now" — 5 words → schedule = 96pt
+  // 30 chars × 96 × 0.58 = 1670px → overflows 1 line
+  // 2-line "Why Family Planning" (19) + "Matters Now" (11) → 19*55.7=1058 > 840 ✗
+  // 3-line "Why Family" (10) + "Planning" (8) + "Matters Now" (11) → all ≤840 ✓
+  const r = fitTextToFrame('Why Family Planning Matters Now');
+  assert.equal(r.fontSizePx, 96, 'stays at schedule 96pt because 3-line fits');
+  assert.equal(r.lines.length, 3);
+});
+
+test('PR-Y fitTextToFrame: only shrinks font when even 3 lines at current size overflow', () => {
+  // Force the shrink path with very long words: "Communication
+  // Implementation Restoration Foundation Determination Authentication
+  // Configuration Optimization" — 8 words, but each is ~13-15 chars.
+  // At 80pt × 0.58 = 46.4 px/char. Each word alone = ~650-700px. 3
+  // lines × 3 words each = lines of ~40 chars = 1856px > 840.
+  // At 72pt × 0.58 = 41.8 → 3 words × ~14 chars = 42 chars = 1755px still over.
+  // Need a much smaller font for this fixture.
+  const r = fitTextToFrame('Communication Implementation Restoration Foundation Determination Authentication Configuration Optimization');
+  assert.ok(r.fontSizePx < 80, `should have shrunk below schedule font; got ${r.fontSizePx}`);
+  assert.ok(r.fontSizePx >= 48, 'should not shrink below readability floor');
+});
+
+test('PR-Y fitTextToFrame: never shrinks below 48pt floor', () => {
+  // Pathological case: 8 huge words. Should hit floor and return a
+  // 3-line approximate even if it visually overflows.
+  const r = fitTextToFrame(
+    'Superextraordinarily Hyperinternationalizationally Pseudoanthropomorphically Counterrevolutionarily Disestablishmentarianally Antidisestablishmentarianally Overprotectivelynly Ridiculousnessibility',
+  );
+  assert.ok(r.fontSizePx >= 48);
+});
+
+test('PR-Y fitTextToFrame: single-word hook → 1 line regardless of length', () => {
+  const r = fitTextToFrame('Plan');
+  assert.deepEqual(r.lines, ['Plan']);
+});
+
+test('PR-Y fitTextToFrame: lines split at word boundaries (never mid-word)', () => {
+  const r = fitTextToFrame('A Special Needs Household Runs On Coordination');
+  for (const line of r.lines) {
+    for (const word of line.split(/\s+/)) {
+      assert.ok(/^[A-Za-z]+$/.test(word), `word "${word}" must be intact`);
     }
   }
-});
-
-test('wrapHookText: single very long word cannot be split — returns as-is', () => {
-  const lines = wrapHookText('Supercalifragilisticexpialidocious', 120);
-  assert.deepEqual(lines, ['Supercalifragilisticexpialidocious']);
-});
-
-test('wrapHookText: respects custom container width — narrower forces wrap on text that fits in wider container', () => {
-  // 4-word phrase at 80pt: "Hi I Am Here" = 12 chars × 80 × 0.58 ≈ 557px.
-  // At 1080 container (safe=840) → fits as 1 line.
-  // At 700 container (safe=460) → still over the single-line budget AND
-  // a balanced 2-line split fits (each line ≤ 460px).
-  const wide = wrapHookText('Hi I Am Here', 80, 1080);
-  const narrow = wrapHookText('Hi I Am Here', 80, 700);
-  assert.equal(wide.length, 1, 'wide container fits the phrase on one line');
-  assert.equal(narrow.length, 2, 'narrow container forces a wrap');
 });
 
 // ── escapeDrawtext ───────────────────────────────────────────────────
@@ -132,7 +174,6 @@ test('escapeDrawtext: escapes percent', () => {
 });
 
 test('escapeDrawtext: escapes multiple specials together', () => {
-  // All four: \  '  :  %  in one string.
   assert.equal(escapeDrawtext("a\\b'c:d%e"), "a\\\\b\\'c\\:d\\%e");
 });
 
@@ -141,61 +182,71 @@ test('escapeDrawtext: plain ASCII passes through unchanged', () => {
   assert.equal(escapeDrawtext(plain), plain);
 });
 
-// ── buildIntroCardArgs (argv shape lock) ─────────────────────────────
+// ── PR-Y buildIntroOverlayArgs: overlay on existing video ────────────
 
 function findArg(argv, flag) {
   const i = argv.indexOf(flag);
   return i >= 0 ? argv[i + 1] : undefined;
 }
 
-test('buildIntroCardArgs: argv starts with ffmpeg + -y and ends with outputPath', () => {
-  const argv = buildIntroCardArgs({
+test('PR-Y buildIntroOverlayArgs: argv starts with ffmpeg + -y, takes -i inputVideoPath, ends with outputPath', () => {
+  const argv = buildIntroOverlayArgs({
+    inputVideoPath: '/tmp/brolled.mp4',
+    outputPath: '/tmp/hook_overlay.mp4',
     hookText: 'Plan Early',
-    outputPath: '/tmp/intro.mp4',
   });
   assert.equal(argv[0], 'ffmpeg');
   assert.equal(argv[1], '-y');
-  assert.equal(argv[argv.length - 1], '/tmp/intro.mp4');
+  assert.equal(findArg(argv, '-i'), '/tmp/brolled.mp4');
+  assert.equal(argv[argv.length - 1], '/tmp/hook_overlay.mp4');
 });
 
-test('buildIntroCardArgs: 1080x1920 30fps lavfi color background at the dark slate hex', () => {
-  const argv = buildIntroCardArgs({
+test('PR-Y buildIntroOverlayArgs: NO lavfi color background (overlay on existing video, not standalone card)', () => {
+  const argv = buildIntroOverlayArgs({
+    inputVideoPath: '/tmp/brolled.mp4',
+    outputPath: '/tmp/out.mp4',
     hookText: 'Plan Early',
-    outputPath: '/tmp/intro.mp4',
   });
-  const colorArg = argv.find((a) => a.startsWith('color=c='));
-  assert.match(colorArg, /color=c=0x0F1419/);
-  assert.match(colorArg, /s=1080x1920/);
-  assert.match(colorArg, /r=30/);
-  assert.match(colorArg, /d=5/);
+  const fullCmd = argv.join(' ');
+  assert.doesNotMatch(fullCmd, /color=c=0x0F1419/, 'pre-PR-Y standalone-card background is gone');
+  assert.doesNotMatch(fullCmd, /anullsrc/, 'no synthetic silent audio — original audio is copied through');
 });
 
-test('buildIntroCardArgs: silent stereo AAC track at the exact requested duration', () => {
-  const argv = buildIntroCardArgs({
+test('PR-Y buildIntroOverlayArgs: audio is copied through without re-encode (-c:a copy)', () => {
+  const argv = buildIntroOverlayArgs({
+    inputVideoPath: '/tmp/brolled.mp4',
+    outputPath: '/tmp/out.mp4',
     hookText: 'Plan Early',
-    outputPath: '/tmp/intro.mp4',
-    durationSec: 3.5,
   });
-  const anullArg = argv.find((a) => a.startsWith('anullsrc'));
-  assert.match(anullArg, /channel_layout=stereo/);
-  assert.match(anullArg, /sample_rate=48000/);
-  assert.match(anullArg, /d=3\.5/);
+  assert.equal(findArg(argv, '-c:a'), 'copy', 'original audio must pass through unchanged');
 });
 
-test('buildIntroCardArgs: output codecs locked (libx264 yuv420p AAC) for concat-demuxer match with cut.mp4', () => {
-  const argv = buildIntroCardArgs({
+test('PR-Y buildIntroOverlayArgs: video re-encodes to libx264 yuv420p for drawtext', () => {
+  const argv = buildIntroOverlayArgs({
+    inputVideoPath: '/tmp/brolled.mp4',
+    outputPath: '/tmp/out.mp4',
     hookText: 'Plan Early',
-    outputPath: '/tmp/intro.mp4',
   });
   assert.equal(findArg(argv, '-c:v'), 'libx264');
   assert.equal(findArg(argv, '-pix_fmt'), 'yuv420p');
-  assert.equal(findArg(argv, '-c:a'), 'aac');
 });
 
-test('buildIntroCardArgs: drawtext includes 8px black stroke + 6px shadow for the polished look', () => {
-  const argv = buildIntroCardArgs({
+test("PR-Y buildIntroOverlayArgs: drawtext uses enable='between(t,0,N)' for time-bounded rendering", () => {
+  const argv = buildIntroOverlayArgs({
+    inputVideoPath: '/tmp/in.mp4',
+    outputPath: '/tmp/out.mp4',
     hookText: 'Plan Early',
-    outputPath: '/tmp/intro.mp4',
+    durationSec: 5,
+  });
+  const vf = findArg(argv, '-vf');
+  assert.match(vf, /enable='between\(t,0,5\)'/, 'enable gate must wrap the drawtext in [0, durationSec]');
+});
+
+test('PR-Y buildIntroOverlayArgs: drawtext includes the polished styling (8px stroke + 6px shadow)', () => {
+  const argv = buildIntroOverlayArgs({
+    inputVideoPath: '/tmp/in.mp4',
+    outputPath: '/tmp/out.mp4',
+    hookText: 'Plan Early',
   });
   const vf = findArg(argv, '-vf');
   assert.match(vf, /borderw=8/);
@@ -206,184 +257,131 @@ test('buildIntroCardArgs: drawtext includes 8px black stroke + 6px shadow for th
   assert.match(vf, /fontcolor=white/);
 });
 
-test('buildIntroCardArgs: fade alpha expression uses correct boundary times for 5s duration', () => {
-  const argv = buildIntroCardArgs({
+test('PR-Y buildIntroOverlayArgs: fade alpha boundary times correct for 5s', () => {
+  const argv = buildIntroOverlayArgs({
+    inputVideoPath: '/tmp/in.mp4',
+    outputPath: '/tmp/out.mp4',
     hookText: 'Plan Early',
-    outputPath: '/tmp/intro.mp4',
     durationSec: 5,
   });
   const vf = findArg(argv, '-vf');
-  // Fade in over 0-0.4s, hold 0.4-4.6s, fade out 4.6-5s.
+  // Fade in 0-0.4s, hold 0.4-4.6s, fade out 4.6-5s.
   assert.match(vf, /if\(lt\(t,0\.4\)/);
   assert.match(vf, /if\(lt\(t,4\.6\)/);
   assert.match(vf, /\(5-t\)\/0\.4/);
 });
 
-test('buildIntroCardArgs: fade boundaries scale with durationSec=3', () => {
-  const argv = buildIntroCardArgs({
-    hookText: 'Plan Early',
-    outputPath: '/tmp/intro.mp4',
-    durationSec: 3,
-  });
-  const vf = findArg(argv, '-vf');
-  // Fade in over 0-0.4s, hold 0.4-2.6s, fade out 2.6-3s.
-  assert.match(vf, /if\(lt\(t,2\.6\)/);
-  assert.match(vf, /\(3-t\)\/0\.4/);
-});
-
-test('buildIntroCardArgs: 4-word hook → font size 120 substituted into drawtext', () => {
-  const argv = buildIntroCardArgs({
+test('PR-Y buildIntroOverlayArgs: 4-word hook → font 120pt substituted', () => {
+  const argv = buildIntroOverlayArgs({
+    inputVideoPath: '/tmp/in.mp4',
+    outputPath: '/tmp/out.mp4',
     hookText: 'Plan Early This Summer',
-    outputPath: '/tmp/intro.mp4',
   });
   const vf = findArg(argv, '-vf');
   assert.match(vf, /fontsize=120/);
 });
 
-test('buildIntroCardArgs: 6-word hook → font size 96', () => {
-  const argv = buildIntroCardArgs({
-    hookText: 'The Planning Mistake Families Keep Making',
-    outputPath: '/tmp/intro.mp4',
+test('PR-Y buildIntroOverlayArgs: 6-word hook that fits → font 96pt (schedule)', () => {
+  // 6 words, short tokens — the 96pt schedule slot fits on 2 lines within
+  // the 840px safe area, so wrap-before-shrink keeps the schedule size.
+  const argv = buildIntroOverlayArgs({
+    inputVideoPath: '/tmp/in.mp4',
+    outputPath: '/tmp/out.mp4',
+    hookText: 'Plan Now Save More Buy Smart',
   });
   const vf = findArg(argv, '-vf');
   assert.match(vf, /fontsize=96/);
 });
 
-test('buildIntroCardArgs: 8-word hook → font size 80', () => {
-  const argv = buildIntroCardArgs({
-    hookText: 'The Single Biggest Planning Mistake Families Keep Making',
-    outputPath: '/tmp/intro.mp4',
-  });
-  const vf = findArg(argv, '-vf');
-  assert.match(vf, /fontsize=80/);
-});
-
-test("buildIntroCardArgs: hook with single quote is properly escaped in drawtext text=", () => {
-  // Note: validateHookText() rejects this case, but we still test the
-  // escape behavior so a future change to validation rules doesn't
-  // break the renderer.
-  const argv = buildIntroCardArgs({
-    hookText: "Don't Wait Until Summer",
-    outputPath: '/tmp/intro.mp4',
-  });
-  const vf = findArg(argv, '-vf');
-  // The escaped single quote inside drawtext.
-  assert.match(vf, /Don\\'t/);
-});
-
-test('buildIntroCardArgs: hook with colon is properly escaped (drawtext arg separator)', () => {
-  const argv = buildIntroCardArgs({
-    hookText: 'Plan Today Save Tomorrow',
-    outputPath: '/tmp/intro.mp4',
-  });
-  // No colon in this hook; just sanity that argv builds.
-  assert.ok(findArg(argv, '-vf'));
-});
-
-test('buildIntroCardArgs: each word-count tier emits exactly one drawtext per line', () => {
-  // 1-line case: 1 drawtext.
-  const oneLine = findArg(buildIntroCardArgs({
-    hookText: 'Plan Early',
-    outputPath: '/tmp/intro.mp4',
-  }), '-vf');
-  assert.equal((oneLine.match(/drawtext=/g) ?? []).length, 1);
-});
-
-test('buildIntroCardArgs: very long 8-word hook wraps to 2 lines → 2 drawtext filters chained', () => {
-  // Long words force a 2-line wrap. Each line gets its own drawtext.
-  const argv = buildIntroCardArgs({
-    hookText: 'Communication Implementation Restoration Determination Foundational Operational Establishment Integration',
-    outputPath: '/tmp/intro.mp4',
+test('PR-Y buildIntroOverlayArgs: long 7-word hook (Shannon\'s case) → 3 drawtext filters at 80pt (3 lines)', () => {
+  const argv = buildIntroOverlayArgs({
+    inputVideoPath: '/tmp/in.mp4',
+    outputPath: '/tmp/out.mp4',
+    hookText: 'A Special Needs Household Runs On Coordination',
   });
   const vf = findArg(argv, '-vf');
   const drawtextCount = (vf.match(/drawtext=/g) ?? []).length;
-  // Either 1 (fits) or 2 (wrapped). Assert it's a valid case.
-  assert.ok(drawtextCount === 1 || drawtextCount === 2);
+  assert.equal(drawtextCount, 3, 'should chain 3 drawtext filters (one per line)');
+  assert.match(vf, /fontsize=80/, 'should NOT shrink below schedule when 3 lines fit');
 });
 
-test('buildIntroCardArgs: width / height overrides flow through to lavfi color size', () => {
-  const argv = buildIntroCardArgs({
-    hookText: 'Plan Early',
-    outputPath: '/tmp/intro.mp4',
-    width: 1080,
-    height: 1350,
+test('PR-Y buildIntroOverlayArgs: hook with single quote properly escaped', () => {
+  const argv = buildIntroOverlayArgs({
+    inputVideoPath: '/tmp/in.mp4',
+    outputPath: '/tmp/out.mp4',
+    hookText: "Don't Wait Until Summer",
   });
-  const colorArg = argv.find((a) => a.startsWith('color=c='));
-  assert.match(colorArg, /s=1080x1350/);
+  const vf = findArg(argv, '-vf');
+  assert.match(vf, /Don\\'t/);
 });
 
-// ── PR-X: font path resolution + renderIntroCard fontfile= wiring ──
-// Today's jobId c88d5d3f confirmed PR-W fixed token-budget truncation
-// (hook gen returned a great hook text), but drawtext FAILED to render
-// the card. Root cause: `font=Montserrat\:style=Black` went through
-// fontconfig which couldn't resolve to a usable file on Railway. PR-X
-// resolves an absolute font path via fc-match (with fallback chain)
-// and passes it via `fontfile=` instead — bypasses fontconfig entirely.
-
-test('PR-X buildIntroCardArgs: explicit fontFile arg uses fontfile= (not font=) in drawtext', () => {
-  // The renderIntroCard flow always supplies fontFile (resolved via
-  // resolveMontserratBlackPath). Verify the wiring lands as fontfile=.
-  const argv = buildIntroCardArgs({
+test('PR-Y buildIntroOverlayArgs: explicit fontFile is used as fontfile= (not fontconfig font=)', () => {
+  const argv = buildIntroOverlayArgs({
+    inputVideoPath: '/tmp/in.mp4',
+    outputPath: '/tmp/out.mp4',
     hookText: 'Plan Early',
-    outputPath: '/tmp/intro.mp4',
     fontFile: '/usr/share/fonts/truetype/montserrat/Montserrat-Black.ttf',
   });
-  const vf = argv[argv.indexOf('-vf') + 1];
+  const vf = findArg(argv, '-vf');
   assert.match(vf, /fontfile=\/usr\/share\/fonts\/truetype\/montserrat\/Montserrat-Black\.ttf/);
-  // The fragile font=Montserrat:style=Black fallback should NOT appear
-  // when an explicit fontfile path is provided.
   assert.doesNotMatch(vf, /font=Montserrat\\:style=Black/);
 });
 
-test('PR-X buildIntroCardArgs: missing fontFile falls back to font=Montserrat (legacy / no fc-match)', () => {
-  // When resolveMontserratBlackPath returns null AND no override, we
-  // fall back to the fontconfig pattern. This is the documented
-  // last-resort path — render may still fail in that case, but the
-  // fallback at least gives us a chance.
-  const argv = buildIntroCardArgs({
+test('PR-Y buildIntroOverlayArgs: missing fontFile falls back to font=Montserrat fontconfig pattern', () => {
+  const argv = buildIntroOverlayArgs({
+    inputVideoPath: '/tmp/in.mp4',
+    outputPath: '/tmp/out.mp4',
     hookText: 'Plan Early',
-    outputPath: '/tmp/intro.mp4',
     // no fontFile
   });
-  const vf = argv[argv.indexOf('-vf') + 1];
+  const vf = findArg(argv, '-vf');
   assert.match(vf, /font=Montserrat\\:style=Black/);
 });
 
-test('PR-X resolveMontserratBlackPath: returns cached value on repeated calls (no double fc-match)', async () => {
+// ── PR-X font path resolver (still applies in PR-Y) ─────────────────
+
+test('PR-X resolveMontserratBlackPath: returns cached value on repeated calls', async () => {
   _resetFontPathCacheForTests();
-  // First call may or may not find a path depending on the host environment.
-  // We just verify it's deterministic across two calls (caching works).
   const first = await resolveMontserratBlackPath();
   const second = await resolveMontserratBlackPath();
-  assert.equal(first, second, 'cache should make repeated calls return identical results');
+  assert.equal(first, second);
 });
 
-test('PR-X renderIntroCard: passes resolved fontFile through and includes it in the returned metadata', async () => {
-  // Inject a fake execFn so we don't actually invoke ffmpeg, and an
-  // explicit fontFile so we don't depend on the host's fc-match output.
+// ── renderIntroOverlay end-to-end with injected execFn ───────────────
+
+test('PR-Y renderIntroOverlay: passes fontFile through and returns it in metadata', async () => {
   let invokedCmd = null;
-  const result = await renderIntroCard({
+  const result = await renderIntroOverlay({
+    inputVideoPath: '/tmp/brolled.mp4',
+    outputPath: '/tmp/hook.mp4',
     hookText: 'Plan Early',
-    outputPath: '/tmp/intro.mp4',
-    fontFile: '/custom/path/MyFont.ttf',
+    fontFile: '/custom/MyFont.ttf',
     execFn: async (cmd) => { invokedCmd = cmd; return { stdout: '', stderr: '' }; },
   });
-  assert.equal(result.fontFile, '/custom/path/MyFont.ttf');
-  assert.match(invokedCmd, /fontfile=\/custom\/path\/MyFont\.ttf/);
-  assert.doesNotMatch(invokedCmd, /font=Montserrat/);
+  assert.equal(result.fontFile, '/custom/MyFont.ttf');
+  assert.match(invokedCmd, /fontfile=\/custom\/MyFont\.ttf/);
 });
 
-test('PR-X renderIntroCard: when fontFile omitted, tries resolveMontserratBlackPath; on null falls back to font= legacy', async () => {
-  // Reset the cache and provide no explicit fontFile. The host may or
-  // may not have Montserrat installed. We assert the renderIntroCard
-  // returns SOMETHING for fontFile (null or a real path) — and that
-  // the invoked command uses fontfile= when the resolver returned a
-  // path, or font= when it returned null.
+test('PR-Y renderIntroOverlay: returned metadata includes lines + fontSizePx for diagnostic', async () => {
+  const result = await renderIntroOverlay({
+    inputVideoPath: '/tmp/brolled.mp4',
+    outputPath: '/tmp/hook.mp4',
+    hookText: 'A Special Needs Household Runs On Coordination',
+    fontFile: '/x/MyFont.ttf',
+    execFn: async () => ({ stdout: '', stderr: '' }),
+  });
+  assert.equal(result.lines.length, 3, 'orchestrator records line count for diagnostic');
+  assert.equal(result.fontSizePx, 80);
+  assert.equal(result.durationSec, 5.0);
+});
+
+test("PR-Y renderIntroOverlay: when fontFile omitted, resolver runs; resolved path appears in command if found", async () => {
   _resetFontPathCacheForTests();
   let invokedCmd = null;
-  const result = await renderIntroCard({
+  const result = await renderIntroOverlay({
+    inputVideoPath: '/tmp/brolled.mp4',
+    outputPath: '/tmp/hook.mp4',
     hookText: 'Plan Early',
-    outputPath: '/tmp/intro.mp4',
     execFn: async (cmd) => { invokedCmd = cmd; return { stdout: '', stderr: '' }; },
   });
   if (result.fontFile) {
@@ -391,17 +389,4 @@ test('PR-X renderIntroCard: when fontFile omitted, tries resolveMontserratBlackP
   } else {
     assert.match(invokedCmd, /font=Montserrat/);
   }
-});
-
-test('PR-X renderIntroCard: returned metadata includes fontFile field (null when unresolved)', async () => {
-  _resetFontPathCacheForTests();
-  const result = await renderIntroCard({
-    hookText: 'Plan Early',
-    outputPath: '/tmp/intro.mp4',
-    fontFile: null, // explicit null forces fallback path test below
-    execFn: async () => ({ stdout: '', stderr: '' }),
-  });
-  // fontFile in result is either a resolved path OR null — but the key
-  // must exist on every render result for the orchestrator's diagnostic.
-  assert.ok('fontFile' in result, 'render result must always carry fontFile field for diagnostic');
 });

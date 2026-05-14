@@ -330,7 +330,7 @@ test('PR-Z buildIntroOverlayArgs: 3-line render emits 3 DISTINCT y values (regre
   assert.equal(new Set(ys).size, 3, 'every line must have a unique y — duplicates mean overlap');
 });
 
-test('PR-Z buildIntroOverlayArgs: 3-line y values are spaced by lineHeightPx = round(fontSize × 1.30)', () => {
+test('PR-AA buildIntroOverlayArgs: 3-line y values are spaced by lineHeightPx = round(fontSize × 1.50)', () => {
   const argv = buildIntroOverlayArgs({
     inputVideoPath: '/tmp/in.mp4',
     outputPath: '/tmp/out.mp4',
@@ -338,13 +338,14 @@ test('PR-Z buildIntroOverlayArgs: 3-line y values are spaced by lineHeightPx = r
   });
   const vf = findArg(argv, '-vf');
   const ys = extractYValues(vf);
-  // 96pt × 1.30 = 124.8 → round → 125
-  const expectedStep = Math.round(96 * 1.30);
+  // 96pt × 1.50 = 144 — gap large enough that the 8px stroke + 6px shadow
+  // of line N never touch the ascenders of line N+1.
+  const expectedStep = Math.round(96 * 1.50);
   assert.equal(ys[1] - ys[0], expectedStep, 'line 0 → line 1 spacing must equal lineHeightPx');
   assert.equal(ys[2] - ys[1], expectedStep, 'line 1 → line 2 spacing must equal lineHeightPx');
 });
 
-test('PR-Z buildIntroOverlayArgs: 3-line block is centred upper-middle (≈0.38 × height)', () => {
+test('PR-AA buildIntroOverlayArgs: 3-line block is anchored top quintile (≈0.20 × height) to clear talking-head face', () => {
   const argv = buildIntroOverlayArgs({
     inputVideoPath: '/tmp/in.mp4',
     outputPath: '/tmp/out.mp4',
@@ -352,10 +353,10 @@ test('PR-Z buildIntroOverlayArgs: 3-line block is centred upper-middle (≈0.38 
   });
   const vf = findArg(argv, '-vf');
   const ys = extractYValues(vf);
-  // Block centre = midpoint between top of line 0 and top of line 2 + half a lineHeight
-  const lh = Math.round(96 * 1.30);
+  // Block centre = top of line 0 + (N * lineHeight) / 2
+  const lh = Math.round(96 * 1.50);
   const blockCentre = ys[0] + (3 * lh) / 2;
-  const expected = 1920 * 0.38; // 729.6
+  const expected = 1920 * 0.20; // 384
   // Allow a few px of rounding slack.
   assert.ok(
     Math.abs(blockCentre - expected) <= 2,

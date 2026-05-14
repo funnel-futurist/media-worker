@@ -305,6 +305,77 @@ test('PR-Y buildIntroOverlayArgs: long 7-word hook (Shannon\'s case) → 3 drawt
   assert.match(vf, /fontsize=80/, 'should NOT shrink below schedule when 3 lines fit');
 });
 
+// ── PR-Z: N-line stacking, line spacing, and vertical placement ────────
+
+// Helper — pulls every `y=<num>` value out of the chained drawtext filter.
+// Anchored on `:` (drawtext param separator) so we don't accidentally
+// match `shadowy=6` or `borderw=8` etc.
+function extractYValues(videoFilter) {
+  return Array.from(videoFilter.matchAll(/:y=(\d+)/g)).map((m) => Number(m[1]));
+}
+
+test('PR-Z buildIntroOverlayArgs: 3-line render emits 3 DISTINCT y values (regression for "Planning With / \'s Harder" overlap)', () => {
+  // Reproduces the jobId 432529d3 render: 6 words at 96pt wrapped to 3 lines.
+  // Pre-PR-Z, lines 2 and 3 both used `y=(h-2*lh)/2 + lh`, collapsing into
+  // the visible garbage Shannon flagged. PR-Z replaces the branching with
+  // `blockTop + idx * lh` so every line gets a unique y.
+  const argv = buildIntroOverlayArgs({
+    inputVideoPath: '/tmp/in.mp4',
+    outputPath: '/tmp/out.mp4',
+    hookText: 'Planning With Kids Home Is Harder',
+  });
+  const vf = findArg(argv, '-vf');
+  const ys = extractYValues(vf);
+  assert.equal(ys.length, 3, 'expected 3 numeric y values (one per line)');
+  assert.equal(new Set(ys).size, 3, 'every line must have a unique y — duplicates mean overlap');
+});
+
+test('PR-Z buildIntroOverlayArgs: 3-line y values are spaced by lineHeightPx = round(fontSize × 1.30)', () => {
+  const argv = buildIntroOverlayArgs({
+    inputVideoPath: '/tmp/in.mp4',
+    outputPath: '/tmp/out.mp4',
+    hookText: 'Planning With Kids Home Is Harder',
+  });
+  const vf = findArg(argv, '-vf');
+  const ys = extractYValues(vf);
+  // 96pt × 1.30 = 124.8 → round → 125
+  const expectedStep = Math.round(96 * 1.30);
+  assert.equal(ys[1] - ys[0], expectedStep, 'line 0 → line 1 spacing must equal lineHeightPx');
+  assert.equal(ys[2] - ys[1], expectedStep, 'line 1 → line 2 spacing must equal lineHeightPx');
+});
+
+test('PR-Z buildIntroOverlayArgs: 3-line block is centred upper-middle (≈0.38 × height)', () => {
+  const argv = buildIntroOverlayArgs({
+    inputVideoPath: '/tmp/in.mp4',
+    outputPath: '/tmp/out.mp4',
+    hookText: 'Planning With Kids Home Is Harder',
+  });
+  const vf = findArg(argv, '-vf');
+  const ys = extractYValues(vf);
+  // Block centre = midpoint between top of line 0 and top of line 2 + half a lineHeight
+  const lh = Math.round(96 * 1.30);
+  const blockCentre = ys[0] + (3 * lh) / 2;
+  const expected = 1920 * 0.38; // 729.6
+  // Allow a few px of rounding slack.
+  assert.ok(
+    Math.abs(blockCentre - expected) <= 2,
+    `expected block centre near ${expected}, got ${blockCentre}`,
+  );
+});
+
+test('PR-Z buildIntroOverlayArgs: single-line hook uses numeric y (not (h-text_h)/2 expression)', () => {
+  // Single-line case used to short-circuit to `y=(h-text_h)/2`. With
+  // numeric centring, even the 1-line case should report a fixed pixel y.
+  const argv = buildIntroOverlayArgs({
+    inputVideoPath: '/tmp/in.mp4',
+    outputPath: '/tmp/out.mp4',
+    hookText: 'Plan',
+  });
+  const vf = findArg(argv, '-vf');
+  assert.match(vf, /y=\d+/, 'single line must use a numeric y');
+  assert.doesNotMatch(vf, /y=\(h-text_h\)\/2/, 'old expression-based y must be gone');
+});
+
 test('PR-Y buildIntroOverlayArgs: hook with single quote properly escaped', () => {
   const argv = buildIntroOverlayArgs({
     inputVideoPath: '/tmp/in.mp4',

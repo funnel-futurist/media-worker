@@ -1076,3 +1076,105 @@ test('PR #105: relaxed clamp does NOT cut into legitimate trailing speech (overl
   assert.ok(silenceCut.end <= 88.20,
     `relaxed clamp ate legitimate trailing speech "continuous" (overlap 23% < 70%); got cut.end=${silenceCut.end}`);
 });
+
+// ── PR-AC: orchestrator-defaults regression cases ──────────────────────
+// These exercise detectDeterministicCuts with the *same* options the
+// clean-mode orchestrator passes after PR-AC's tuning. They lock in
+// the behaviour Shannon needs: 0.6–0.85s post-sentence pauses (the kind
+// the talking-head reels were leaving as dead air) now generate a cut.
+// If a future PR loosens preservePostSentenceSec back toward 0.5 or
+// raises minCutDurationSec back toward 0.2, these fail loudly.
+
+const PR_AC_ORCH_OPTS = {
+  preserveEmphasisPauses: true,
+  preservePostSentenceSec: 0.3,
+  preservePostCommaSec: 0.3,
+  preservePrePunchlineSec: 0.4,
+  minCutDurationSec: 0.12,
+  minGapSec: 0.6,
+  retainSec: 0.15,
+};
+
+test('PR-AC: 0.78s post-sentence pause → CUT (was DROPPED before PR-AC)', () => {
+  // Two words separated by 0.78s of silence after a period. With pre-PR-AC
+  // defaults (preservePostSentence=0.5, minCutDur=0.2) the cut window
+  // would be 0.78 - 0.5 - 0.15 = 0.13s < 0.2s → dropped → reel kept
+  // the full 0.78s as awkward dead air. PR-AC defaults trim that pause.
+  const words = [
+    w('idea.', 0.0, 0.5),
+    w('Next', 1.28, 1.6),
+  ];
+  const cuts = detectDeterministicCuts(words, {
+    sourceDuration: 5.0,
+    ...PR_AC_ORCH_OPTS,
+  });
+  const silenceCut = cuts.find((c) => c.category === 'silence');
+  assert.ok(silenceCut, `expected a silence cut for 0.78s post-sentence pause; got ${JSON.stringify(cuts)}`);
+  // Cut window = 0.78 - 0.3 (preserve) - 0.15 (retain) = 0.33s,
+  // anchored at silence start + 0.3.
+  assert.ok(silenceCut.start >= 0.5 + 0.3 - 0.01, `cut.start should be after preserve budget; got ${silenceCut.start}`);
+  assert.ok(silenceCut.end <= 1.28 - 0.15 + 0.01, `cut.end should leave retain pad before next word; got ${silenceCut.end}`);
+  assert.ok(silenceCut.end - silenceCut.start >= 0.12, `cut duration must satisfy new minCutDur; got ${silenceCut.end - silenceCut.start}`);
+});
+
+test('PR-AC: 0.65s post-sentence pause → CUT (right at the new edge)', () => {
+  // Boundary case: just barely cuttable with the new defaults.
+  // 0.65 - 0.3 - 0.15 = 0.20s ≥ 0.12s → cut.
+  const words = [
+    w('done.', 0.0, 0.5),
+    w('And', 1.15, 1.4),
+  ];
+  const cuts = detectDeterministicCuts(words, {
+    sourceDuration: 5.0,
+    ...PR_AC_ORCH_OPTS,
+  });
+  assert.ok(cuts.some((c) => c.category === 'silence'),
+    `expected a silence cut for 0.65s pause; got ${JSON.stringify(cuts)}`);
+});
+
+test('PR-AC: 0.55s post-sentence pause → still PRESERVED (under minGap)', () => {
+  // Below the silenceDetect floor — never reaches the cut classifier,
+  // so the algorithm correctly leaves it alone. This is the speaker's
+  // natural rhythm.
+  const words = [
+    w('right.', 0.0, 0.5),
+    w('And', 1.05, 1.3),
+  ];
+  const cuts = detectDeterministicCuts(words, {
+    sourceDuration: 5.0,
+    ...PR_AC_ORCH_OPTS,
+  });
+  assert.equal(cuts.filter((c) => c.category === 'silence').length, 0);
+});
+
+test('PR-AC: 0.75s comma pause → CUT with comma preserve ceiling', () => {
+  // preservePostCommaSec=0.3, so cut window = 0.75 - 0.3 - 0.15 = 0.30s ≥ 0.12 → cut.
+  const words = [
+    w('first,', 0.0, 0.5),
+    w('second', 1.25, 1.6),
+  ];
+  const cuts = detectDeterministicCuts(words, {
+    sourceDuration: 5.0,
+    ...PR_AC_ORCH_OPTS,
+  });
+  assert.ok(cuts.some((c) => c.category === 'silence'),
+    `expected a silence cut for 0.75s comma pause; got ${JSON.stringify(cuts)}`);
+});
+
+test('PR-AC: regression — does NOT clip into adjacent words (0.15s retain pad respected)', () => {
+  // Defence against an accidental future tuning that drops retainSec.
+  // Even with the looser preserve budget, the 0.15s retain on each end
+  // must remain so we never cut into the next word's start.
+  const words = [
+    w('idea.', 0.0, 0.5),
+    w('Next', 1.5, 1.9),
+  ];
+  const cuts = detectDeterministicCuts(words, {
+    sourceDuration: 5.0,
+    ...PR_AC_ORCH_OPTS,
+  });
+  const silenceCut = cuts.find((c) => c.category === 'silence');
+  assert.ok(silenceCut);
+  assert.ok(silenceCut.end <= 1.5 - 0.149,
+    `cut.end (${silenceCut.end}) must leave at least 0.15s retain before next word at 1.5`);
+});

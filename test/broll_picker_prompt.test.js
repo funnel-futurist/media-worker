@@ -369,3 +369,11 @@ test('PR-Q: BETTER ON SPEAKER FACE includes momentum/punchline rule', () => {
   });
   assert.match(userPrompt, /building to a punchline or key point.*cutting away breaks momentum/i);
 });
+
+test('PR-Q: coverage floor targets at least 10 insertions for videos over 60s', () => {
+  const { userPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 120, brollDensity: 0.55,
+  });
+  assert.match(userPrompt, /TARGET AT LEAST 10 INSERTIONS/);
+  assert.match(userPrompt, /any video over 60 seconds/);
+});

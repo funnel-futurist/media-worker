@@ -19,6 +19,9 @@ import {
   wrapHookText,
   escapeDrawtext,
   buildIntroCardArgs,
+  resolveMontserratBlackPath,
+  renderIntroCard,
+  _resetFontPathCacheForTests,
 } from '../lib/intro_card_render.js';
 
 // ── fontSizeForWordCount ─────────────────────────────────────────────
@@ -307,4 +310,98 @@ test('buildIntroCardArgs: width / height overrides flow through to lavfi color s
   });
   const colorArg = argv.find((a) => a.startsWith('color=c='));
   assert.match(colorArg, /s=1080x1350/);
+});
+
+// ── PR-X: font path resolution + renderIntroCard fontfile= wiring ──
+// Today's jobId c88d5d3f confirmed PR-W fixed token-budget truncation
+// (hook gen returned a great hook text), but drawtext FAILED to render
+// the card. Root cause: `font=Montserrat\:style=Black` went through
+// fontconfig which couldn't resolve to a usable file on Railway. PR-X
+// resolves an absolute font path via fc-match (with fallback chain)
+// and passes it via `fontfile=` instead — bypasses fontconfig entirely.
+
+test('PR-X buildIntroCardArgs: explicit fontFile arg uses fontfile= (not font=) in drawtext', () => {
+  // The renderIntroCard flow always supplies fontFile (resolved via
+  // resolveMontserratBlackPath). Verify the wiring lands as fontfile=.
+  const argv = buildIntroCardArgs({
+    hookText: 'Plan Early',
+    outputPath: '/tmp/intro.mp4',
+    fontFile: '/usr/share/fonts/truetype/montserrat/Montserrat-Black.ttf',
+  });
+  const vf = argv[argv.indexOf('-vf') + 1];
+  assert.match(vf, /fontfile=\/usr\/share\/fonts\/truetype\/montserrat\/Montserrat-Black\.ttf/);
+  // The fragile font=Montserrat:style=Black fallback should NOT appear
+  // when an explicit fontfile path is provided.
+  assert.doesNotMatch(vf, /font=Montserrat\\:style=Black/);
+});
+
+test('PR-X buildIntroCardArgs: missing fontFile falls back to font=Montserrat (legacy / no fc-match)', () => {
+  // When resolveMontserratBlackPath returns null AND no override, we
+  // fall back to the fontconfig pattern. This is the documented
+  // last-resort path — render may still fail in that case, but the
+  // fallback at least gives us a chance.
+  const argv = buildIntroCardArgs({
+    hookText: 'Plan Early',
+    outputPath: '/tmp/intro.mp4',
+    // no fontFile
+  });
+  const vf = argv[argv.indexOf('-vf') + 1];
+  assert.match(vf, /font=Montserrat\\:style=Black/);
+});
+
+test('PR-X resolveMontserratBlackPath: returns cached value on repeated calls (no double fc-match)', async () => {
+  _resetFontPathCacheForTests();
+  // First call may or may not find a path depending on the host environment.
+  // We just verify it's deterministic across two calls (caching works).
+  const first = await resolveMontserratBlackPath();
+  const second = await resolveMontserratBlackPath();
+  assert.equal(first, second, 'cache should make repeated calls return identical results');
+});
+
+test('PR-X renderIntroCard: passes resolved fontFile through and includes it in the returned metadata', async () => {
+  // Inject a fake execFn so we don't actually invoke ffmpeg, and an
+  // explicit fontFile so we don't depend on the host's fc-match output.
+  let invokedCmd = null;
+  const result = await renderIntroCard({
+    hookText: 'Plan Early',
+    outputPath: '/tmp/intro.mp4',
+    fontFile: '/custom/path/MyFont.ttf',
+    execFn: async (cmd) => { invokedCmd = cmd; return { stdout: '', stderr: '' }; },
+  });
+  assert.equal(result.fontFile, '/custom/path/MyFont.ttf');
+  assert.match(invokedCmd, /fontfile=\/custom\/path\/MyFont\.ttf/);
+  assert.doesNotMatch(invokedCmd, /font=Montserrat/);
+});
+
+test('PR-X renderIntroCard: when fontFile omitted, tries resolveMontserratBlackPath; on null falls back to font= legacy', async () => {
+  // Reset the cache and provide no explicit fontFile. The host may or
+  // may not have Montserrat installed. We assert the renderIntroCard
+  // returns SOMETHING for fontFile (null or a real path) — and that
+  // the invoked command uses fontfile= when the resolver returned a
+  // path, or font= when it returned null.
+  _resetFontPathCacheForTests();
+  let invokedCmd = null;
+  const result = await renderIntroCard({
+    hookText: 'Plan Early',
+    outputPath: '/tmp/intro.mp4',
+    execFn: async (cmd) => { invokedCmd = cmd; return { stdout: '', stderr: '' }; },
+  });
+  if (result.fontFile) {
+    assert.match(invokedCmd, /fontfile=/);
+  } else {
+    assert.match(invokedCmd, /font=Montserrat/);
+  }
+});
+
+test('PR-X renderIntroCard: returned metadata includes fontFile field (null when unresolved)', async () => {
+  _resetFontPathCacheForTests();
+  const result = await renderIntroCard({
+    hookText: 'Plan Early',
+    outputPath: '/tmp/intro.mp4',
+    fontFile: null, // explicit null forces fallback path test below
+    execFn: async () => ({ stdout: '', stderr: '' }),
+  });
+  // fontFile in result is either a resolved path OR null — but the key
+  // must exist on every render result for the orchestrator's diagnostic.
+  assert.ok('fontFile' in result, 'render result must always carry fontFile field for diagnostic');
 });

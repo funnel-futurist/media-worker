@@ -54,3 +54,19 @@ test('broll_picker: DEFAULT_MODEL stays in the Pro tier (no silent downgrade to 
   assert.match(modelId, /pro/i, `DEFAULT_MODEL "${modelId}" must be a Pro variant — Flash downgrade is forbidden`);
   assert.doesNotMatch(modelId, /flash/i, `DEFAULT_MODEL "${modelId}" must not contain "flash"`);
 });
+
+test('broll_picker: temperature is 0.2 for deterministic semantic matching (PR-Q)', () => {
+  // PR-Q lowered temperature from 0.5 → 0.2. The structured selection task
+  // benefits from more deterministic output — less random, more precise
+  // matching against library metadata. Guard against accidental bump.
+  assert.match(
+    SOURCE,
+    /temperature:\s*0\.2\b/,
+    'expected `temperature: 0.2` in generationConfig — PR-Q lowered from 0.5 for precision',
+  );
+  assert.doesNotMatch(
+    SOURCE,
+    /temperature:\s*0\.5\b/,
+    'pre-PR-Q temperature 0.5 must NOT appear — was too high for structured matching',
+  );
+});

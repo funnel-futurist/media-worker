@@ -159,3 +159,57 @@ test('formatSilenceAuditLine: dropped / subthreshold reads cleanly', () => {
     '[silence-audit] [78.000, 78.620] (0.620s) → DROPPED (subthreshold)',
   );
 });
+
+// ── PR-AD: capDropped distinguishes max_cut_fraction_cap from subthreshold ─
+
+test('PR-AD: silence overlapping a capDropped cut → decision=dropped, reason=max_cut_fraction_cap', () => {
+  // Simulates the jobId 7082844a failure mode: a 4s silence that the
+  // classifier would have happily cut, but the global cap evicted.
+  const { rows, summary } = auditSilenceCoverage({
+    mergedSilences: [{ start: 228.381, end: 232.509 }],
+    applied: [],
+    skipped: [],
+    capDropped: [{ start: 228.681, end: 232.359, safetyReason: 'post_sentence_dead_air' }],
+  });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].decision, 'dropped');
+  assert.equal(rows[0].reason, 'max_cut_fraction_cap');
+  assert.equal(summary.spansDropped, 1);
+});
+
+test('PR-AD: silence with NO overlapping capDropped cut → reason=subthreshold (catch-all)', () => {
+  // No cuts anywhere — true subthreshold case.
+  const { rows } = auditSilenceCoverage({
+    mergedSilences: [{ start: 78.0, end: 78.7 }],
+    applied: [],
+    skipped: [],
+    capDropped: [],
+  });
+  assert.equal(rows[0].decision, 'dropped');
+  assert.equal(rows[0].reason, 'subthreshold');
+});
+
+test('PR-AD: capDropped defaults to [] when omitted (backwards compat)', () => {
+  // PR-AC callers that haven't been updated yet still work — the old
+  // 'subthreshold' fallback applies.
+  const { rows } = auditSilenceCoverage({
+    mergedSilences: [{ start: 78.0, end: 78.7 }],
+    applied: [],
+    skipped: [],
+  });
+  assert.equal(rows[0].reason, 'subthreshold');
+});
+
+test('PR-AD: applied wins over capDropped when both overlap', () => {
+  // Defence: if a span somehow overlaps both an applied cut and a
+  // capDropped cut, the applied decision wins (it's what actually
+  // happens on the timeline).
+  const { rows } = auditSilenceCoverage({
+    mergedSilences: [{ start: 10.0, end: 13.0 }],
+    applied: [{ start: 10.5, end: 12.5, safetyReason: 'sentence_boundary' }],
+    skipped: [],
+    capDropped: [{ start: 11.0, end: 12.0, safetyReason: 'post_sentence_dead_air' }],
+  });
+  assert.equal(rows[0].decision, 'cut');
+  assert.equal(rows[0].reason, 'sentence_boundary');
+});

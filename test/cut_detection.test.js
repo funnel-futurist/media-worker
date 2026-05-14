@@ -1178,3 +1178,175 @@ test('PR-AC: regression — does NOT clip into adjacent words (0.15s retain pad 
   assert.ok(silenceCut.end <= 1.5 - 0.149,
     `cut.end (${silenceCut.end}) must leave at least 0.15s retain before next word at 1.5`);
 });
+
+// ── PR-AD: long post-comma pauses + cap protection ──────────────────────
+
+const PR_AD_ORCH_OPTS = {
+  ...PR_AC_ORCH_OPTS,
+  longCommaPauseAsSafeThreshSec: 1.5,
+  protectSafeCutsFromCap: true,
+};
+
+test('PR-AD: long post-comma pause (3s) → reclassified safe and cut', () => {
+  // [82.027, 85.386] (3.359s) was preserved as phrase_boundary_comma on
+  // jobId 7082844a. Long pauses after a comma aren't natural rhythm —
+  // they're dead air. New threshold promotes ≥ 1.5s → safe.
+  const words = [
+    w('first,', 0.0, 0.5),       // comma
+    w('second', 3.5, 4.0),       // 3s pause before this word, no continuation marker
+  ];
+  const cuts = detectAndClassifyCuts(words, {
+    sourceDuration: 6.0,
+    cutSafetyMode: 'safe_only',
+    ...PR_AD_ORCH_OPTS,
+  });
+  // Find a cut in the silence window.
+  const cut = cuts.applied.find((c) => c.start >= 0.5 && c.end <= 3.5);
+  assert.ok(cut, `expected a safe-only applied cut in the long comma pause; got applied=${JSON.stringify(cuts.applied)} skipped=${JSON.stringify(cuts.skipped)}`);
+  assert.equal(cut.safety, 'safe');
+  assert.ok(cut.safetyReason.startsWith('long_phrase_boundary_comma'),
+    `expected long_phrase_boundary_comma reason; got ${cut.safetyReason}`);
+});
+
+test('PR-AD: long comma_then_continuation pause (3.7s before "but") → reclassified safe', () => {
+  // [71.766, 75.466] (3.700s) — comma_then_continuation: 'but'. Same
+  // promotion path, different reason slug. Note: prev word must NOT
+  // normalise to anything in DEPENDENT_TRAILING_WORDS (otherwise the
+  // earlier dependent_trailing_word branch fires first) — 'today'
+  // is intentionally chosen.
+  const words = [
+    w('today,', 0.0, 0.5),
+    w('but', 4.2, 4.6),          // 3.7s pause, then continuation word
+    w('then', 4.7, 5.0),
+  ];
+  const cuts = detectAndClassifyCuts(words, {
+    sourceDuration: 6.0,
+    cutSafetyMode: 'safe_only',
+    ...PR_AD_ORCH_OPTS,
+  });
+  const cut = cuts.applied.find((c) => c.start >= 0.5 && c.end <= 4.2);
+  assert.ok(cut, `expected a safe-only applied cut in the long comma→but pause; got applied=${JSON.stringify(cuts.applied)} skipped=${JSON.stringify(cuts.skipped)}`);
+  assert.equal(cut.safety, 'safe');
+  assert.ok(cut.safetyReason.includes('long_comma_then_continuation'),
+    `expected long_comma_then_continuation reason; got ${cut.safetyReason}`);
+});
+
+test('PR-AD: short post-comma pause (0.8s) → stays preserved as soft phrase_boundary_comma', () => {
+  // Natural rhythm — must not get promoted. 0.8s pause is below the
+  // 1.5s threshold.
+  const words = [
+    w('first,', 0.0, 0.5),
+    w('second', 1.3, 1.8),       // 0.8s pause
+  ];
+  const cuts = detectAndClassifyCuts(words, {
+    sourceDuration: 5.0,
+    cutSafetyMode: 'safe_only',
+    ...PR_AD_ORCH_OPTS,
+  });
+  // 0.8s pause means cut window = 0.8 - 0.3 - 0.15 = 0.35s ≥ minCutDur.
+  // The cut is created and classified, but as 'soft' → not applied in
+  // safe_only mode.
+  const applied = cuts.applied.find((c) => c.start >= 0.5 && c.end <= 1.3);
+  assert.ok(!applied, `0.8s comma pause should NOT be applied in safe_only mode; got ${JSON.stringify(applied)}`);
+  const skipped = cuts.skipped.find((c) => c.start >= 0.5 && c.end <= 1.3);
+  assert.ok(skipped, `0.8s comma pause should appear in skipped[]; got skipped=${JSON.stringify(cuts.skipped)}`);
+  assert.equal(skipped.safetyReason, 'phrase_boundary_comma');
+});
+
+test('PR-AD: short mid-sentence pause (0.9s) → still risky, still preserved', () => {
+  // The one explicit "stay preserved" case from the audit:
+  // [106.904, 107.734] (0.830s) → PRESERVED (mid_sentence_no_boundary).
+  // Below cutMidSentenceLongerThan, neither comma nor sentence boundary.
+  // Note: 'and' would hit dependent_trailing_word — use 'foo' instead.
+  // Source padded to 30s so the cap doesn't evict the risky cut and the
+  // test can verify it survived classification into skipped[].
+  const words = [
+    w('foo', 0.0, 0.3),          // no punctuation, not in dep list
+    w('bar', 1.2, 1.6),          // 0.9s pause, no capital
+    w('baz', 1.7, 2.0),
+  ];
+  const cuts = detectAndClassifyCuts(words, {
+    sourceDuration: 30.0,
+    cutSafetyMode: 'safe_only',
+    ...PR_AD_ORCH_OPTS,
+  });
+  const applied = cuts.applied.find((c) => c.start >= 0.3 && c.end <= 1.2);
+  assert.ok(!applied, `short mid-sentence pause must not be cut in safe_only mode`);
+  const skipped = cuts.skipped.find((c) => c.start >= 0.3 && c.end <= 1.2);
+  assert.ok(skipped, `short mid-sentence pause should appear in skipped[]; got skipped=${JSON.stringify(cuts.skipped)}`);
+  assert.equal(skipped.safety, 'risky');
+  assert.ok(skipped.safetyReason.includes('mid_sentence'),
+    `expected mid_sentence reason; got ${skipped.safetyReason}`);
+});
+
+test('PR-AD: protectSafeCutsFromCap=true — safe sentence_boundary cuts survive when cap is exceeded', () => {
+  // Simulate the jobId 7082844a failure mode: many safe cuts whose total
+  // exceeds 40% of the source. Without protection, late cuts get
+  // evicted; with protection, all safe cuts pass through.
+  // Construct 6 sentences separated by 4s pauses on a 30s source.
+  // Sum of safe cut windows ≈ 6 × (4 - 0.3 - 0.15) = 21.3s ≈ 71% of 30s,
+  // well above the 0.4 cap (12s).
+  const words = [];
+  let t = 0;
+  for (let i = 0; i < 6; i++) {
+    words.push(w(`thought${i}.`, t, t + 0.4));
+    t += 0.4 + 4.0;
+  }
+  const sourceDuration = t + 1;
+
+  // Without protection — bare detectAndClassifyCuts with default cap behavior:
+  const withoutProtect = detectAndClassifyCuts(words, {
+    sourceDuration,
+    cutSafetyMode: 'safe_only',
+    ...PR_AC_ORCH_OPTS,
+    // explicitly NO protectSafeCutsFromCap
+  });
+  // Verify the cap actually kicks in without protection — fewer safe cuts than the 6 sentence boundaries.
+  assert.ok(
+    withoutProtect.applied.length < 6,
+    `cap should drop at least one safe cut without protection; got ${withoutProtect.applied.length}/6`,
+  );
+
+  // With protection — every safe sentence-boundary cut survives. The
+  // exact count may exceed 6 because the maxSingleCut split breaks the
+  // long trailing silence into two beat halves; what matters is that
+  // protection produces STRICTLY MORE applied cuts than no-protection
+  // AND every applied cut is safety='safe'.
+  const withProtect = detectAndClassifyCuts(words, {
+    sourceDuration,
+    cutSafetyMode: 'safe_only',
+    ...PR_AD_ORCH_OPTS,
+  });
+  assert.ok(
+    withProtect.applied.length > withoutProtect.applied.length,
+    `protection should preserve more cuts than the cap dropped; ` +
+    `with=${withProtect.applied.length} without=${withoutProtect.applied.length}`,
+  );
+  for (const c of withProtect.applied) {
+    assert.equal(c.safety, 'safe', `every applied cut must be safe; got ${c.safetyReason}`);
+  }
+});
+
+test('PR-AD: returnCapDropped surfaces evictees (without protection, for audit labelling)', () => {
+  // Even with protection on, callers may have leftover capDropped from
+  // running detection without protection (legacy callers). Verify the
+  // diff calculation surfaces them when the option is set.
+  const words = [];
+  let t = 0;
+  for (let i = 0; i < 6; i++) {
+    words.push(w(`thought${i}.`, t, t + 0.4));
+    t += 0.4 + 4.0;
+  }
+  const sourceDuration = t + 1;
+  const result = detectAndClassifyCuts(words, {
+    sourceDuration,
+    cutSafetyMode: 'safe_only',
+    ...PR_AC_ORCH_OPTS, // no cap protection
+    returnCapDropped: true,
+  });
+  // capDropped should contain cuts that the uncapped run produced but
+  // the capped run dropped — i.e. some non-empty set.
+  assert.ok(Array.isArray(result.capDropped));
+  assert.ok(result.capDropped.length > 0,
+    `expected capDropped[] to be non-empty when cap kicks in without protection; got ${result.capDropped.length}`);
+});

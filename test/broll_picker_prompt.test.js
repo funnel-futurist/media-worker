@@ -277,3 +277,95 @@ test("buildPrompts: unrecognized clientPreference falls back to 'balanced' (defe
   assert.match(userPrompt, /USE BOTH/);
   assert.doesNotMatch(userPrompt, /MINIMAL-CLIENT MODE/);
 });
+
+// ── PR-Q: match quality rubric, cut timing, visual variety, semantic relevance ──
+
+test('PR-Q: system prompt requires semantic relevance — generic picks are worse than no b-roll', () => {
+  const { systemPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.55,
+  });
+  assert.match(systemPrompt, /clear semantic relevance/i);
+  assert.match(systemPrompt, /generic or loosely related picks are worse than no b-roll/i);
+});
+
+test('PR-Q: system prompt output schema includes match_type and visual_concept fields', () => {
+  const { systemPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.55,
+  });
+  assert.match(systemPrompt, /match_type/);
+  assert.match(systemPrompt, /visual_concept/);
+  assert.match(systemPrompt, /"direct" \| "metaphor" \| "emotional"/);
+});
+
+test('PR-Q: MATCH QUALITY RUBRIC present with all four tiers (DIRECT / METAPHOR / EMOTIONAL / REJECT)', () => {
+  const { userPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.55,
+  });
+  assert.match(userPrompt, /MATCH QUALITY RUBRIC/);
+  assert.match(userPrompt, /DIRECT \(strongest\)/);
+  assert.match(userPrompt, /METAPHOR \(strong\)/);
+  assert.match(userPrompt, /EMOTIONAL \(acceptable only as last resort\)/);
+  assert.match(userPrompt, /REJECT \(never pick\)/);
+});
+
+test('PR-Q: rubric has concrete good/bad examples so Gemini sees what to pick and what to reject', () => {
+  const { userPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.55,
+  });
+  // Good examples
+  assert.match(userPrompt, /Good: Speaker says/);
+  // Bad examples
+  assert.match(userPrompt, /Bad: Speaker says/);
+  // Specific reject pattern — generic stock handshake
+  assert.match(userPrompt, /generic stock handshake/i);
+  // Specific reject pattern — random nature footage
+  assert.match(userPrompt, /random nature footage/i);
+  // REJECT instruction — leave speaker on camera
+  assert.match(userPrompt, /leave the speaker on camera/i);
+});
+
+test('PR-Q: CUT TIMING section present with sentence boundary and punchline rules', () => {
+  const { userPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.55,
+  });
+  assert.match(userPrompt, /CUT TIMING/);
+  assert.match(userPrompt, /never mid-word/i);
+  assert.match(userPrompt, /natural sentence boundary or pause/i);
+  assert.match(userPrompt, /punchline.*or emotional climax/i);
+});
+
+test('PR-Q: VISUAL VARIETY section present with consecutive-concept and diversity rules', () => {
+  const { userPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.55,
+  });
+  assert.match(userPrompt, /VISUAL VARIETY/);
+  assert.match(userPrompt, /visual_concept/);
+  assert.match(userPrompt, /same or very similar visual_concept consecutively/i);
+  assert.match(userPrompt, /when_to_use.*context.*emotion.*insight/i);
+  assert.match(userPrompt, /Do not match on asset_title alone/i);
+});
+
+test('PR-Q: constraints include match_type and visual_concept enforcement', () => {
+  const { userPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.55,
+  });
+  // match_type constraint
+  assert.match(userPrompt, /match_type must be "direct", "metaphor", or "emotional"/);
+  assert.match(userPrompt, /If most of your picks are "emotional", you are over-picking/);
+  // visual_concept constraint
+  assert.match(userPrompt, /Consecutive insertions MUST have different visual_concepts/);
+});
+
+test('PR-Q: anti-padding self-check question is present', () => {
+  const { userPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.55,
+  });
+  assert.match(userPrompt, /Would a viewer instantly understand why this visual appears/i);
+});
+
+test('PR-Q: BETTER ON SPEAKER FACE includes momentum/punchline rule', () => {
+  const { userPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.55,
+  });
+  assert.match(userPrompt, /building to a punchline or key point.*cutting away breaks momentum/i);
+});

@@ -233,6 +233,17 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
           });
         }
       }
+      // Silence detection tuning. noiseDb must be in [-60, -10] (dB);
+      // minDur must be in (0, 5] (seconds). Ranges are generous — the
+      // defaults (-35 / 0.6) sit comfortably in the middle.
+      const noiseDbRaw = body.options.silenceNoiseDb;
+      if (noiseDbRaw != null && (typeof noiseDbRaw !== 'number' || !Number.isFinite(noiseDbRaw) || noiseDbRaw < -60 || noiseDbRaw > -10)) {
+        return res.status(400).json({ jobId, step: 'validate', error: 'options.silenceNoiseDb must be a number in [-60, -10]' });
+      }
+      const silenceMinDurRaw = body.options.silenceMinDur;
+      if (silenceMinDurRaw != null && (typeof silenceMinDurRaw !== 'number' || !Number.isFinite(silenceMinDurRaw) || silenceMinDurRaw <= 0 || silenceMinDurRaw > 5)) {
+        return res.status(400).json({ jobId, step: 'validate', error: 'options.silenceMinDur must be a number in (0, 5]' });
+      }
     }
 
     // PR-I v2: callback shape validation. The async-mode contract requires

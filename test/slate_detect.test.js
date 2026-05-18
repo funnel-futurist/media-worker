@@ -19,7 +19,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { detectSlate } from '../lib/slate_detect.js';
+import { detectSlate, validateSlatePreservesHooks } from '../lib/slate_detect.js';
 
 // ── helpers ────────────────────────────────────────────────────────────
 
@@ -312,4 +312,182 @@ test('detectSlate: builds transcript with [start_s] markers and word body', asyn
   // Generation config is set for stable detection
   assert.equal(capturedBody.generationConfig.temperature, 0.1);
   assert.equal(capturedBody.generationConfig.responseMimeType, 'application/json');
+});
+
+// ── PR-AH: post-hoc hook validator (validateSlatePreservesHooks) ─────
+
+test('validator: preserves rhetorical question hook between meta markers (Sat 23 regression)', () => {
+  // Exact Sat 23 pattern: "Saturday, May 23. If not now, when? Selected option. Finding…"
+  // Gemini bundled everything into the slate at 12.16s. The validator must
+  // shorten to the start of "If not now, when?" and preserve the hook.
+  const words = [
+    w('Saturday,', 0.20, 0.60),
+    w('May', 0.65, 0.85),
+    w('23.', 0.90, 1.20),
+    w('If', 2.00, 2.15),
+    w('not', 2.20, 2.40),
+    w('now,', 2.45, 2.70),
+    w('when?', 2.75, 3.10),
+    w('Selected', 3.80, 4.20),
+    w('option.', 4.25, 4.60),
+    w('Finding', 5.00, 5.30),
+    w('the', 5.35, 5.45),
+    w('right', 5.50, 5.80),
+  ];
+  const parsed = {
+    isSlate: true,
+    slateEndSeconds: 12.16,
+    transcribedText: 'Saturday, May 23. If not now, when? Selected option. Finding',
+    identifier: 'Phil - May 23',
+  };
+  const result = validateSlatePreservesHooks(parsed, words);
+  // Slate should end at start of "If" (2.00s), not 12.16s
+  assert.equal(result.slateEndSeconds, 2.00);
+  assert.match(result.transcribedText, /Saturday,/);
+  assert.match(result.transcribedText, /23\./);
+  assert.ok(!result.transcribedText.includes('If'), 'hook text must not be in slate transcribedText');
+});
+
+test('validator: preserves topic opener between meta markers (Mon 18 regression)', () => {
+  // Mon 18 pattern: "Monday, May 18. Thinking about planning versus deciding to plan."
+  // Gemini bundled everything into the slate at 14.13s.
+  const words = [
+    w('Monday,', 0.30, 0.70),
+    w('May', 0.75, 0.95),
+    w('18.', 1.00, 1.30),
+    w('Thinking', 2.50, 2.90),
+    w('about', 2.95, 3.15),
+    w('planning', 3.20, 3.60),
+    w('versus', 3.65, 3.95),
+    w('deciding', 4.00, 4.40),
+    w('to', 4.45, 4.55),
+    w('plan.', 4.60, 4.90),
+  ];
+  const parsed = {
+    isSlate: true,
+    slateEndSeconds: 14.13,
+    transcribedText: 'Monday, May 18. Thinking about planning versus deciding to plan.',
+    identifier: 'Phil - May 18',
+  };
+  const result = validateSlatePreservesHooks(parsed, words);
+  // Slate should end at start of "Thinking" (2.50s)
+  assert.equal(result.slateEndSeconds, 2.50);
+  assert.match(result.transcribedText, /Monday,/);
+  assert.match(result.transcribedText, /18\./);
+  assert.ok(!result.transcribedText.includes('Thinking'), 'content must not be in slate transcribedText');
+});
+
+test('validator: does NOT shorten genuine multi-part slate (no regression on PR #114)', () => {
+  // "Monday April 27. Title: Why Next Month Becomes Next Year. Selected Option A."
+  // All three sentences are meta — validator must leave slate unchanged.
+  const words = [
+    w('Monday', 0.10, 0.40),
+    w('April', 0.45, 0.70),
+    w('27.', 0.75, 1.00),
+    w('Title:', 1.30, 1.60),
+    w('Why', 1.65, 1.80),
+    w('Next', 1.85, 2.00),
+    w('Month', 2.05, 2.30),
+    w('Becomes', 2.35, 2.60),
+    w('Next', 2.65, 2.80),
+    w('Year.', 2.85, 3.10),
+    w('Selected', 3.40, 3.70),
+    w('Option', 3.75, 4.00),
+    w('A.', 4.05, 4.20),
+    w('The', 5.00, 5.10),
+    w('reason', 5.15, 5.40),
+  ];
+  const parsed = {
+    isSlate: true,
+    slateEndSeconds: 4.50,
+    transcribedText: 'Monday April 27. Title: Why Next Month Becomes Next Year. Selected Option A.',
+    identifier: 'April 27 - option A',
+  };
+  const result = validateSlatePreservesHooks(parsed, words);
+  // Should NOT shorten — "Title:" prefix makes sentence 2 a meta marker,
+  // "Selected Option A." matches the option pattern.
+  assert.equal(result.slateEndSeconds, 4.50, 'multi-part slate must not be shortened');
+});
+
+test('validator: passes through when no slate detected', () => {
+  const result = validateSlatePreservesHooks(
+    { isSlate: false, slateEndSeconds: 0, transcribedText: '', identifier: null },
+    [w('hello', 0, 0.5)],
+  );
+  assert.equal(result.isSlate, false);
+  assert.equal(result.slateEndSeconds, 0);
+});
+
+test('validator: passes through when words array is empty', () => {
+  const parsed = { isSlate: true, slateEndSeconds: 5, transcribedText: 'test', identifier: null };
+  const result = validateSlatePreservesHooks(parsed, []);
+  assert.equal(result.slateEndSeconds, 5);
+});
+
+// ── PR-AH: end-to-end detectSlate with hook preservation ──────────────
+
+test('detectSlate: Sat 23 hook preserved when Gemini over-classifies (e2e)', async () => {
+  // Simulate Gemini returning slateEndSeconds: 12.16 (bundles the hook).
+  // The post-hoc validator should shorten it before the final return.
+  const words = [
+    w('Saturday,', 0.20, 0.60),
+    w('May', 0.65, 0.85),
+    w('23.', 0.90, 1.20),
+    w('If', 2.00, 2.15),
+    w('not', 2.20, 2.40),
+    w('now,', 2.45, 2.70),
+    w('when?', 2.75, 3.10),
+    w('Selected', 3.80, 4.20),
+    w('option.', 4.25, 4.60),
+    w('Finding', 5.00, 5.30),
+    w('the', 5.35, 5.45),
+    w('right', 5.50, 5.80),
+    w('plan.', 5.85, 6.10),
+  ];
+  const result = await detectSlate(
+    { wordTimestamps: words, sourceDuration: 120 },
+    {
+      apiKey: 'test',
+      fetchImpl: mockFetcher({
+        isSlate: true,
+        slateEndSeconds: 12.16,
+        transcribedText: 'Saturday, May 23. If not now, when? Selected option. Finding',
+        identifier: 'Phil - May 23',
+      }),
+    },
+  );
+  assert.ok(result, 'should still detect a slate');
+  assert.equal(result.end, 2.00, 'slate end should be at start of "If" (hook preserved)');
+  assert.ok(!result.transcribed_text.includes('If'), 'hook must not appear in transcribed text');
+});
+
+test('detectSlate: Mon 18 topic opener preserved when Gemini over-classifies (e2e)', async () => {
+  const words = [
+    w('Monday,', 0.30, 0.70),
+    w('May', 0.75, 0.95),
+    w('18.', 1.00, 1.30),
+    w('Thinking', 2.50, 2.90),
+    w('about', 2.95, 3.15),
+    w('planning', 3.20, 3.60),
+    w('versus', 3.65, 3.95),
+    w('deciding', 4.00, 4.40),
+    w('to', 4.45, 4.55),
+    w('plan.', 4.60, 4.90),
+    w('And', 5.50, 5.60),
+    w('so', 5.65, 5.80),
+  ];
+  const result = await detectSlate(
+    { wordTimestamps: words, sourceDuration: 120 },
+    {
+      apiKey: 'test',
+      fetchImpl: mockFetcher({
+        isSlate: true,
+        slateEndSeconds: 14.13,
+        transcribedText: 'Monday, May 18. Thinking about planning versus deciding to plan.',
+        identifier: 'Phil - May 18',
+      }),
+    },
+  );
+  assert.ok(result, 'should still detect a slate');
+  assert.equal(result.end, 2.50, 'slate end should be at start of "Thinking" (content preserved)');
 });

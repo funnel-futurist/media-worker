@@ -233,6 +233,21 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
           });
         }
       }
+      // Banner overlay for 1080x1350 ad format. bannerEnabled is boolean
+      // opt-in; bannerConfig must have at least a text field when enabled.
+      const bannerEnabledRaw = body.options.bannerEnabled;
+      if (bannerEnabledRaw != null && typeof bannerEnabledRaw !== 'boolean') {
+        return res.status(400).json({ jobId, step: 'validate', error: 'options.bannerEnabled must be a boolean' });
+      }
+      if (bannerEnabledRaw === true) {
+        const bc = body.options.bannerConfig;
+        if (!bc || typeof bc !== 'object' || typeof bc.text !== 'string' || bc.text.length === 0) {
+          return res.status(400).json({ jobId, step: 'validate', error: 'options.bannerConfig.text is required when bannerEnabled is true' });
+        }
+        if (bc.height != null && (typeof bc.height !== 'number' || bc.height < 50 || bc.height > 500)) {
+          return res.status(400).json({ jobId, step: 'validate', error: 'options.bannerConfig.height must be a number in [50, 500]' });
+        }
+      }
       // Silence detection tuning. noiseDb must be in [-60, -10] (dB);
       // minDur must be in (0, 5] (seconds). Ranges are generous — the
       // defaults (-35 / 0.6) sit comfortably in the middle.

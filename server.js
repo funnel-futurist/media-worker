@@ -29,6 +29,7 @@ import { audioLoudnormTrimRouter } from './routes/audio-loudnorm-trim.js';
 import { audioTranscribeRouter } from './routes/audio-transcribe.js';
 import { brollPickerRouter } from './routes/broll-picker.js';
 import { cleanModeComposeRouter } from './routes/clean-mode-compose.js';
+import { repatchCaptionsRouter } from './routes/repatch-captions.js';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -80,6 +81,8 @@ app.use('/', audioTranscribeRouter);
 app.use('/', brollPickerRouter);
 // Routes — Phase 13 M2 (Clean-mode full compose pipeline)
 app.use('/', cleanModeComposeRouter);
+// Routes — PR-AF (Caption-only repatch on already-edited reels)
+app.use('/', repatchCaptionsRouter);
 
 // Global error handler
 app.use((err, req, res, _next) => {

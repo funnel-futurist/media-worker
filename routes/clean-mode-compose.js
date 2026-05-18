@@ -259,6 +259,29 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
       if (silenceMinDurRaw != null && (typeof silenceMinDurRaw !== 'number' || !Number.isFinite(silenceMinDurRaw) || silenceMinDurRaw <= 0 || silenceMinDurRaw > 5)) {
         return res.status(400).json({ jobId, step: 'validate', error: 'options.silenceMinDur must be a number in (0, 5]' });
       }
+      // PR-AF: Deepgram keyword boosts. Optional array of non-empty
+      // strings (max 20 — Deepgram's documented limit is higher but we
+      // want to fail fast on misconfigured per-client defaults). Each
+      // entry is either a bare term ("special needs") or pre-formatted
+      // "<term>:<intensifier>" where intensifier is 1-10.
+      const dgKw = body.options.deepgramKeywords;
+      if (dgKw != null) {
+        if (!Array.isArray(dgKw)) {
+          return res.status(400).json({ jobId, step: 'validate', error: 'options.deepgramKeywords must be an array of strings' });
+        }
+        if (dgKw.length > 20) {
+          return res.status(400).json({ jobId, step: 'validate', error: 'options.deepgramKeywords may not exceed 20 entries' });
+        }
+        for (let i = 0; i < dgKw.length; i++) {
+          const term = dgKw[i];
+          if (typeof term !== 'string' || term.trim().length === 0) {
+            return res.status(400).json({ jobId, step: 'validate', error: `options.deepgramKeywords[${i}] must be a non-empty string` });
+          }
+          if (term.length > 200) {
+            return res.status(400).json({ jobId, step: 'validate', error: `options.deepgramKeywords[${i}] is too long (max 200 chars)` });
+          }
+        }
+      }
     }
 
     // PR-I v2: callback shape validation. The async-mode contract requires
@@ -393,11 +416,15 @@ async function runAsyncJob(body, jobId, callback) {
   }
 
   const editNotes = buildEditNotesSummary(result);
+  // PR-AF: forward repatch asset URLs to the portal callback when the
+  // pipeline preserved them (subtitle burn ran + upload succeeded).
   const payload = buildReelEditedPayload({
     contentItemId: body.contentItemId,
     clientId: body.clientId,
     editedUrl,
     editNotes,
+    preCaptionVideoUrl: result.repatchAssets?.preCaptionVideoUrl,
+    subtitleAssUrl: result.repatchAssets?.subtitleAssUrl,
   });
 
   const post = await postReelEditedCallback({

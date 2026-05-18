@@ -12,7 +12,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mapDeepgramResponse } from '../lib/deepgram_transcribe.js';
+import { mapDeepgramResponse, buildDeepgramQuery } from '../lib/deepgram_transcribe.js';
 
 // Minimal fixture matching Deepgram's prerecorded API response (model=nova-3,
 // smart_format=true, punctuate=true). Trimmed to the fields we read.
@@ -196,4 +196,51 @@ test('map: preserves input word order (no internal sorting)', () => {
   assert.equal(out.word_timestamps[0].word, 'First');
   assert.equal(out.word_timestamps[1].word, 'second');
   assert.equal(out.word_timestamps[2].word, 'third.');
+});
+
+// ── PR-AF: buildDeepgramQuery keyword boosts ────────────────────────────
+
+test('buildDeepgramQuery: no keywords → identical to baseline query', () => {
+  const q = buildDeepgramQuery();
+  assert.match(q, /model=nova-3/);
+  assert.match(q, /smart_format=true/);
+  assert.doesNotMatch(q, /keywords=/);
+});
+
+test('buildDeepgramQuery: empty array → no keywords appended', () => {
+  const q = buildDeepgramQuery([]);
+  assert.doesNotMatch(q, /keywords=/);
+});
+
+test('buildDeepgramQuery: bare term gets default :5 intensifier appended', () => {
+  const q = buildDeepgramQuery(['wondered']);
+  // URLSearchParams encodes the colon as %3A
+  assert.match(q, /keywords=wondered%3A5/);
+});
+
+test('buildDeepgramQuery: multi-word term URL-encodes the space + adds :5', () => {
+  // The "specialist" → "special needs" fix Chelsea flagged on Tue 19.
+  const q = buildDeepgramQuery(['special needs']);
+  // URLSearchParams encodes spaces as +, colon as %3A
+  assert.match(q, /keywords=special\+needs%3A5/);
+});
+
+test('buildDeepgramQuery: pre-formatted "<term>:<n>" string is passed through unchanged', () => {
+  // Operator can override the default intensifier.
+  const q = buildDeepgramQuery(['rare-term:9']);
+  assert.match(q, /keywords=rare-term%3A9/);
+  assert.doesNotMatch(q, /:5/); // didn't double-stamp
+});
+
+test('buildDeepgramQuery: multiple keywords → multiple keywords= params', () => {
+  const q = buildDeepgramQuery(['special needs', 'wondered']);
+  const matches = q.match(/keywords=/g) ?? [];
+  assert.equal(matches.length, 2);
+});
+
+test('buildDeepgramQuery: non-string and empty entries are silently ignored', () => {
+  const q = buildDeepgramQuery(['ok-term', '', '   ', null, undefined, 42]);
+  const matches = q.match(/keywords=/g) ?? [];
+  assert.equal(matches.length, 1);
+  assert.match(q, /keywords=ok-term%3A5/);
 });

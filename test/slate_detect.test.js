@@ -316,10 +316,13 @@ test('detectSlate: builds transcript with [start_s] markers and word body', asyn
 
 // ── PR-AH: post-hoc hook validator (validateSlatePreservesHooks) ─────
 
-test('validator: preserves rhetorical question hook between meta markers (Sat 23 regression)', () => {
-  // Exact Sat 23 pattern: "Saturday, May 23. If not now, when? Selected option. Finding…"
-  // Gemini bundled everything into the slate at 12.16s. The validator must
-  // shorten to the start of "If not now, when?" and preserve the hook.
+test('validator: Sat 23 title-readout "If not now, when?" followed by meta-marker → NOT preserved (title readout)', () => {
+  // Sat 23 pattern: "Saturday, May 23. If not now, when? Selected option. Finding…"
+  // "If not now, when?" ends in ? but is followed by "Selected option." (meta-marker).
+  // This makes it a TITLE READOUT, not a real content hook — Phil is reading
+  // the reel title before saying "selected option" as the take marker.
+  // The validator should NOT shorten the slate here — the full slate
+  // (date + title + option) should be removed.
   const words = [
     w('Saturday,', 0.20, 0.60),
     w('May', 0.65, 0.85),
@@ -341,11 +344,9 @@ test('validator: preserves rhetorical question hook between meta markers (Sat 23
     identifier: 'Phil - May 23',
   };
   const result = validateSlatePreservesHooks(parsed, words);
-  // Slate should end at start of "If" (2.00s), not 12.16s
-  assert.equal(result.slateEndSeconds, 2.00);
-  assert.match(result.transcribedText, /Saturday,/);
-  assert.match(result.transcribedText, /23\./);
-  assert.ok(!result.transcribedText.includes('If'), 'hook text must not be in slate transcribedText');
+  // Slate should NOT be shortened — "If not now, when?" is a title readout
+  // because the next sentence "Selected option." is a meta-marker.
+  assert.equal(result.slateEndSeconds, 12.16, 'slate must not be shortened for title-readout ? sentences');
 });
 
 test('validator: preserves topic opener between meta markers (Mon 18 regression)', () => {
@@ -426,9 +427,10 @@ test('validator: passes through when words array is empty', () => {
 
 // ── PR-AH: end-to-end detectSlate with hook preservation ──────────────
 
-test('detectSlate: Sat 23 hook preserved when Gemini over-classifies (e2e)', async () => {
-  // Simulate Gemini returning slateEndSeconds: 12.16 (bundles the hook).
-  // The post-hoc validator should shorten it before the final return.
+test('detectSlate: Sat 23 title-readout NOT preserved — full slate removed (e2e)', async () => {
+  // "If not now, when?" is followed by "Selected option." (meta-marker),
+  // so the validator treats it as a title readout, not a content hook.
+  // The full Gemini slate end (12.16s) should pass through un-shortened.
   const words = [
     w('Saturday,', 0.20, 0.60),
     w('May', 0.65, 0.85),
@@ -457,8 +459,12 @@ test('detectSlate: Sat 23 hook preserved when Gemini over-classifies (e2e)', asy
     },
   );
   assert.ok(result, 'should still detect a slate');
-  assert.equal(result.end, 2.00, 'slate end should be at start of "If" (hook preserved)');
-  assert.ok(!result.transcribed_text.includes('If'), 'hook must not appear in transcribed text');
+  // "If not now, when?" skipped (title readout, followed by meta-marker).
+  // "Selected option." skipped (meta-marker itself, not a hook).
+  // "Finding the right plan." IS content (4 non-meta words) → slate ends
+  // at start of "Finding" (5.00s). This removes the entire slate block:
+  // date + title readout + option marker.
+  assert.equal(result.end, 5.00, 'slate must end at content start "Finding", not at the title-readout ?');
 });
 
 test('detectSlate: Mon 18 topic opener preserved when Gemini over-classifies (e2e)', async () => {
@@ -490,4 +496,33 @@ test('detectSlate: Mon 18 topic opener preserved when Gemini over-classifies (e2
   );
   assert.ok(result, 'should still detect a slate');
   assert.equal(result.end, 2.50, 'slate end should be at start of "Thinking" (content preserved)');
+});
+
+test('validator: real ? hook NOT followed by meta-marker → still preserved', () => {
+  // Contrast case: "Monday, May 18. What if you planned ahead? The key is..."
+  // "What if you planned ahead?" is a real hook followed by content, NOT
+  // a meta-marker. The validator should still shorten the slate.
+  const words = [
+    w('Monday,', 0.30, 0.70),
+    w('May', 0.75, 0.95),
+    w('18.', 1.00, 1.30),
+    w('What', 2.00, 2.15),
+    w('if', 2.20, 2.30),
+    w('you', 2.35, 2.45),
+    w('planned', 2.50, 2.80),
+    w('ahead?', 2.85, 3.20),
+    w('The', 3.50, 3.60),
+    w('key', 3.65, 3.80),
+    w('is', 3.85, 3.95),
+  ];
+  const parsed = {
+    isSlate: true,
+    slateEndSeconds: 10.0,
+    transcribedText: 'Monday, May 18. What if you planned ahead? The key is',
+    identifier: 'Phil - May 18',
+  };
+  const result = validateSlatePreservesHooks(parsed, words);
+  // "What if you planned ahead?" is NOT followed by a meta-marker → preserve it
+  assert.equal(result.slateEndSeconds, 2.00, 'real hook must be preserved (slate shortened to before the ?)');
+  assert.ok(!result.transcribedText.includes('What'), 'hook text must not be in slate transcribedText');
 });

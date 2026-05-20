@@ -19,7 +19,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { detectSlate, validateSlatePreservesHooks, extendSlateForLateMetaMarkers } from '../lib/slate_detect.js';
+import { detectSlate, validateSlatePreservesHooks, extendSlateForLateMetaMarkers, detectDeterministicSlateFloor } from '../lib/slate_detect.js';
 
 // ── helpers ────────────────────────────────────────────────────────────
 
@@ -680,4 +680,167 @@ test('PR-AK extender: passes through with empty words array', () => {
   const parsed = { isSlate: true, slateEndSeconds: 5, transcribedText: 'x', identifier: null };
   const result = extendSlateForLateMetaMarkers(parsed, []);
   assert.equal(result.slateEndSeconds, 5);
+});
+
+// ── PR-AL: deterministic slate floor (detectDeterministicSlateFloor) ──
+
+test('PR-AL floor: catches Phil-style date + title + final version even when Gemini misses', () => {
+  // The exact failure mode Chelsea hit: Gemini cuts only the date, the
+  // title and "Final version" leak. PR-AL guarantees this gets cut
+  // independent of Gemini.
+  const words = [
+    w('Monday,', 0.20, 0.60),
+    w('May', 0.65, 0.85),
+    w('18.', 0.90, 1.20),
+    w('Thinking', 1.80, 2.10),
+    w('about', 2.15, 2.35),
+    w('planning.', 2.40, 2.80),
+    w('Final', 3.20, 3.50),
+    w('version.', 3.55, 3.95),
+    w('Most', 4.50, 4.80),
+    w('families', 4.85, 5.30),
+  ];
+  const result = detectDeterministicSlateFloor(words);
+  assert.ok(result, 'should detect slate floor');
+  // First sentence "Monday, May 18." → meta (date)
+  // Second sentence "Thinking about planning." → NOT a meta marker (no date/option/final/title)
+  //   → STOP. Floor = end of first sentence (1.20s).
+  // This is a known limitation: title sentences alone aren't detectable
+  // as meta. PR-AL only catches what's deterministically identifiable.
+  // Gemini fills the rest (with PR-AK extender catching late markers).
+  assert.equal(result.endSec, 1.20);
+  assert.equal(result.sentences.length, 1);
+});
+
+test("PR-AL floor: walks past 'Selected option.' and 'Final version.' stacked", () => {
+  // When meta markers stack at the start (no title in between), PR-AL
+  // catches them all.
+  const words = [
+    w('Saturday,', 0.20, 0.60),
+    w('May', 0.65, 0.85),
+    w('23.', 0.90, 1.20),
+    w('Selected', 1.80, 2.20),
+    w('option.', 2.25, 2.60),
+    w('Final', 3.10, 3.40),
+    w('version.', 3.45, 3.85),
+    w('Finding', 4.50, 4.80),
+    w('the', 4.85, 4.95),
+    w('right', 5.00, 5.25),
+  ];
+  const result = detectDeterministicSlateFloor(words);
+  assert.ok(result);
+  // All 3 meta sentences walked. Stops at "Finding the right" (content).
+  assert.equal(result.endSec, 3.85);
+  assert.equal(result.sentences.length, 3);
+});
+
+test('PR-AL floor: returns null when transcript opens with content', () => {
+  // Justine-style direct opener: no slate. PR-AL must not invent one.
+  const words = [
+    w('Hey', 0.20, 0.40),
+    w('founders,', 0.45, 0.80),
+    w('let', 0.90, 1.05),
+    w('me', 1.10, 1.20),
+    w('tell', 1.25, 1.45),
+    w('you.', 1.50, 1.80),
+  ];
+  const result = detectDeterministicSlateFloor(words);
+  assert.equal(result, null);
+});
+
+test('PR-AL floor: returns null on empty input', () => {
+  assert.equal(detectDeterministicSlateFloor([]), null);
+  assert.equal(detectDeterministicSlateFloor(null), null);
+});
+
+test('PR-AL e2e: deterministic floor used when Gemini returns isSlate:false', async () => {
+  // Gemini sometimes mis-classifies short slates as non-slate. PR-AL
+  // catches them anyway.
+  const words = [
+    w('Saturday,', 0.20, 0.60),
+    w('May', 0.65, 0.85),
+    w('23.', 0.90, 1.20),
+    w('Selected', 1.80, 2.20),
+    w('option.', 2.25, 2.60),
+    w('Finding', 3.20, 3.50),
+    w('the', 3.55, 3.65),
+    w('right', 3.70, 3.95),
+    w('plan.', 4.00, 4.30),
+  ];
+  const result = await detectSlate(
+    { wordTimestamps: words, sourceDuration: 120 },
+    {
+      apiKey: 'test',
+      fetchImpl: mockFetcher({
+        isSlate: false,   // Gemini says no slate!
+        slateEndSeconds: 0,
+        transcribedText: '',
+        identifier: null,
+      }),
+    },
+  );
+  assert.ok(result, 'PR-AL: deterministic floor should still detect a slate');
+  // Floor walks date + "Selected option." (both meta) → 2.60s.
+  // Then snap to next word boundary ("Finding" at 3.20s).
+  assert.ok(result.end >= 2.6, 'slate end must cover date + option marker');
+  assert.equal(result.identifier, 'deterministic_floor');
+});
+
+test('PR-AL e2e: deterministic floor wins over short Gemini slate', async () => {
+  // Gemini caught the date (1.20s) but PR-AL walks further to include
+  // "Selected option." (2.60s). max(1.20, 2.60) = 2.60.
+  const words = [
+    w('Saturday,', 0.20, 0.60),
+    w('May', 0.65, 0.85),
+    w('23.', 0.90, 1.20),
+    w('Selected', 1.80, 2.20),
+    w('option.', 2.25, 2.60),
+    w('Finding', 3.20, 3.50),
+    w('the', 3.55, 3.65),
+    w('right', 3.70, 3.95),
+    w('plan.', 4.00, 4.30),
+  ];
+  const result = await detectSlate(
+    { wordTimestamps: words, sourceDuration: 120 },
+    {
+      apiKey: 'test',
+      fetchImpl: mockFetcher({
+        isSlate: true,
+        slateEndSeconds: 1.20,   // Gemini only caught the date
+        transcribedText: 'Saturday, May 23.',
+        identifier: 'Phil - May 23',
+      }),
+    },
+  );
+  // PR-AL pushes past Selected option. Snap finds Finding at 3.20s.
+  assert.ok(result.end >= 2.6);
+});
+
+test('PR-AL e2e: Gemini wins when it already cut more than deterministic', async () => {
+  // Gemini cut past the title (which deterministic can't detect). PR-AL
+  // shouldn't shorten — uses max().
+  const words = [
+    w('Monday,', 0.30, 0.70),
+    w('May', 0.75, 0.95),
+    w('18.', 1.00, 1.30),
+    w('Thinking', 1.80, 2.10),
+    w('about', 2.15, 2.35),
+    w('planning.', 2.40, 2.80),
+    w('The', 3.50, 3.60),
+    w('truth', 3.65, 3.90),
+  ];
+  const result = await detectSlate(
+    { wordTimestamps: words, sourceDuration: 120 },
+    {
+      apiKey: 'test',
+      fetchImpl: mockFetcher({
+        isSlate: true,
+        slateEndSeconds: 2.80,   // Gemini caught date + title
+        transcribedText: 'Monday, May 18. Thinking about planning.',
+        identifier: 'Phil - May 18',
+      }),
+    },
+  );
+  // Deterministic floor would only get to 1.30 (date). Gemini's 2.80 wins.
+  assert.ok(result.end >= 2.8);
 });

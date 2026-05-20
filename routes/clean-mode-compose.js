@@ -418,6 +418,8 @@ async function runAsyncJob(body, jobId, callback) {
   const editNotes = buildEditNotesSummary(result);
   // PR-AF: forward repatch asset URLs to the portal callback when the
   // pipeline preserved them (subtitle burn ran + upload succeeded).
+  // Ad-routing: also forward insertions count + banner/intro flags so the
+  // portal can classify edit_intensity (light_edit | heavy_edit).
   const payload = buildReelEditedPayload({
     contentItemId: body.contentItemId,
     clientId: body.clientId,
@@ -425,6 +427,9 @@ async function runAsyncJob(body, jobId, callback) {
     editNotes,
     preCaptionVideoUrl: result.repatchAssets?.preCaptionVideoUrl,
     subtitleAssUrl: result.repatchAssets?.subtitleAssUrl,
+    insertionsCount: result.insertions?.count ?? 0,
+    bannerApplied: result.steps?.bannerOverlay?.ok === true,
+    introHookApplied: result.introHook?.applied === true,
   });
 
   const post = await postReelEditedCallback({

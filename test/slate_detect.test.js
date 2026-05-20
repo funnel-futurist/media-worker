@@ -427,10 +427,11 @@ test('validator: passes through when words array is empty', () => {
 
 // ── PR-AH: end-to-end detectSlate with hook preservation ──────────────
 
-test('detectSlate: Sat 23 title-readout NOT preserved — full slate removed (e2e)', async () => {
-  // "If not now, when?" is followed by "Selected option." (meta-marker),
-  // so the validator treats it as a title readout, not a content hook.
-  // The full Gemini slate end (12.16s) should pass through un-shortened.
+test('PR-AJ: detectSlate trusts Gemini slateEndSeconds — full intro cut on Sat 23 (e2e)', async () => {
+  // PR-AJ disabled the hook-validator. Phil's "If not now, when?" is a
+  // title readout, not a content hook — the full slate (date + title
+  // readout + option marker) must be cut as one block. Gemini returns
+  // slateEndSeconds: 12.16 and that value passes through unchanged.
   const words = [
     w('Saturday,', 0.20, 0.60),
     w('May', 0.65, 0.85),
@@ -459,15 +460,15 @@ test('detectSlate: Sat 23 title-readout NOT preserved — full slate removed (e2
     },
   );
   assert.ok(result, 'should still detect a slate');
-  // "If not now, when?" skipped (title readout, followed by meta-marker).
-  // "Selected option." skipped (meta-marker itself, not a hook).
-  // "Finding the right plan." IS content (4 non-meta words) → slate ends
-  // at start of "Finding" (5.00s). This removes the entire slate block:
-  // date + title readout + option marker.
-  assert.equal(result.end, 5.00, 'slate must end at content start "Finding", not at the title-readout ?');
+  assert.equal(result.end, 12.16, 'PR-AJ: validator disabled — Gemini slate end passes through');
 });
 
-test('detectSlate: Mon 18 topic opener preserved when Gemini over-classifies (e2e)', async () => {
+test('PR-AJ: detectSlate trusts Gemini slateEndSeconds — full intro cut on Mon 18 (e2e)', async () => {
+  // Mon 18 has "Monday, May 18. Thinking about planning versus deciding
+  // to plan." which is Phil's date + title-readout pattern. The whole
+  // slate (14.13s in Gemini's response) must be cut. The validator used
+  // to preserve "Thinking about planning..." as a content hook — that
+  // was wrong; it's a title sentence, not a real hook.
   const words = [
     w('Monday,', 0.30, 0.70),
     w('May', 0.75, 0.95),
@@ -495,7 +496,7 @@ test('detectSlate: Mon 18 topic opener preserved when Gemini over-classifies (e2
     },
   );
   assert.ok(result, 'should still detect a slate');
-  assert.equal(result.end, 2.50, 'slate end should be at start of "Thinking" (content preserved)');
+  assert.equal(result.end, 14.13, 'PR-AJ: validator disabled — title readout no longer preserved');
 });
 
 test('validator: real ? hook NOT followed by meta-marker → still preserved', () => {

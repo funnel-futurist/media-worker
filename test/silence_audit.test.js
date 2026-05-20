@@ -213,3 +213,117 @@ test('PR-AD: applied wins over capDropped when both overlap', () => {
   assert.equal(rows[0].decision, 'cut');
   assert.equal(rows[0].reason, 'sentence_boundary');
 });
+
+// ── PR-AK: transcript context (prev/next) ────────────────────────────
+
+test('PR-AK: audit row carries prev/next words around the silence span', () => {
+  // Realistic talking-head fixture: post-sentence pause between two
+  // sentences. The audit row should show the last words ending before
+  // the silence and the first words starting after it.
+  const words = [
+    { word: 'the', start_ms: 11000, end_ms: 11200 },
+    { word: 'right', start_ms: 11300, end_ms: 11500 },
+    { word: 'plan.', start_ms: 11600, end_ms: 12000 },
+    // silence at [12.0, 12.8]
+    { word: 'And', start_ms: 12900, end_ms: 13100 },
+    { word: 'so', start_ms: 13200, end_ms: 13400 },
+    { word: 'I', start_ms: 13500, end_ms: 13600 },
+  ];
+  const { rows } = auditSilenceCoverage({
+    mergedSilences: [{ start: 12.0, end: 12.8 }],
+    applied: [{ start: 12.15, end: 12.65, safetyReason: 'sentence_boundary' }],
+    skipped: [],
+    capDropped: [],
+    words,
+  });
+  assert.equal(rows[0].decision, 'cut');
+  assert.equal(rows[0].prev, 'the right plan.');
+  assert.equal(rows[0].next, 'And so I');
+});
+
+test('PR-AK: context truncates to ≤4 words on each side', () => {
+  const words = [
+    { word: 'a', start_ms: 100, end_ms: 200 },
+    { word: 'b', start_ms: 300, end_ms: 400 },
+    { word: 'c', start_ms: 500, end_ms: 600 },
+    { word: 'd', start_ms: 700, end_ms: 800 },
+    { word: 'e', start_ms: 900, end_ms: 1000 },
+    // silence at 1.0–1.5
+    { word: 'f', start_ms: 1600, end_ms: 1700 },
+    { word: 'g', start_ms: 1800, end_ms: 1900 },
+    { word: 'h', start_ms: 2000, end_ms: 2100 },
+    { word: 'i', start_ms: 2200, end_ms: 2300 },
+    { word: 'j', start_ms: 2400, end_ms: 2500 },
+  ];
+  const { rows } = auditSilenceCoverage({
+    mergedSilences: [{ start: 1.0, end: 1.5 }],
+    applied: [{ start: 1.15, end: 1.35, safetyReason: 'sentence_boundary' }],
+    skipped: [],
+    capDropped: [],
+    words,
+  });
+  // Last 4 of [a,b,c,d,e] = "b c d e"
+  assert.equal(rows[0].prev, 'b c d e');
+  // First 4 of [f,g,h,i,j] = "f g h i"
+  assert.equal(rows[0].next, 'f g h i');
+});
+
+test('PR-AK: words parameter omitted → prev/next empty (backwards compat)', () => {
+  const { rows } = auditSilenceCoverage({
+    mergedSilences: [{ start: 10.0, end: 12.5 }],
+    applied: [{ start: 10.15, end: 12.35, safetyReason: 'post_sentence_dead_air' }],
+    skipped: [],
+  });
+  assert.equal(rows[0].decision, 'cut');
+  assert.equal(rows[0].prev, '');
+  assert.equal(rows[0].next, '');
+});
+
+test('PR-AK: formatSilenceAuditLine includes context when present', () => {
+  const line = formatSilenceAuditLine({
+    span: [12.34, 13.12],
+    durSec: 0.78,
+    decision: 'cut',
+    reason: 'post_sentence_dead_air',
+    prev: 'the right plan.',
+    next: 'And so I',
+  });
+  assert.equal(
+    line,
+    '[silence-audit] [12.340, 13.120] (0.780s) → CUT (post_sentence_dead_air) | "the right plan." → "And so I"',
+  );
+});
+
+test('PR-AK: formatSilenceAuditLine omits context segment when prev+next empty', () => {
+  // Backwards compat — pre-PR-AK rows have no prev/next; the line
+  // should still format cleanly without a dangling pipe.
+  const line = formatSilenceAuditLine({
+    span: [78.0, 78.62],
+    durSec: 0.62,
+    decision: 'dropped',
+    reason: 'subthreshold',
+  });
+  assert.equal(
+    line,
+    '[silence-audit] [78.000, 78.620] (0.620s) → DROPPED (subthreshold)',
+  );
+});
+
+test('PR-AK: format renders preserved row with context for QC scanning', () => {
+  // Operator's main use case: scan the log for PRESERVED rows and
+  // see at a glance whether they were preserved correctly. Context
+  // words make the "is this dead air or natural delivery?" judgment
+  // possible without opening the source.
+  const line = formatSilenceAuditLine({
+    span: [45.10, 46.20],
+    durSec: 1.10,
+    decision: 'preserved',
+    reason: 'mid_sentence_no_boundary',
+    prev: 'we want to',
+    next: 'help families',
+  });
+  assert.match(line, /PRESERVED/);
+  assert.match(line, /mid_sentence_no_boundary/);
+  assert.match(line, /"we want to"/);
+  assert.match(line, /"help families"/);
+});

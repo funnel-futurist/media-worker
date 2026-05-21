@@ -684,32 +684,63 @@ test('PR-AK extender: passes through with empty words array', () => {
 
 // ── PR-AL: deterministic slate floor (detectDeterministicSlateFloor) ──
 
-test('PR-AL floor: catches Phil-style date + title + final version even when Gemini misses', () => {
-  // The exact failure mode Chelsea hit: Gemini cuts only the date, the
-  // title and "Final version" leak. PR-AL guarantees this gets cut
-  // independent of Gemini.
+test('PR-AM floor: look-ahead catches title BEFORE meta marker (Phil pattern)', () => {
+  // PR-AM upgrades PR-AL from "stop at first non-meta" to "scan all
+  // sentences in 20s, cut through LAST meta marker". This catches
+  // Phil's actual transcript:
+  //   "What your future self would choose, selective options final revise version"
+  // where the title comes FIRST. PR-AL would have stopped at the title.
   const words = [
-    w('Monday,', 0.20, 0.60),
-    w('May', 0.65, 0.85),
-    w('18.', 0.90, 1.20),
-    w('Thinking', 1.80, 2.10),
-    w('about', 2.15, 2.35),
-    w('planning.', 2.40, 2.80),
-    w('Final', 3.20, 3.50),
-    w('version.', 3.55, 3.95),
-    w('Most', 4.50, 4.80),
-    w('families', 4.85, 5.30),
+    w('What', 0.20, 0.40),
+    w('your', 0.45, 0.60),
+    w('future', 0.65, 0.90),
+    w('self', 0.95, 1.15),
+    w('would', 1.20, 1.40),
+    w('choose,', 1.45, 1.80),  // end of "title" sentence (note: comma, not period — fixed below)
+    w('selective', 2.10, 2.55),
+    w('options.', 2.60, 3.00),
+    w('Final', 3.30, 3.60),
+    w('revise', 3.65, 3.95),
+    w('version.', 4.00, 4.40),
+    w('Most', 5.00, 5.30),
+    w('families', 5.35, 5.80),
   ];
+  // The fixture uses comma after "choose" — the sentence won't end until
+  // "options." (no period after "choose"). So the first "sentence" is
+  // "What your future self would choose, selective options." → that DOES
+  // match the selective-options pattern → meta. Then "Final revise
+  // version." → meta. Cut through end of that.
   const result = detectDeterministicSlateFloor(words);
   assert.ok(result, 'should detect slate floor');
-  // First sentence "Monday, May 18." → meta (date)
-  // Second sentence "Thinking about planning." → NOT a meta marker (no date/option/final/title)
-  //   → STOP. Floor = end of first sentence (1.20s).
-  // This is a known limitation: title sentences alone aren't detectable
-  // as meta. PR-AL only catches what's deterministically identifiable.
-  // Gemini fills the rest (with PR-AK extender catching late markers).
-  assert.equal(result.endSec, 1.20);
-  assert.equal(result.sentences.length, 1);
+  // End of "Final revise version." sentence = 4.40s
+  assert.equal(result.endSec, 4.40);
+  assert.ok(result.matchedMarkers.length >= 1, 'at least one marker matched');
+});
+
+test('PR-AM floor: catches title sentence BEFORE a meta marker via look-ahead', () => {
+  // Title is its own sentence, meta marker follows. PR-AM cuts BOTH.
+  const words = [
+    w('Thinking', 0.20, 0.55),
+    w('about', 0.60, 0.85),
+    w('planning', 0.90, 1.30),
+    w('versus', 1.35, 1.60),
+    w('deciding', 1.65, 2.00),
+    w('to', 2.05, 2.15),
+    w('plan.', 2.20, 2.55),
+    w('Final', 3.10, 3.40),
+    w('revised', 3.45, 3.80),
+    w('version.', 3.85, 4.20),
+    w('Most', 4.80, 5.10),
+    w('families', 5.15, 5.60),
+  ];
+  const result = detectDeterministicSlateFloor(words);
+  assert.ok(result, 'title + final-revised-version pattern should produce a floor');
+  // Last meta = "Final revised version." ending at 4.20s. Title
+  // sentence before it is included in the cut window.
+  assert.equal(result.endSec, 4.20);
+  assert.equal(result.sentences.length, 2);
+  assert.match(result.sentences[0], /Thinking about planning/);
+  assert.match(result.sentences[1], /Final revised version/);
 });
 
 test("PR-AL floor: walks past 'Selected option.' and 'Final version.' stacked", () => {

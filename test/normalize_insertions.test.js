@@ -19,7 +19,10 @@ import { normalizeInsertions } from '../lib/clean_mode_pipeline.js';
 // behavior it was written for. The PR-K-specific tests at the bottom
 // exercise the floor directly.
 
-const NO_MIN = { brollMinDurationSec: 0 };
+// PR-AN added brollMinStartSec (default 5.0s). Pre-PR-AN tests use insertions
+// starting at 1-5s, so opt out of both floors with 0/0 to keep exercising the
+// specific behavior they were written for.
+const NO_MIN = { brollMinDurationSec: 0, brollMinStartSec: 0 };
 
 test('normalize: sorts insertions by startSec', () => {
   const warnings = [];
@@ -268,6 +271,7 @@ test('PR-K: default (no opts) uses the 6.0s floor', () => {
 test('PR-K: custom floor of 8.0s drops 7s insertions', () => {
   // The floor is per-job overridable. Operators who want unusually long
   // b-roll can pass a higher value.
+  // (PR-AN: opt out of start floor since fixture insertion 'a' starts at 0.)
   const warnings = [];
   const out = normalizeInsertions(
     [
@@ -276,7 +280,7 @@ test('PR-K: custom floor of 8.0s drops 7s insertions', () => {
     ],
     100,
     warnings,
-    { brollMinDurationSec: 8.0 },
+    { brollMinDurationSec: 8.0, brollMinStartSec: 0 },
   );
   assert.deepEqual(out.map((i) => i.asset_id), ['b']);
   assert.equal(warnings.length, 1);
@@ -286,13 +290,118 @@ test('PR-K: custom floor of 8.0s drops 7s insertions', () => {
 test('PR-K: brollMinDurationSec: 0 disables the floor (back-compat path)', () => {
   // Explicit 0 keeps the pre-PR-K behavior available for tests or
   // legacy clients that want to ship short flashes intentionally.
+  // (PR-AN: opt out of start floor since fixture starts at 0.)
   const warnings = [];
   const out = normalizeInsertions(
     [{ asset_id: 'tiny', startSec: 0, endSec: 0.5 }],
+    100,
+    warnings,
+    { brollMinDurationSec: 0, brollMinStartSec: 0 },
+  );
+  assert.equal(out.length, 1);
+  assert.deepEqual(warnings, []);
+});
+
+// ── PR-AN: brollMinStartSec opener floor ─────────────────────────────
+// Phoenix QC 2026-05-22: "We can't have the first section of the video
+// be B roll." Drop+warn any insertion whose startSec falls inside the
+// no-broll opener zone. Default floor 5.0s; per-job overridable.
+
+test('PR-AN: insertion at startSec=0 with default floor → dropped', () => {
+  const warnings = [];
+  const out = normalizeInsertions(
+    [{ asset_id: 'opener', startSec: 0, endSec: 7 }],
+    100,
+    warnings,
+    { brollMinDurationSec: 0 },                                // disable dur floor
+  );
+  assert.equal(out.length, 0);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /min-start: dropped opener/);
+  assert.match(warnings[0], /0\.00s < 5\.0s opener zone/);
+});
+
+test('PR-AN: insertion at startSec=4.9 with default floor → dropped', () => {
+  const warnings = [];
+  const out = normalizeInsertions(
+    [{ asset_id: 'near', startSec: 4.9, endSec: 12 }],
+    100,
+    warnings,
+    { brollMinDurationSec: 0 },
+  );
+  assert.equal(out.length, 0);
+  assert.match(warnings[0], /min-start: dropped near/);
+});
+
+test('PR-AN: insertion at startSec=5.0 → kept (boundary inclusive)', () => {
+  const warnings = [];
+  const out = normalizeInsertions(
+    [{ asset_id: 'edge', startSec: 5.0, endSec: 12 }],
+    100,
+    warnings,
+    { brollMinDurationSec: 0 },
+  );
+  assert.equal(out.length, 1);
+  assert.equal(out[0].asset_id, 'edge');
+  assert.deepEqual(warnings, []);
+});
+
+test('PR-AN: insertion at startSec=10 → kept (well past floor)', () => {
+  const warnings = [];
+  const out = normalizeInsertions(
+    [{ asset_id: 'safe', startSec: 10, endSec: 17 }],
     100,
     warnings,
     { brollMinDurationSec: 0 },
   );
   assert.equal(out.length, 1);
   assert.deepEqual(warnings, []);
+});
+
+test('PR-AN: brollMinStartSec: 0 disables the start floor', () => {
+  // Explicit 0 keeps the pre-PR-AN behavior available for one-off operator
+  // overrides (e.g. an experimental cold-open b-roll-first reel).
+  const warnings = [];
+  const out = normalizeInsertions(
+    [{ asset_id: 'instant', startSec: 0, endSec: 7 }],
+    100,
+    warnings,
+    { brollMinDurationSec: 0, brollMinStartSec: 0 },
+  );
+  assert.equal(out.length, 1);
+  assert.deepEqual(warnings, []);
+});
+
+test('PR-AN: custom floor of 7.0s drops insertions starting at 5s', () => {
+  const warnings = [];
+  const out = normalizeInsertions(
+    [
+      { asset_id: 'early', startSec: 5.0, endSec: 12 },        // below 7s floor
+      { asset_id: 'late',  startSec: 8.0, endSec: 15 },        // above
+    ],
+    100,
+    warnings,
+    { brollMinDurationSec: 0, brollMinStartSec: 7.0 },
+  );
+  assert.deepEqual(out.map((i) => i.asset_id), ['late']);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /min-start: dropped early \(startSec 5\.00s < 7\.0s opener zone\)/);
+});
+
+test('PR-AN: default (no opts) uses the 5.0s start floor', () => {
+  // Sanity: pipeline call sites can omit the opts object entirely and still
+  // get the new default behavior. This guards every production job.
+  const warnings = [];
+  const out = normalizeInsertions(
+    [
+      { asset_id: 'opener', startSec: 1.0, endSec: 8 },        // start floor drops
+      { asset_id: 'ok',     startSec: 30.0, endSec: 37 },      // passes both floors
+    ],
+    100,
+    warnings,
+    // no opts argument at all
+  );
+  assert.deepEqual(out.map((i) => i.asset_id), ['ok']);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /min-start: dropped opener/);
 });

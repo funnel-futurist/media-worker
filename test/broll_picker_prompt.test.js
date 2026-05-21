@@ -79,6 +79,31 @@ test('buildPrompts: still includes the library JSON so Gemini sees provenance pe
   assert.match(userPrompt, /"provenance": "pixabay"/);
 });
 
+test('buildPrompts: PR-AN — OPENER ZONE clause forbids insertions before brollMinStartSec', () => {
+  // Phoenix QC 2026-05-22: b-roll openers are objectively wrong for a
+  // talking-head reel. Picker must see an explicit no-go zone at the
+  // start of the timeline so it doesn't even propose one. The hard
+  // floor still runs in normalizeInsertions; this is the upstream nudge.
+  const { userPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.4,
+  });
+  // Default brollMinStartSec = 5.0s.
+  assert.match(userPrompt, /OPENER ZONE/);
+  assert.match(userPrompt, /below 5\.0s/);
+  assert.match(userPrompt, /first 5\.0 seconds MUST show the speaker/);
+});
+
+test('buildPrompts: PR-AN — custom brollMinStartSec is substituted into the OPENER ZONE clause', () => {
+  const { userPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.4,
+    brollMinStartSec: 7.0,
+  });
+  assert.match(userPrompt, /below 7\.0s/);
+  assert.match(userPrompt, /first 7\.0 seconds MUST show the speaker/);
+  // The 5.0 default should not appear when explicitly overridden.
+  assert.doesNotMatch(userPrompt, /below 5\.0s/);
+});
+
 test('buildPrompts: PR-G — explicit asset_id-fidelity instruction is present', () => {
   // Phil PR-F rerun (2026-05-09) failed at brollDownload because Gemini
   // truncated long client UUIDs. The prompt must explicitly tell the picker
@@ -108,8 +133,11 @@ test('buildPrompts: coverage floor + variety + duration constraints stay intact 
   assert.match(userPrompt, /Minimum b-roll coverage/);
   assert.match(userPrompt, /this is a FLOOR, not a target/);
   assert.match(userPrompt, /never reuse the same asset_id/);
-  assert.match(userPrompt, /\[6\.0s, 8\.0s\]/);
-  assert.match(userPrompt, /aim for ~7\.0s/);
+  // PR-K defaults rolled from 6/7/8 → 4/5/5 (2026-05-19 follow-up; comment in
+  // broll_picker.js lines 133-140). Anchor here updated 2026-05-22 alongside
+  // PR-AN to bring CI green.
+  assert.match(userPrompt, /\[4\.0s, 5\.0s\]/);
+  assert.match(userPrompt, /aim for ~5\.0s/);
   assert.match(userPrompt, /Min 4s spacing/);
   // The pre-PR-K shorter range is GONE.
   assert.doesNotMatch(userPrompt, /\[2\.5s, 5\.0s\]/);
@@ -206,13 +234,14 @@ test('buildPrompts: PR-K — per-job brollMinDurationSec / target / max are subs
   assert.match(userPrompt, /sub-5\.0s flashes/);
 });
 
-test('buildPrompts: PR-K — when overrides omitted, defaults (6/7/8) appear', () => {
+test('buildPrompts: PR-K — when overrides omitted, defaults (4/5/5) appear', () => {
+  // Defaults rolled 6/7/8 → 4/5/5 (broll_picker.js lines 133-140).
   const { userPrompt } = buildPrompts({
     transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.4,
   });
-  assert.match(userPrompt, /\[6\.0s, 8\.0s\]/);
-  assert.match(userPrompt, /aim for ~7\.0s/);
-  assert.match(userPrompt, /sub-6\.0s flashes/);
+  assert.match(userPrompt, /\[4\.0s, 5\.0s\]/);
+  assert.match(userPrompt, /aim for ~5\.0s/);
+  assert.match(userPrompt, /sub-4\.0s flashes/);
 });
 
 // ── PR #130: clientPreference modes ─────────────────────────────────
@@ -261,8 +290,8 @@ test("buildPrompts: clientPreference='minimal' keeps the ASSET ID FIDELITY rule 
   assert.match(userPrompt, /ASSET ID FIDELITY/);
   assert.match(userPrompt, /full asset_id/i);
   assert.match(userPrompt, /Min 4s spacing/);
-  // PR-K: duration range is now [6.0s, 8.0s] (was [2.5s, 5.0s] pre-PR-K).
-  assert.match(userPrompt, /\[6\.0s, 8\.0s\]/);
+  // PR-K duration range now defaults to [4.0s, 5.0s] (rolled 6/7/8 → 4/5/5).
+  assert.match(userPrompt, /\[4\.0s, 5\.0s\]/);
 });
 
 test("buildPrompts: unrecognized clientPreference falls back to 'balanced' (defensive)", () => {

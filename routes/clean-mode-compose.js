@@ -189,6 +189,19 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
       if (targetDurErr) return res.status(400).json({ jobId, step: 'validate', error: targetDurErr });
       const maxDurErr = checkDurField('brollMaxDurationSec');
       if (maxDurErr) return res.status(400).json({ jobId, step: 'validate', error: maxDurErr });
+      // PR-AN: brollMinStartSec accepts [0, 30] (0 allowed so an operator
+      // can explicitly disable the floor for a one-off; default 5.0s
+      // applies when undefined). Reuses the shape rules from checkDurField
+      // but allows zero, hence a small inline check rather than reusing.
+      const minStartRaw = body.options.brollMinStartSec;
+      if (minStartRaw != null) {
+        if (typeof minStartRaw !== 'number' || !Number.isFinite(minStartRaw) || minStartRaw < 0 || minStartRaw > 30) {
+          return res.status(400).json({
+            jobId, step: 'validate',
+            error: 'options.brollMinStartSec must be a number in [0, 30]',
+          });
+        }
+      }
       // Consistency: each provided pair must hold min <= target <= max.
       // We check across whatever subset the caller supplied — undefined
       // values fall through to defaults at the use sites and don't

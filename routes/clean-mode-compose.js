@@ -34,9 +34,68 @@ import { runCleanModePipeline } from '../lib/clean_mode_pipeline.js';
 import {
   postReelEditedCallback,
   buildReelEditedPayload,
+  buildReelFailedPayload,
   buildEditNotesSummary,
 } from '../lib/portal_webhook.js';
 import { signStorageUrl } from '../lib/storage_helpers.js';
+
+/**
+ * PR-181b: fire a failure callback to the portal so the row gets flipped
+ * to edit_failed IMMEDIATELY with a specific error message — instead of
+ * waiting 15 min for the stuck-row cron to mark it 'worker_timeout'.
+ *
+ * Best-effort: if the callback POST itself fails, we log and fall back to
+ * the existing cron recovery path (no worse than before).
+ *
+ * @param {object} args
+ * @param {object} args.body         original /clean-mode-compose body
+ * @param {string} args.jobId
+ * @param {object} args.callback     { url, apiKey }
+ * @param {string} args.failedStep
+ * @param {string} args.errorMessage
+ * @param {Array<string>} [args.warnings]
+ * @param {object} [args.stepTimings]
+ */
+async function postFailureCallback({ body, jobId, callback, failedStep, errorMessage, warnings, stepTimings }) {
+  if (!callback?.url || !callback?.apiKey || !body?.contentItemId) {
+    // No-op when async mode isn't configured (sync route already returned
+    // the partial-data response to the caller directly).
+    return;
+  }
+  try {
+    const payload = buildReelFailedPayload({
+      contentItemId: body.contentItemId,
+      clientId: body.clientId,
+      jobId,
+      failedStep,
+      errorMessage,
+      warnings,
+      stepTimings,
+    });
+    const post = await postReelEditedCallback({
+      callbackUrl: callback.url,
+      callbackApiKey: callback.apiKey,
+      payload,
+    });
+    if (!post.ok) {
+      console.error(
+        `[clean-mode-compose] job=${jobId} FAILURE callback delivery FAILED ` +
+        `(attempts=${post.attempts} status=${post.status ?? '-'} err=${post.error ?? '-'}). ` +
+        `Portal cron will recover via the stuck-editing sweep after 15 min.`,
+      );
+    } else {
+      console.log(
+        `[clean-mode-compose] job=${jobId} FAILURE callback delivered ` +
+        `(status=${post.status} step=${failedStep})`,
+      );
+    }
+  } catch (err) {
+    console.error(
+      `[clean-mode-compose] job=${jobId} FAILURE callback threw unexpectedly:`,
+      err?.stack ?? err,
+    );
+  }
+}
 
 export const cleanModeComposeRouter = Router();
 
@@ -381,32 +440,52 @@ async function runAsyncJob(body, jobId, callback) {
   try {
     result = await runCleanModePipeline(body);
   } catch (err) {
-    // Hit only when the orchestrator throws OUTSIDE its own catch (very rare
-    // — validation throws synchronously, pipeline-internal throws are caught
-    // by PR #103). Log loudly; the portal cron picks this up.
+    // PR-181b: orchestrator hard error (uncaught throw outside PR #103's
+    // own catch). Fire a failure callback so the portal flips the row
+    // immediately with the actual error — no more 15-min cron wait.
     console.error(
-      `[clean-mode-compose] job=${jobId} ASYNC hard error (no callback fired):`,
+      `[clean-mode-compose] job=${jobId} ASYNC hard error:`,
       err?.stack ?? err,
     );
+    await postFailureCallback({
+      body, jobId, callback,
+      failedStep: 'orchestrator',
+      errorMessage: err?.message ?? String(err),
+    });
     return;
   }
 
   if (result?.error) {
-    // Partial-data path (orchestrator caught an internal throw). Plan v2:
-    // no failure callback. Portal stuck-row cron will recover.
+    // PR-181b: PR #103 partial-data path — orchestrator caught an internal
+    // throw and returned the partial result. Fire a failure callback with
+    // the specific step that failed + any warnings/steps collected so far.
     console.error(
       `[clean-mode-compose] job=${jobId} ASYNC step=${result.error.step ?? '?'} ` +
-      `error: ${result.error.message ?? '(no message)'} — NO callback fired ` +
-      `(portal cron will mark edit_failed after 15 min)`,
+      `error: ${result.error.message ?? '(no message)'}`,
     );
+    await postFailureCallback({
+      body, jobId, callback,
+      failedStep: result.error.step ?? 'unknown',
+      errorMessage: result.error.message ?? '(no message)',
+      warnings: result.warnings,
+      stepTimings: result.steps,
+    });
     return;
   }
 
   if (!result?.finalStorage?.bucket || !result?.finalStorage?.path) {
+    // PR-181b: pipeline didn't throw but produced no final storage path.
+    // Treat as failure and notify the portal.
     console.error(
-      `[clean-mode-compose] job=${jobId} ASYNC pipeline returned no finalStorage — ` +
-      `cannot post callback`,
+      `[clean-mode-compose] job=${jobId} ASYNC pipeline returned no finalStorage`,
     );
+    await postFailureCallback({
+      body, jobId, callback,
+      failedStep: 'finalStorage',
+      errorMessage: 'pipeline returned no finalStorage path',
+      warnings: result?.warnings,
+      stepTimings: result?.steps,
+    });
     return;
   }
 
@@ -420,11 +499,20 @@ async function runAsyncJob(body, jobId, callback) {
       expiresIn: EDITED_URL_TTL_SEC,
     });
   } catch (err) {
+    // PR-181b: file uploaded but signing failed (Supabase auth/quota glitch).
+    // Notify the portal so the operator can re-sign / re-mint manually.
     console.error(
       `[clean-mode-compose] job=${jobId} ASYNC failed to mint 1-year signed URL ` +
       `for ${result.finalStorage.bucket}/${result.finalStorage.path}:`,
       err?.message ?? err,
     );
+    await postFailureCallback({
+      body, jobId, callback,
+      failedStep: 'signStorageUrl',
+      errorMessage: `Storage path ${result.finalStorage.bucket}/${result.finalStorage.path}: ${err?.message ?? String(err)}`,
+      warnings: result?.warnings,
+      stepTimings: result?.steps,
+    });
     return;
   }
 

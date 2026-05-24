@@ -19,7 +19,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { detectSlate, validateSlatePreservesHooks, extendSlateForLateMetaMarkers, detectDeterministicSlateFloor } from '../lib/slate_detect.js';
+import { detectSlate, validateSlatePreservesHooks, extendSlateForLateMetaMarkers, detectDeterministicSlateFloor, fuzzyMatchesSlateHint } from '../lib/slate_detect.js';
 
 // ── helpers ────────────────────────────────────────────────────────────
 
@@ -845,6 +845,220 @@ test('PR-AL e2e: deterministic floor wins over short Gemini slate', async () => 
   );
   // PR-AL pushes past Selected option. Snap finds Finding at 3.20s.
   assert.ok(result.end >= 2.6);
+});
+
+// ── PR-AO: slateHint option ──────────────────────────────────────────
+// Phil's May 25-31 batch drops the trailing "Selected option / Final
+// revised version" markers — only date + title remain, and PR-AM's
+// look-ahead can't reach a sentence past the LAST meta marker. PR-AO
+// lets the caller pass the expected title; the detector fuzzy-matches
+// against transcript sentences and extends the cut through any match.
+// Default behavior (no hint) is unchanged.
+
+test('PR-AO fuzzyMatchesSlateHint: matches with case + punctuation tolerance', () => {
+  // Hint "Imagine June Without This Lingering" → content tokens
+  // [imagine, june, without, this, lingering] (5 tokens).
+  // Sentence "Imagine June without this lingering." → all 5 match → 1.0 ≥ 0.6.
+  assert.equal(
+    fuzzyMatchesSlateHint('Imagine June without this lingering.', 'Imagine June Without This Lingering'),
+    true,
+  );
+  // Title-case hint vs lower-case audio.
+  assert.equal(
+    fuzzyMatchesSlateHint('imagine june without this lingering', 'Imagine June Without This Lingering'),
+    true,
+  );
+  // Apostrophe variation (you've vs youve).
+  assert.equal(
+    fuzzyMatchesSlateHint("you've been thinking about this for months",
+      "You've Been Thinking About This For Months"),
+    true,
+  );
+});
+
+test('PR-AO fuzzyMatchesSlateHint: rejects unrelated sentences', () => {
+  // Content sentence shares no content words with the hint.
+  assert.equal(
+    fuzzyMatchesSlateHint('There is a thought you have had probably at three',
+      'Imagine June Without This Lingering'),
+    false,
+  );
+  // Partial overlap below the 0.6 ratio (only 2 of 5 hint tokens present).
+  assert.equal(
+    fuzzyMatchesSlateHint('We were imagining the future of our family',
+      'Imagine June Without This Lingering'),
+    false,
+  );
+});
+
+test('PR-AO fuzzyMatchesSlateHint: empty / whitespace hint returns false', () => {
+  assert.equal(fuzzyMatchesSlateHint('whatever', ''), false);
+  assert.equal(fuzzyMatchesSlateHint('whatever', '   '), false);
+  assert.equal(fuzzyMatchesSlateHint('whatever', null), false);
+  assert.equal(fuzzyMatchesSlateHint('whatever', undefined), false);
+});
+
+test('PR-AO floor: new Phil pattern (date + title, no trailing marker) — slateHint catches title', () => {
+  // Phil's NEW batch: "Tuesday May 26. Imagine June without this lingering.
+  // There's a thought you've had..."  The date is a meta marker; the title
+  // sits past it with no closing marker. Without the hint, PR-AM stops at
+  // the date end. With the hint, the cut extends through the title.
+  const words = [
+    w('Tuesday', 0.10, 0.50),
+    w('May', 0.55, 0.75),
+    w('26.', 0.80, 1.10),
+    w('Imagine', 1.60, 2.00),
+    w('June', 2.05, 2.30),
+    w('without', 2.35, 2.65),
+    w('this', 2.70, 2.85),
+    w('lingering.', 2.90, 3.40),
+    w("There's", 4.50, 4.80),  // content begins after a breath
+    w('a', 4.85, 4.95),
+    w('thought.', 5.00, 5.30),
+  ];
+
+  // No hint: date marker only — cut stops at 1.10s, title survives.
+  const noHint = detectDeterministicSlateFloor(words);
+  assert.ok(noHint);
+  assert.equal(noHint.endSec, 1.10);
+  assert.equal(noHint.sentences.length, 1);
+  assert.ok(!noHint.matchedHint);
+
+  // With hint: extends through "Imagine June without this lingering." (3.40s).
+  const withHint = detectDeterministicSlateFloor(words, {
+    slateHint: 'Imagine June Without This Lingering',
+  });
+  assert.ok(withHint);
+  assert.equal(withHint.endSec, 3.40);
+  assert.equal(withHint.sentences.length, 2);
+  assert.match(withHint.matchedHint, /Imagine June without this lingering/);
+});
+
+test('PR-AO floor: old Phil pattern (date + title + Selected option) still works WITHOUT hint', () => {
+  // Existing PR-AM behavior must not change when no hint is provided.
+  const words = [
+    w('Thursday', 0.10, 0.50),
+    w('May', 0.55, 0.75),
+    w('21.', 0.80, 1.10),
+    w('What', 1.60, 1.80),
+    w('your', 1.85, 2.00),
+    w('future', 2.05, 2.30),
+    w('self', 2.35, 2.55),
+    w('would', 2.60, 2.75),
+    w('choose.', 2.80, 3.20),
+    w('Selected', 3.80, 4.20),
+    w('option.', 4.25, 4.60),
+    w('Five', 5.30, 5.50),
+    w('years', 5.55, 5.75),
+  ];
+  const result = detectDeterministicSlateFloor(words);  // no hint
+  assert.ok(result, 'old pattern must still be detected without hint');
+  // Last meta marker is "Selected option." ending at 4.60s.
+  assert.equal(result.endSec, 4.60);
+  assert.equal(result.sentences.length, 3);
+});
+
+test('PR-AO floor: no hint provided → does NOT extend past last meta marker', () => {
+  // Safety: even when a title-shaped sentence follows the date, we must
+  // NOT cut it without an explicit hint. This protects content openers
+  // that happen to look title-shaped.
+  const words = [
+    w('Monday', 0.10, 0.50),
+    w('May', 0.55, 0.75),
+    w('18.', 0.80, 1.10),
+    w('Thinking', 1.60, 2.00),  // could LOOK like a title, but we don't know
+    w('and', 2.05, 2.20),
+    w('deciding', 2.25, 2.60),
+    w('are', 2.65, 2.80),
+    w('not', 2.85, 3.00),
+    w('the', 3.05, 3.15),
+    w('same', 3.20, 3.45),
+    w('thing.', 3.50, 3.80),
+  ];
+  const result = detectDeterministicSlateFloor(words);  // NO HINT
+  assert.ok(result);
+  // Cut stops at the date (1.10s). Title-shaped follow-up is preserved.
+  assert.equal(result.endSec, 1.10);
+  assert.equal(result.sentences.length, 1);
+});
+
+test('PR-AO floor: hint matches when no meta marker is present — cut through hint only', () => {
+  // Edge: speaker skips the date entirely and opens with the title.
+  // With hint, we still cut. Without hint, we cannot infer it's slate.
+  const words = [
+    w('Imagine', 0.20, 0.60),
+    w('June', 0.65, 0.90),
+    w('without', 0.95, 1.25),
+    w('this', 1.30, 1.45),
+    w('lingering.', 1.50, 1.95),
+    w("There's", 3.00, 3.30),
+    w('a', 3.35, 3.45),
+    w('thought.', 3.50, 3.85),
+  ];
+  // No hint → no meta → null (current safe behavior).
+  assert.equal(detectDeterministicSlateFloor(words), null);
+  // With hint → cut through hint sentence.
+  const result = detectDeterministicSlateFloor(words, {
+    slateHint: 'Imagine June Without This Lingering',
+  });
+  assert.ok(result);
+  assert.equal(result.endSec, 1.95);
+  assert.match(result.matchedHint, /Imagine June/);
+});
+
+test('PR-AO floor: hint AND meta marker both fire — takes the later end', () => {
+  // Date marker ends at 1.10s; hint matches title ending at 3.40s.
+  // Result: 3.40s (extension wins).
+  const words = [
+    w('Tuesday', 0.10, 0.50),
+    w('May', 0.55, 0.75),
+    w('26.', 0.80, 1.10),
+    w('Imagine', 1.60, 2.00),
+    w('June', 2.05, 2.30),
+    w('without', 2.35, 2.65),
+    w('this', 2.70, 2.85),
+    w('lingering.', 2.90, 3.40),
+    w("There's", 4.50, 4.80),
+  ];
+  const result = detectDeterministicSlateFloor(words, {
+    slateHint: 'Imagine June Without This Lingering',
+  });
+  assert.equal(result.endSec, 3.40);
+  assert.equal(result.matchedMarkers.length, 1);  // date still recorded
+  assert.match(result.matchedHint, /Imagine June/);
+});
+
+test('PR-AO e2e detectSlate: slateHint reaches the deterministic floor', async () => {
+  // Confirm the hint flows from detectSlate's opts into the floor.
+  const words = [
+    w('Tuesday', 0.10, 0.50),
+    w('May', 0.55, 0.75),
+    w('26.', 0.80, 1.10),
+    w('Imagine', 1.60, 2.00),
+    w('June', 2.05, 2.30),
+    w('without', 2.35, 2.65),
+    w('this', 2.70, 2.85),
+    w('lingering.', 2.90, 3.40),
+    w("There's", 4.50, 4.80),
+    w('a', 4.85, 4.95),
+    w('thought.', 5.00, 5.30),
+  ];
+  const result = await detectSlate(
+    { wordTimestamps: words, sourceDuration: 120 },
+    {
+      apiKey: 'test',
+      slateHint: 'Imagine June Without This Lingering',
+      fetchImpl: mockFetcher({
+        isSlate: true,
+        slateEndSeconds: 1.10,  // Gemini only caught the date
+        transcribedText: 'Tuesday May 26.',
+        identifier: 'Phil - May 26',
+      }),
+    },
+  );
+  // Without hint: ~1.10s. With hint: extends through title at 3.40s,
+  // then snaps to next word boundary (There's at 4.50s).
+  assert.ok(result.end >= 3.4, `slate end must reach the title; got ${result.end}`);
 });
 
 test('PR-AL e2e: Gemini wins when it already cut more than deterministic', async () => {

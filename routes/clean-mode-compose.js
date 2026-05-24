@@ -261,6 +261,25 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
           });
         }
       }
+      // PR-AO: slateHint optional string ≤ 200 chars. Empty/whitespace
+      // treated as not provided; detector trims and falls back to default
+      // meta-marker behavior. Length cap so an accidental paste of a whole
+      // transcript doesn't reach the detector and inflate the token match.
+      const slateHintRaw = body.options.slateHint;
+      if (slateHintRaw != null) {
+        if (typeof slateHintRaw !== 'string') {
+          return res.status(400).json({
+            jobId, step: 'validate',
+            error: 'options.slateHint must be a string',
+          });
+        }
+        if (slateHintRaw.length > 200) {
+          return res.status(400).json({
+            jobId, step: 'validate',
+            error: 'options.slateHint must be ≤ 200 characters',
+          });
+        }
+      }
       // Consistency: each provided pair must hold min <= target <= max.
       // We check across whatever subset the caller supplied — undefined
       // values fall through to defaults at the use sites and don't

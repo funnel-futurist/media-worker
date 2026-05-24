@@ -55,6 +55,18 @@ test('buildPipelineOpts: passes brollMaxClientCount through from req.options', (
   assert.equal(opts.brollMaxClientCount, 2);
 });
 
+test('PR-AO: buildPipelineOpts passes slateHint through from req.options', () => {
+  const opts = buildPipelineOpts({
+    options: { slateHint: 'Imagine June Without This Lingering' },
+  });
+  assert.equal(opts.slateHint, 'Imagine June Without This Lingering');
+});
+
+test('PR-AO: buildPipelineOpts leaves slateHint undefined when caller omits it', () => {
+  const opts = buildPipelineOpts({ options: {} });
+  assert.equal(opts.slateHint, undefined);
+});
+
 test('buildPipelineOpts: passes all four overrides simultaneously (Phil-style body)', () => {
   const opts = buildPipelineOpts({
     options: {

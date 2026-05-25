@@ -119,17 +119,22 @@ test('downloadBrollAssets: short-circuit fills sane defaults when row metadata i
   assert.equal(out[0].height, 0);
 });
 
-test('downloadBrollAssets: throws when insertion references unknown asset_id', async () => {
-  // Pre-PR-A behavior preserved: missing library row is still a hard error
-  // (catches picker drift that could fail later more confusingly).
-  await assert.rejects(
-    () => downloadBrollAssets(
-      [{ startSec: 0, endSec: 4, asset_id: 'px-video-missing' }],
-      [],
-      '/tmp/unused',
-    ),
-    /Insertion references unknown asset_id=px-video-missing/,
+test('downloadBrollAssets: PR #192 — unknown asset_id is dropped (not thrown)', async () => {
+  // PR #192 contract change: a missing library row is no longer a hard error.
+  // Per-asset fail-soft drops the bad insertion into `result.dropped` and
+  // continues with the rest of the batch. Previously this threw and the
+  // orchestrator's whole-call catch wiped ALL picks (Saturday 2026-05-23
+  // SupportED incident — single dead row took down all 17 broll picks).
+  const result = await downloadBrollAssets(
+    [{ startSec: 0, endSec: 4, asset_id: 'px-video-missing' }],
+    [],
+    '/tmp/unused',
   );
+  assert.equal(result.assets.length, 0, 'no assets succeed when the only insertion is unknown');
+  assert.ok(Array.isArray(result.dropped), 'PR #192 surfaces dropped[] in return shape');
+  assert.equal(result.dropped.length, 1);
+  assert.equal(result.dropped[0].asset_id, 'px-video-missing');
+  assert.match(result.dropped[0].reason, /Unknown asset_id=px-video-missing/);
 });
 
 // ── PR-G: asset_id prefix-match fallback ───────────────────────────────
@@ -220,8 +225,11 @@ test('downloadBrollAssets: PR-G — prefix match emits a warning when used', asy
   assert.equal(prefixHit.resolved, '1c2817be-8326-4f4c-a666-56d422f44612');
 });
 
-test('downloadBrollAssets: PR-G — ambiguous prefix throws clearly (does NOT silently choose)', async () => {
+test('downloadBrollAssets: PR-G/#192 — ambiguous prefix drops the asset (does NOT silently choose)', async () => {
   // Two library rows start with the same prefix → must not silently pick one.
+  // Pre-PR #192 this threw; post-PR #192 it drops the bad asset into result.dropped
+  // and continues with the rest of the batch. The key invariant is: AMBIGUITY
+  // NEVER RESULTS IN A SILENT WRONG CHOICE — either explicit drop OR throw.
   const ambig1 = {
     asset_id: '1c2817be-8326-4f4c-a666-56d422f44612',
     file_url: 'https://x', storage_url: null,
@@ -236,17 +244,18 @@ test('downloadBrollAssets: PR-G — ambiguous prefix throws clearly (does NOT si
     localPath: '/tmp/x/b.mp4',
     sourceDurSec: 5, hasVideo: true, hasAudio: false, width: 1280, height: 720,
   };
-  await assert.rejects(
-    () => downloadBrollAssets(
-      [{ startSec: 0, endSec: 5, asset_id: '1c2817be' }],
-      [ambig1, ambig2],
-      '/tmp/unused',
-    ),
-    /ambiguous|matches \d+ library rows/i,
+  const result = await downloadBrollAssets(
+    [{ startSec: 0, endSec: 5, asset_id: '1c2817be' }],
+    [ambig1, ambig2],
+    '/tmp/unused',
   );
+  assert.equal(result.assets.length, 0, 'ambiguous prefix is dropped, not silently resolved');
+  assert.equal(result.dropped.length, 1);
+  assert.equal(result.dropped[0].asset_id, '1c2817be');
+  assert.match(result.dropped[0].reason, /Ambiguous asset_id=1c2817be/i);
 });
 
-test('downloadBrollAssets: PR-G — completely unknown asset_id still throws clearly (no regression)', async () => {
+test('downloadBrollAssets: PR-G/#192 — completely unknown asset_id is dropped (no regression)', async () => {
   const row = {
     asset_id: 'real-id-here',
     file_url: 'https://x', storage_url: null,
@@ -254,19 +263,20 @@ test('downloadBrollAssets: PR-G — completely unknown asset_id still throws cle
     localPath: '/tmp/x/real.mp4',
     sourceDurSec: 5, hasVideo: true, hasAudio: false, width: 1280, height: 720,
   };
-  await assert.rejects(
-    () => downloadBrollAssets(
-      [{ startSec: 0, endSec: 5, asset_id: 'totally-unrelated-fakeid' }],
-      [row],
-      '/tmp/unused',
-    ),
-    /unknown asset_id=totally-unrelated-fakeid/,
+  const result = await downloadBrollAssets(
+    [{ startSec: 0, endSec: 5, asset_id: 'totally-unrelated-fakeid' }],
+    [row],
+    '/tmp/unused',
   );
+  assert.equal(result.assets.length, 0);
+  assert.equal(result.dropped.length, 1);
+  assert.equal(result.dropped[0].asset_id, 'totally-unrelated-fakeid');
+  assert.match(result.dropped[0].reason, /Unknown asset_id=totally-unrelated-fakeid/);
 });
 
-test('downloadBrollAssets: PR-G — very short prefix (< 4 chars) is rejected even if unique', async () => {
+test('downloadBrollAssets: PR-G/#192 — very short prefix (< 4 chars) is dropped even if unique', async () => {
   // Defensive: a 2-char prefix like "1c" might happen to be unique by accident
-  // but is too short to trust. Treat as unknown rather than risk a false match.
+  // but is too short to trust. Drop rather than risk a false match.
   const row = {
     asset_id: '1c2817be-8326-4f4c-a666-56d422f44612',
     file_url: 'https://x', storage_url: null,
@@ -274,14 +284,48 @@ test('downloadBrollAssets: PR-G — very short prefix (< 4 chars) is rejected ev
     localPath: '/tmp/x/full.mp4',
     sourceDurSec: 5, hasVideo: true, hasAudio: false, width: 1280, height: 720,
   };
-  await assert.rejects(
-    () => downloadBrollAssets(
-      [{ startSec: 0, endSec: 5, asset_id: '1c' }],
-      [row],
-      '/tmp/unused',
-    ),
-    /unknown asset_id=1c/,
+  const result = await downloadBrollAssets(
+    [{ startSec: 0, endSec: 5, asset_id: '1c' }],
+    [row],
+    '/tmp/unused',
   );
+  assert.equal(result.assets.length, 0);
+  assert.equal(result.dropped.length, 1);
+  assert.equal(result.dropped[0].asset_id, '1c');
+  assert.match(result.dropped[0].reason, /Unknown asset_id=1c/);
+});
+
+// ── PR #192: per-asset fail-soft — the core invariant ─────────────────
+//
+// The whole reason for PR #192: one bad asset in a batch of N must NOT
+// take down the other N-1 good assets. Pre-PR #192 (Saturday 2026-05-23
+// SupportED incident), a single dead URL threw, the orchestrator's
+// whole-call catch wiped the entire pick list, and every render shipped
+// as talking-head-only. This test locks the new behavior.
+
+test('downloadBrollAssets: PR #192 — bad asset in mixed batch drops only itself, good assets ship', async () => {
+  const goodRow = {
+    asset_id: 'good-asset',
+    file_url: 'https://x', storage_url: null,
+    provenance: 'client',
+    localPath: '/tmp/x/good.mp4',
+    sourceDurSec: 5, hasVideo: true, hasAudio: false, width: 1280, height: 720,
+  };
+  const result = await downloadBrollAssets(
+    [
+      { startSec: 0, endSec: 5, asset_id: 'good-asset' },
+      { startSec: 6, endSec: 10, asset_id: 'unknown-bad-asset' },
+      { startSec: 11, endSec: 15, asset_id: 'good-asset' },   // duplicate, also good
+    ],
+    [goodRow],
+    '/tmp/unused',
+  );
+  assert.equal(result.assets.length, 2, 'two good assets succeed despite one bad in the middle');
+  assert.equal(result.assets[0].asset_id, 'good-asset');
+  assert.equal(result.assets[1].asset_id, 'good-asset');
+  assert.equal(result.dropped.length, 1, 'one drop recorded');
+  assert.equal(result.dropped[0].asset_id, 'unknown-bad-asset');
+  assert.match(result.dropped[0].reason, /Unknown asset_id=unknown-bad-asset/);
 });
 
 // Note: the client-row branch (no `localPath`) is unchanged from pre-PR-A

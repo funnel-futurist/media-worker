@@ -30,6 +30,7 @@ import { audioTranscribeRouter } from './routes/audio-transcribe.js';
 import { brollPickerRouter } from './routes/broll-picker.js';
 import { cleanModeComposeRouter } from './routes/clean-mode-compose.js';
 import { repatchCaptionsRouter } from './routes/repatch-captions.js';
+import { recomposeBrollRouter } from './routes/recompose-broll.js';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -83,6 +84,8 @@ app.use('/', brollPickerRouter);
 app.use('/', cleanModeComposeRouter);
 // Routes — PR-AF (Caption-only repatch on already-edited reels)
 app.use('/', repatchCaptionsRouter);
+// Routes — PR-AP (Surgical b-roll swap on already-edited reels)
+app.use('/', recomposeBrollRouter);
 
 // Global error handler
 app.use((err, req, res, _next) => {

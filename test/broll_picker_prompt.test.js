@@ -36,24 +36,37 @@ test('buildPrompts: user prompt names provenance="client" and provenance="pixaba
   assert.match(userPrompt, /provenance="pixabay"/);
 });
 
-test('buildPrompts: PR-F — user prompt tells Gemini to USE BOTH sources for a healthy mix', () => {
+test('buildPrompts: Tier 1 — balanced clause is CLIENT-FIRST (supersedes PR-F "USE BOTH" co-equal blend)', () => {
+  // 2026-05-27: Chelsea/Phil EnableSNP feedback. Pixabay is too generic to
+  // drive client-facing reels' visual identity, so the default balanced mode
+  // is now client-first with stock as SUPPORT/fallback — superseding PR-F's
+  // co-equal "USE BOTH / healthy mix" wording. Lock the new stance.
   const { userPrompt } = buildPrompts({
     transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.4,
   });
-  assert.match(userPrompt, /USE BOTH/i);
-  assert.match(userPrompt, /healthy mix/i);
+  assert.match(userPrompt, /CLIENT-FIRST/);
+  assert.match(userPrompt, /Stock is a fallback, not a co-equal default/i);
+  assert.match(userPrompt, /primary source/i);
+  // The PR-F co-equal wording is intentionally GONE.
+  assert.doesNotMatch(userPrompt, /USE BOTH/i);
+  assert.doesNotMatch(userPrompt, /healthy mix/i);
 });
 
-test('buildPrompts: PR-F — user prompt frames the choice as "what fits the moment best", not "fallback"', () => {
+test('buildPrompts: Tier 1 — STOCK QUALITY GATE forbids abstract scenery and requires concrete/human stock', () => {
   const { userPrompt } = buildPrompts({
     transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.4,
   });
-  // Wording from Shannon's PR-F directive — locked so a future rewrite can't soften.
-  assert.match(userPrompt, /best fits|best fit/i);
-  // Prefer-client clause is now CONDITIONAL on "relevance is similar", not absolute.
-  assert.match(userPrompt, /prefer client only when relevance is/i);
-  // Stock is OK to pick when it explains the moment more directly.
-  assert.match(userPrompt, /pick stock when it (explains|fills|fits)/i);
+  assert.match(userPrompt, /STOCK QUALITY GATE/);
+  assert.match(userPrompt, /concrete, human, and context-relevant/i);
+  assert.match(userPrompt, /NEVER use abstract scenery/i);
+});
+
+test('buildPrompts: Tier 1 — REJECT rubric explicitly rejects abstract scenery unless the speaker describes nature', () => {
+  const { userPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.4,
+  });
+  assert.match(userPrompt, /abstract scenery\/landscape/i);
+  assert.match(userPrompt, /UNLESS the speaker is literally describing nature/i);
 });
 
 test('buildPrompts: PR-F — old "STRONGLY prefer / NEVER take over" wording is GONE', () => {
@@ -246,7 +259,9 @@ test('buildPrompts: PR-K — when overrides omitted, defaults (4/5/5) appear', (
 
 // ── PR #130: clientPreference modes ─────────────────────────────────
 
-test("buildPrompts: clientPreference='balanced' (default) uses the AI-blend USE BOTH rule", () => {
+test("buildPrompts: clientPreference='balanced' (default) uses the CLIENT-FIRST rule", () => {
+  // Tier 1 (2026-05-27): balanced is now client-first (stock = fallback),
+  // superseding PR-F's co-equal "USE BOTH" wording.
   const { userPrompt: defaultPrompt } = buildPrompts({
     transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.4,
   });
@@ -256,9 +271,10 @@ test("buildPrompts: clientPreference='balanced' (default) uses the AI-blend USE 
   });
   // Default and explicit-balanced produce the same prompt.
   assert.equal(defaultPrompt, explicitBalanced);
-  // Both contain the "USE BOTH" wording.
-  assert.match(defaultPrompt, /USE BOTH/);
-  assert.match(defaultPrompt, /healthy mix/i);
+  // Both contain the client-first wording; the old co-equal rule is gone.
+  assert.match(defaultPrompt, /CLIENT-FIRST/);
+  assert.match(defaultPrompt, /Stock is a fallback, not a co-equal default/i);
+  assert.doesNotMatch(defaultPrompt, /USE BOTH/);
   // Neither contains the minimal-mode language.
   assert.doesNotMatch(defaultPrompt, /MINIMAL-CLIENT MODE/);
   assert.doesNotMatch(defaultPrompt, /STRONGLY PREFER Pixabay stock/);
@@ -303,7 +319,7 @@ test("buildPrompts: unrecognized clientPreference falls back to 'balanced' (defe
     transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.4,
     clientPreference: 'aggressive',
   });
-  assert.match(userPrompt, /USE BOTH/);
+  assert.match(userPrompt, /CLIENT-FIRST/);
   assert.doesNotMatch(userPrompt, /MINIMAL-CLIENT MODE/);
 });
 

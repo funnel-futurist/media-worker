@@ -198,6 +198,28 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
           error: 'options.brollMaxClientCount must be a non-negative integer',
         });
       }
+      // Tier 1 (2026-05-27): per-client steering + inventory exclusion.
+      // contentContext is the picker's domain guardrail (string, capped to
+      // keep the prompt bounded). brollExcludeAssetIds removes weak/over-used
+      // assets from the candidate pool (durable target = client-library ids;
+      // stock px-video-* ids are ephemeral so exclusion is within-run only).
+      const ctxRaw = body.options.contentContext;
+      if (ctxRaw != null && (typeof ctxRaw !== 'string' || ctxRaw.length > 2000)) {
+        return res.status(400).json({
+          jobId, step: 'validate',
+          error: 'options.contentContext must be a string ≤ 2000 characters',
+        });
+      }
+      const excludeRaw = body.options.brollExcludeAssetIds;
+      if (
+        excludeRaw != null &&
+        (!Array.isArray(excludeRaw) || excludeRaw.some((id) => typeof id !== 'string' || id.length === 0))
+      ) {
+        return res.status(400).json({
+          jobId, step: 'validate',
+          error: 'options.brollExcludeAssetIds must be an array of non-empty strings',
+        });
+      }
       // Per-job output resolution (default 1080×1920 reel). Whitelist:
       //   (1080, 1920) — 9:16 reel (current default)
       //   (1080, 1350) — 4:5 ad (new)

@@ -8,7 +8,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { shouldFetchStock, mergeStockIntoLibrary, rebalanceClientFirst } from '../lib/stock_library_merge.js';
+import { shouldFetchStock, mergeStockIntoLibrary, rebalanceClientFirst, isGenericSceneryHit } from '../lib/stock_library_merge.js';
 
 // ── shouldFetchStock — coverage heuristic ───────────────────────────────
 //
@@ -544,4 +544,43 @@ test('rebalance: PR-131 — client trim happens from the TAIL (preserves earlier
   const keptClient = out.insertions.filter((i) => i.provenance !== 'pixabay');
   assert.equal(keptClient.length, 1);
   assert.equal(keptClient[0].asset_id, 'c-early', 'should keep the earliest (brand-anchor) client pick');
+});
+
+// ── isGenericSceneryHit — anti-generic-scenery candidate filter (Tier 1) ──
+//
+// Drops PURE-scenery Pixabay hits before the picker sees them. MUST protect
+// anything with a people / action / object anchor, even if it also carries
+// nature tags. Chelsea's examples to protect are locked below.
+
+test('isGenericSceneryHit: pure scenery + concrete keyword → DROP', () => {
+  // "waking up rested" beat produced a tree shot — exactly what we want gone.
+  assert.equal(isGenericSceneryHit('tree, forest, sunset, calm', 'parent waking up morning'), true);
+  assert.equal(isGenericSceneryHit('lake, mountains, water, reflection', 'coordinated planning team'), true);
+});
+
+test('isGenericSceneryHit: scenery + nature-intended keyword → KEEP (transcript is about outdoors)', () => {
+  // If the speaker is literally talking about a forest, a forest clip is fine.
+  assert.equal(isGenericSceneryHit('forest, trees, woodland', 'walk through forest nature'), false);
+});
+
+test('isGenericSceneryHit: PROTECTED — people/action anchors keep the hit even with nature tags', () => {
+  // Chelsea's "brighter / happy families outside" intent must survive.
+  assert.equal(isGenericSceneryHit('family, park, grass, walking', 'family planning'), false);
+  assert.equal(isGenericSceneryHit('parent, child, outdoors, beach', 'present with kids'), false);
+  assert.equal(isGenericSceneryHit('kids, playing, field, grass', 'children outside'), false);
+});
+
+test('isGenericSceneryHit: non-scenery tags (no scenery at all) → KEEP', () => {
+  assert.equal(isGenericSceneryHit('abstract, motion, graphics', 'energy momentum'), false);
+  assert.equal(isGenericSceneryHit('calendar, planning, schedule', 'plan ahead'), false);
+});
+
+test('isGenericSceneryHit: empty / missing tags → KEEP (cannot judge)', () => {
+  assert.equal(isGenericSceneryHit('', 'anything'), false);
+  assert.equal(isGenericSceneryHit(null, 'anything'), false);
+  assert.equal(isGenericSceneryHit(undefined, undefined), false);
+});
+
+test('isGenericSceneryHit: object anchor (document/desk) survives even with a stray scenery tag', () => {
+  assert.equal(isGenericSceneryHit('documents, desk, paperwork, window, sky', 'reviewing the paperwork'), false);
 });

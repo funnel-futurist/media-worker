@@ -67,6 +67,21 @@ test('PR-AO: buildPipelineOpts leaves slateHint undefined when caller omits it',
   assert.equal(opts.slateHint, undefined);
 });
 
+test('Tier1-fix: buildPipelineOpts passes brollExcludeAssetIds through from req.options', () => {
+  // Regression guard: the Tier 1 merge added the route validation + the
+  // candidate-pool filter (reads opts.brollExcludeAssetIds) but omitted this
+  // req.options → opts write, so every exclude silently no-op'd (Chelsea's
+  // Thursday excludes 1c2817be + fc521f7e leaked into the final reel).
+  const ids = ['1c2817be-8326-4f4c-a666-56d422f44612', 'fc521f7e-400d-46cf-a638-906cc8a7b900'];
+  const opts = buildPipelineOpts({ options: { brollExcludeAssetIds: ids } });
+  assert.deepEqual(opts.brollExcludeAssetIds, ids);
+});
+
+test('Tier1-fix: buildPipelineOpts leaves brollExcludeAssetIds undefined when caller omits it', () => {
+  const opts = buildPipelineOpts({ options: {} });
+  assert.equal(opts.brollExcludeAssetIds, undefined);
+});
+
 test('buildPipelineOpts: passes all four overrides simultaneously (Phil-style body)', () => {
   const opts = buildPipelineOpts({
     options: {

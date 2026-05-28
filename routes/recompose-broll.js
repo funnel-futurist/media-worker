@@ -60,6 +60,7 @@ import { overlayBanner } from '../lib/banner_overlay.js';
 import { burnSubtitles } from '../lib/subtitle_burn.js';
 import { getLUFS, computeBgmReductionDb, mixBgmIntoVideo } from '../lib/bgm_mix.js';
 import { probeStreams } from '../lib/media.js';
+import { detectFaceOffsetX } from '../lib/face_detect.js';
 import { getDuration } from '../lib/media.js';
 
 export const recomposeBrollRouter = Router();
@@ -276,6 +277,32 @@ recomposeBrollRouter.post('/recompose-broll', async (req, res) => {
           warnings.push(`asset probe failed for ${ins.asset_id}: ${probeErr.message?.slice(0, 200) ?? probeErr} — insertion dropped`);
           continue;
         }
+        // Tier 2-b: per-asset face-aware crop offset. Kept insertions
+        // inherit `faceCropOffsetX` from the manifest (so the framing is
+        // reproduced bit-identical on un-swapped slots). Replacement assets
+        // didn't pass through the original pipeline's detect step, so we
+        // run detection here for any landscape new asset that lacks the
+        // field. Portrait/square assets keep the default 0.5 (no-op).
+        const pW = probe.video?.width ?? ins.width ?? 0;
+        const pH = probe.video?.height ?? ins.height ?? 0;
+        const isLandscape = pW > pH;
+        let faceCropOffsetX = typeof ins.faceCropOffsetX === 'number' ? ins.faceCropOffsetX : null;
+        let faceCropSource = ins.faceCropSource ?? null;
+        if (faceCropOffsetX === null) {
+          if (isLandscape) {
+            try {
+              const fd = await detectFaceOffsetX(localPath, { samples: 4 });
+              faceCropOffsetX = fd.offsetX;
+              faceCropSource = fd.source;
+            } catch (_) {
+              faceCropOffsetX = 0.5;
+              faceCropSource = 'detect-error';
+            }
+          } else {
+            faceCropOffsetX = 0.5;
+            faceCropSource = 'skipped-portrait';
+          }
+        }
         insertionsWithLocalPath.push({
           ...ins,
           localPath,
@@ -283,8 +310,10 @@ recomposeBrollRouter.post('/recompose-broll', async (req, res) => {
           sourceDurSec: probe.container?.duration ?? 0,
           hasVideo: !!probe.video,
           hasAudio: !!probe.audio,
-          width: probe.video?.width ?? ins.width ?? 0,
-          height: probe.video?.height ?? ins.height ?? 0,
+          width: pW,
+          height: pH,
+          faceCropOffsetX,
+          faceCropSource,
         });
       } catch (err) {
         warnings.push(`asset download failed for ${ins.asset_id}: ${err.message?.slice(0, 200) ?? err} — insertion dropped`);

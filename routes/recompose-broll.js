@@ -59,6 +59,7 @@ import { renderIntroOverlay } from '../lib/intro_card_render.js';
 import { overlayBanner } from '../lib/banner_overlay.js';
 import { burnSubtitles } from '../lib/subtitle_burn.js';
 import { getLUFS, computeBgmReductionDb, mixBgmIntoVideo } from '../lib/bgm_mix.js';
+import { probeStreams } from '../lib/media.js';
 import { getDuration } from '../lib/media.js';
 
 export const recomposeBrollRouter = Router();
@@ -262,7 +263,29 @@ recomposeBrollRouter.post('/recompose-broll', async (req, res) => {
       const localPath = join(tmpDir, `asset-${i}-${ins.asset_id.slice(0, 20).replace(/[^a-z0-9]/gi, '_')}.${ext}`);
       try {
         const bytes = await downloadUrlToFile(ins.downloadUrl, localPath);
-        insertionsWithLocalPath.push({ ...ins, localPath, bytes });
+        // PR-AP-fix: composeFaceAndBrolls requires sourceDurSec on every
+        // insertion (throws otherwise — verified on ff212f86 surgical swap
+        // 2026-05-28). v1 of this route assumed manifest carried the field;
+        // it does for kept insertions but NEWLY-added replacement assets
+        // arrive without it. Probe locally on every download so the
+        // contract is satisfied uniformly.
+        let probe = null;
+        try {
+          probe = await probeStreams(localPath);
+        } catch (probeErr) {
+          warnings.push(`asset probe failed for ${ins.asset_id}: ${probeErr.message?.slice(0, 200) ?? probeErr} — insertion dropped`);
+          continue;
+        }
+        insertionsWithLocalPath.push({
+          ...ins,
+          localPath,
+          bytes,
+          sourceDurSec: probe.container?.duration ?? 0,
+          hasVideo: !!probe.video,
+          hasAudio: !!probe.audio,
+          width: probe.video?.width ?? ins.width ?? 0,
+          height: probe.video?.height ?? ins.height ?? 0,
+        });
       } catch (err) {
         warnings.push(`asset download failed for ${ins.asset_id}: ${err.message?.slice(0, 200) ?? err} — insertion dropped`);
       }

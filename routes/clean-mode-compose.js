@@ -220,6 +220,31 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
           error: 'options.brollExcludeAssetIds must be an array of non-empty strings',
         });
       }
+      // Tier 2-a: Pexels stock provider (second source alongside Pixabay).
+      // Backward-compatible: defaults apply if either field is omitted, and
+      // the worker silently skips Pexels when PEXELS_API_KEY isn't set on
+      // Railway. pexelsEnabled is boolean; pexelsMaxClips is an int in (0, 50].
+      const pexelsEnabledRaw = body.options.pexelsEnabled;
+      if (pexelsEnabledRaw != null && typeof pexelsEnabledRaw !== 'boolean') {
+        return res.status(400).json({
+          jobId, step: 'validate',
+          error: 'options.pexelsEnabled must be a boolean',
+        });
+      }
+      const pexelsMaxClipsRaw = body.options.pexelsMaxClips;
+      if (pexelsMaxClipsRaw != null) {
+        if (
+          typeof pexelsMaxClipsRaw !== 'number' ||
+          !Number.isInteger(pexelsMaxClipsRaw) ||
+          pexelsMaxClipsRaw <= 0 ||
+          pexelsMaxClipsRaw > 50
+        ) {
+          return res.status(400).json({
+            jobId, step: 'validate',
+            error: 'options.pexelsMaxClips must be an integer in (0, 50]',
+          });
+        }
+      }
       // Per-job output resolution (default 1080×1920 reel). Whitelist:
       //   (1080, 1920) — 9:16 reel (current default)
       //   (1080, 1350) — 4:5 ad (new)

@@ -584,3 +584,106 @@ test('isGenericSceneryHit: empty / missing tags → KEEP (cannot judge)', () => 
 test('isGenericSceneryHit: object anchor (document/desk) survives even with a stray scenery tag', () => {
   assert.equal(isGenericSceneryHit('documents, desk, paperwork, window, sky', 'reviewing the paperwork'), false);
 });
+
+// ── Tier 2-a: mergeStockIntoLibrary handles BOTH pixabay + pexels hits ──
+//
+// Locks the dual-provider behavior: each provider produces hits with its
+// own provenance tag, adapter routes on the tag, both end up in the same
+// library array shape so the picker is provider-agnostic.
+
+function pixabayHit(id, tags = 'family planning') {
+  return {
+    id, tags, videoUrl: `https://pixabay/v/${id}.mp4`,
+    width: 1280, height: 720, localPath: `/tmp/px-${id}.mp4`,
+    sourceDurSec: 12, hasVideo: true, hasAudio: false,
+    // no provenance → adapter defaults to 'pixabay'
+  };
+}
+
+function pexelsHit(id, tags = 'estate planning attorney') {
+  return {
+    id, tags, videoUrl: `https://pexels/v/${id}.mp4`,
+    width: 1080, height: 1920, localPath: `/tmp/pexels-${id}.mp4`,
+    sourceDurSec: 14, hasVideo: true, hasAudio: false,
+    provenance: 'pexels',
+    pageURL: `https://www.pexels.com/video/clip-${id}/`,
+    attributionUser: 'Jane Doe',
+    attributionUrl: 'https://www.pexels.com/@jane-doe',
+  };
+}
+
+test('Tier2a merge: Pixabay-only hits adapt with provenance:"pixabay" (back-compat)', () => {
+  const merged = mergeStockIntoLibrary([], [pixabayHit(111)]);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].provenance, 'pixabay');
+  assert.equal(merged[0].asset_id, 'px-video-111');
+  assert.match(merged[0].asset_title, /Pixabay/);
+  // No pexels-only fields on pixabay rows.
+  assert.equal(merged[0].pexelsVideoId, undefined);
+  assert.equal(merged[0].attributionUser, undefined);
+});
+
+test('Tier2a merge: Pexels hits adapt with provenance:"pexels" and pexels-video-<id> asset_id', () => {
+  const merged = mergeStockIntoLibrary([], [pexelsHit(222)]);
+  assert.equal(merged.length, 1);
+  const r = merged[0];
+  assert.equal(r.provenance, 'pexels');
+  assert.equal(r.asset_id, 'pexels-video-222');
+  assert.match(r.asset_title, /Pexels/);
+  assert.equal(r.file_url, 'https://pexels/v/222.mp4');
+  assert.equal(r.localPath, '/tmp/pexels-222.mp4');
+  assert.equal(r.pexelsVideoId, 222);
+  assert.equal(r.pexelsPageURL, 'https://www.pexels.com/video/clip-222/');
+  // Attribution recorded in metadata (not burned on-screen).
+  assert.equal(r.attributionUser, 'Jane Doe');
+  assert.equal(r.attributionUrl, 'https://www.pexels.com/@jane-doe');
+  // Pexels rows should NOT carry pixabay-only fields.
+  assert.equal(r.pixabayVideoId, undefined);
+});
+
+test('Tier2a merge: mixed pixabay+pexels hits coexist in the same library array', () => {
+  const client = [{ asset_id: 'client-abc', provenance: 'client', file_url: 'https://c/c.jpg' }];
+  const merged = mergeStockIntoLibrary(client, [pixabayHit(1), pexelsHit(2)]);
+  assert.equal(merged.length, 3);
+  // Order: client → adapted stock in input order
+  assert.equal(merged[0].provenance, 'client');
+  assert.equal(merged[1].provenance, 'pixabay');
+  assert.equal(merged[2].provenance, 'pexels');
+  // Both stock rows share the same row shape — picker prompt iterates uniformly.
+  for (const r of [merged[1], merged[2]]) {
+    assert.equal(typeof r.asset_id, 'string');
+    assert.equal(typeof r.file_url, 'string');
+    assert.equal(typeof r.context, 'string');
+    assert.equal(r.asset_type, 'video');
+  }
+});
+
+test('Tier2a merge: hit without explicit provenance defaults to pixabay (back-compat)', () => {
+  // Existing test fixtures and the Pixabay search path don't set provenance
+  // on the hit object directly; the adapter must default to 'pixabay'.
+  const merged = mergeStockIntoLibrary([], [{ id: 9, tags: 'x', videoUrl: 'https://x.mp4' }]);
+  assert.equal(merged[0].provenance, 'pixabay');
+  assert.equal(merged[0].asset_id, 'px-video-9');
+});
+
+test('Tier2a rebalanceClientFirst: isStock predicate now recognizes pexels as stock', () => {
+  // Mix: 1 client + 1 pixabay + 1 pexels picked. With maxStockRatio:0.5 and
+  // usableClientCount:5 we should be in "two stock vs one client" → at least
+  // one stock dropped. Predicate fix means pexels is correctly counted as stock.
+  const insertions = [
+    { asset_id: 'client-1', provenance: 'client', startSec: 0, endSec: 5, reason: 'r' },
+    { asset_id: 'px-video-1', provenance: 'pixabay', startSec: 10, endSec: 15, reason: 'r' },
+    { asset_id: 'pexels-video-1', provenance: 'pexels', startSec: 20, endSec: 25, reason: 'r' },
+  ];
+  const out = rebalanceClientFirst({
+    insertions,
+    usableClientCount: 5,
+    maxStockRatio: 0.5,
+    stockCandidatesAvailable: 2,
+  });
+  // 1/3 = 0.33 client → 0.66 stock → over the 0.5 ratio. Rebalance trims stock.
+  // (We don't lock the exact algorithm here — just that at least one stock
+  // was dropped, proving the predicate counts pexels correctly.)
+  const stockKept = out.insertions.filter((i) => i.provenance === 'pixabay' || i.provenance === 'pexels').length;
+  assert.ok(stockKept < 2, `expected at most 1 stock pick after rebalance, got ${stockKept}`);
+});

@@ -83,14 +83,32 @@ test('compose filter: face branch uses face-aware crop expression with outputWid
   );
 });
 
-test('compose filter: broll branch keeps plain center crop (no offset needed) — PR #114', () => {
-  // Brolls don't need a face-aware offset; the broll branch uses a plain
-  // center crop. After parameterization, the shape is
-  // `scale=${W}:${H}:...,crop=${W}:${H},setsar=...`.
+test('compose filter (Tier 2-b): broll branch uses per-asset face-aware crop expression', () => {
+  // Tier 2-b (2026-05-28) supersedes the PR #114 assertion. The b-roll
+  // branch now reads `ins.faceCropOffsetX` (default 0.5 = pre-Tier-2-b
+  // center-crop behavior) and feeds it through buildCropXExpression so
+  // landscape stock with off-center subjects stays in frame. Repro of the
+  // bug: Thursday b9915364 at 75.7s — a Pexels woman-at-laptop with face
+  // on the right was cropped down to ear+hair only by the hardcoded
+  // `crop=W:H` shorthand.
+  //
+  // After Tier 2-b the shape is:
+  //   `scale=${W}:${H}:...,crop=${W}:${H}:${brollCropXExpr}:0,setsar=...`
+  // where brollCropXExpr = buildCropXExpression(brollOffsetX, outputWidth).
   assert.match(
     SOURCE,
-    /\$\{inputChain\},setpts=PTS-STARTPTS,[\s\S]*?scale=\$\{outputWidth\}:\$\{outputHeight\}:force_original_aspect_ratio=increase,[\s\S]*?crop=\$\{outputWidth\}:\$\{outputHeight\},/,
-    'broll branch must use plain `crop=${outputWidth}:${outputHeight},` (no face-offset suffix)',
+    /const brollOffsetX = typeof ins\.faceCropOffsetX === 'number'/,
+    'compose b-roll branch must read ins.faceCropOffsetX (Tier 2-b)',
+  );
+  assert.match(
+    SOURCE,
+    /const brollCropXExpr = buildCropXExpression\(brollOffsetX, outputWidth\)/,
+    'compose b-roll branch must build cropXExpr via buildCropXExpression',
+  );
+  assert.match(
+    SOURCE,
+    /\$\{inputChain\},setpts=PTS-STARTPTS,[\s\S]*?scale=\$\{outputWidth\}:\$\{outputHeight\}:force_original_aspect_ratio=increase,[\s\S]*?crop=\$\{outputWidth\}:\$\{outputHeight\}:\$\{brollCropXExpr\}:0,/,
+    'broll branch must emit `crop=W:H:${brollCropXExpr}:0` (face-aware), not plain `crop=W:H`',
   );
 });
 

@@ -9,6 +9,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { shouldFetchStock, mergeStockIntoLibrary, rebalanceClientFirst, isGenericSceneryHit } from '../lib/stock_library_merge.js';
+import { buildCropXExpression } from '../lib/face_detect.js';
 
 // ── shouldFetchStock — coverage heuristic ───────────────────────────────
 //
@@ -686,4 +687,95 @@ test('Tier2a rebalanceClientFirst: isStock predicate now recognizes pexels as st
   // was dropped, proving the predicate counts pexels correctly.)
   const stockKept = out.insertions.filter((i) => i.provenance === 'pixabay' || i.provenance === 'pexels').length;
   assert.ok(stockKept < 2, `expected at most 1 stock pick after rebalance, got ${stockKept}`);
+});
+
+// ── Tier 2-b: per-asset faceCropOffsetX propagates through the adapter ─
+
+test('Tier2b: hit with faceCropOffsetX=0.75 (face on right) → row carries 0.75', () => {
+  // Repro of the Thursday 75.7s bug: a landscape Pexels clip with subject on
+  // the right side. Pipeline runs detectFaceOffsetX → 0.75 → attaches to hit.
+  // Adapter must preserve it so composeFaceAndBrolls reads it on the row.
+  const hit = pexelsHit(7252716);
+  hit.faceCropOffsetX = 0.75;
+  hit.faceCropSource = 'detected';
+  const merged = mergeStockIntoLibrary([], [hit]);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].faceCropOffsetX, 0.75);
+  assert.equal(merged[0].faceCropSource, 'detected');
+});
+
+test('Tier2b: hit with faceCropOffsetX=0.25 (face on left) → row carries 0.25', () => {
+  const hit = pixabayHit(111);
+  hit.faceCropOffsetX = 0.25;
+  hit.faceCropSource = 'detected';
+  const merged = mergeStockIntoLibrary([], [hit]);
+  assert.equal(merged[0].faceCropOffsetX, 0.25);
+  assert.equal(merged[0].faceCropSource, 'detected');
+});
+
+test('Tier2b: hit with no faceCropOffsetX → row defaults to 0.5 (current center-crop behavior)', () => {
+  // Pre-Tier-2-b call sites that don't set the field (existing tests, legacy
+  // fixtures, older job manifests replayed via recompose) must continue to
+  // render identically — naive center crop.
+  const merged = mergeStockIntoLibrary([], [pixabayHit(222)]);
+  assert.equal(merged[0].faceCropOffsetX, 0.5);
+  assert.equal(merged[0].faceCropSource, 'default-center');
+});
+
+test('Tier2b: faceCropSource "skipped-portrait" propagates (portrait b-roll path)', () => {
+  // Pipeline skips detection for portrait/square hits because center-crop is
+  // a no-op there. The skip marker should reach the row for audit purposes.
+  const hit = pexelsHit(333);
+  hit.faceCropOffsetX = 0.5;
+  hit.faceCropSource = 'skipped-portrait';
+  const merged = mergeStockIntoLibrary([], [hit]);
+  assert.equal(merged[0].faceCropOffsetX, 0.5);
+  assert.equal(merged[0].faceCropSource, 'skipped-portrait');
+});
+
+test('Tier2b: faceCropSource "fallback" propagates (detection ran but found no face)', () => {
+  // detectFaceOffsetX always resolves: source='fallback' when OpenCV finds
+  // zero faces. composeFaceAndBrolls treats it as 0.5 center — same as portrait.
+  const hit = pixabayHit(444);
+  hit.faceCropOffsetX = 0.5;
+  hit.faceCropSource = 'fallback';
+  const merged = mergeStockIntoLibrary([], [hit]);
+  assert.equal(merged[0].faceCropOffsetX, 0.5);
+  assert.equal(merged[0].faceCropSource, 'fallback');
+});
+
+test('Tier2b: faceCropOffsetX clamps respected at the row level (non-number → 0.5)', () => {
+  // Defensive: if a hit is constructed by future code with a non-number
+  // faceCropOffsetX (e.g. NaN, undefined, "0.75"), the adapter normalizes
+  // to 0.5 rather than passing a bad value to buildCropXExpression.
+  const hit = pexelsHit(555);
+  hit.faceCropOffsetX = '0.75';   // string — would break crop math
+  const merged = mergeStockIntoLibrary([], [hit]);
+  assert.equal(merged[0].faceCropOffsetX, 0.5, 'string offsetX must coerce to default');
+});
+
+// ── Tier 2-b: buildCropXExpression math — directional spot-checks ──────
+
+test('Tier2b crop math: offsetX=0.5 (center) → same expr as pre-Tier-2-b center', () => {
+  // Sanity: 0.5 is the math equivalent of the old hardcoded `crop=W:H`
+  // shorthand (ffmpeg defaults to centered when x/y omitted). The
+  // buildCropXExpression for 0.5 produces an x that places the crop in the
+  // middle. Test by checking the expression contains 0.5000.
+  const expr = buildCropXExpression(0.5, 1080);
+  assert.match(expr, /0\.5000\*iw/);
+});
+
+test('Tier2b crop math: offsetX=0.75 (subject right) → expr shifts crop right', () => {
+  const expr = buildCropXExpression(0.75, 1080);
+  assert.match(expr, /0\.7500\*iw/);
+});
+
+test('Tier2b crop math: offsetX=0.25 (subject left) → expr shifts crop left', () => {
+  const expr = buildCropXExpression(0.25, 1080);
+  assert.match(expr, /0\.2500\*iw/);
+});
+
+test('Tier2b crop math: out-of-range offsetX clamps inside [0, 1]', () => {
+  assert.match(buildCropXExpression(-0.5, 1080), /0\.0000\*iw/);
+  assert.match(buildCropXExpression(1.5, 1080), /1\.0000\*iw/);
 });

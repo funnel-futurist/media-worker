@@ -98,3 +98,65 @@ test('route: a valid brollExcludeAssetIds array does NOT 400 on brollExcludeAsse
     assert.doesNotMatch(res._body.error ?? '', /brollExcludeAssetIds/);
   }
 });
+
+// ── Tier 2-a: pexelsEnabled + pexelsMaxClips ──────────────────────────
+
+test('Tier2a route: rejects pexelsEnabled non-boolean', async () => {
+  const handler = getHandler();
+  const req = { body: { ...baseBody(), options: { pexelsEnabled: 'yes' } } };
+  const res = fakeRes();
+  await handler(req, res);
+  assert.equal(res._status, 400);
+  assert.match(res._body.error, /pexelsEnabled must be a boolean/);
+});
+
+test('Tier2a route: accepts pexelsEnabled true and false', async () => {
+  const handler = getHandler();
+  for (const v of [true, false]) {
+    const req = { body: { ...baseBody(), options: { pexelsEnabled: v } } };
+    const res = fakeRes();
+    await handler(req, res);
+    if (res._status === 400) {
+      assert.doesNotMatch(res._body.error ?? '', /pexelsEnabled/);
+    }
+  }
+});
+
+test('Tier2a route: rejects pexelsMaxClips non-integer', async () => {
+  const handler = getHandler();
+  const req = { body: { ...baseBody(), options: { pexelsMaxClips: 3.5 } } };
+  const res = fakeRes();
+  await handler(req, res);
+  assert.equal(res._status, 400);
+  assert.match(res._body.error, /pexelsMaxClips must be an integer/);
+});
+
+test('Tier2a route: rejects pexelsMaxClips ≤ 0', async () => {
+  const handler = getHandler();
+  const req = { body: { ...baseBody(), options: { pexelsMaxClips: 0 } } };
+  const res = fakeRes();
+  await handler(req, res);
+  assert.equal(res._status, 400);
+  assert.match(res._body.error, /pexelsMaxClips must be an integer/);
+});
+
+test('Tier2a route: rejects pexelsMaxClips > 50', async () => {
+  const handler = getHandler();
+  const req = { body: { ...baseBody(), options: { pexelsMaxClips: 51 } } };
+  const res = fakeRes();
+  await handler(req, res);
+  assert.equal(res._status, 400);
+  assert.match(res._body.error, /pexelsMaxClips must be an integer/);
+});
+
+test('Tier2a route: accepts pexelsMaxClips in valid range (1..50)', async () => {
+  const handler = getHandler();
+  for (const v of [1, 6, 50]) {
+    const req = { body: { ...baseBody(), options: { pexelsMaxClips: v } } };
+    const res = fakeRes();
+    await handler(req, res);
+    if (res._status === 400) {
+      assert.doesNotMatch(res._body.error ?? '', /pexelsMaxClips/);
+    }
+  }
+});

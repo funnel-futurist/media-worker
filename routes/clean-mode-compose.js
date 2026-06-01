@@ -220,6 +220,21 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
           error: 'options.brollExcludeAssetIds must be an array of non-empty strings',
         });
       }
+      // 2026-06-01: aiEditMode preset. Bundles cleanup + captions + AI hook
+      // title + (optionally) b-roll into one client-facing edit-style choice.
+      // The preset is a DEFAULT-SETTER — explicit `skipBroll` /
+      // `introHookEnabled` in the same body still win (see lib/ai_edit_mode.js).
+      const aiEditModeRaw = body.options.aiEditMode;
+      if (
+        aiEditModeRaw != null &&
+        aiEditModeRaw !== 'subtitles_hook_only' &&
+        aiEditModeRaw !== 'hook_subtitles_broll'
+      ) {
+        return res.status(400).json({
+          jobId, step: 'validate',
+          error: `options.aiEditMode must be 'subtitles_hook_only' or 'hook_subtitles_broll' (got ${JSON.stringify(aiEditModeRaw)})`,
+        });
+      }
       // Tier 2-a: Pexels stock provider (second source alongside Pixabay).
       // Backward-compatible: defaults apply if either field is omitted, and
       // the worker silently skips Pexels when PEXELS_API_KEY isn't set on
@@ -597,6 +612,9 @@ async function runAsyncJob(body, jobId, callback) {
     insertionsCount: result.insertions?.count ?? 0,
     bannerApplied: result.steps?.bannerOverlay?.ok === true,
     introHookApplied: result.introHook?.applied === true,
+    // 2026-06-01: surface the resolved aiEditMode so the portal can store it
+    // on content_items.ai_edit_mode and default future edits to the same choice.
+    aiEditMode: result.aiEditMode,
   });
 
   const post = await postReelEditedCallback({

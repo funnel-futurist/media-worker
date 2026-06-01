@@ -31,6 +31,7 @@ import { brollPickerRouter } from './routes/broll-picker.js';
 import { cleanModeComposeRouter } from './routes/clean-mode-compose.js';
 import { repatchCaptionsRouter } from './routes/repatch-captions.js';
 import { recomposeBrollRouter } from './routes/recompose-broll.js';
+import { retimeIntroRouter } from './routes/retime-intro.js';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -86,6 +87,8 @@ app.use('/', cleanModeComposeRouter);
 app.use('/', repatchCaptionsRouter);
 // Routes — PR-AP (Surgical b-roll swap on already-edited reels)
 app.use('/', recomposeBrollRouter);
+// Routes — Client revision pipeline (retime_intro: phrase-located ffmpeg cuts on v1)
+app.use('/', retimeIntroRouter);
 
 // Global error handler
 app.use((err, req, res, _next) => {

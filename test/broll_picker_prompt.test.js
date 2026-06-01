@@ -338,7 +338,26 @@ test('Editor-brain: system prompt enforces editor-as-reviewer mindset (supersede
   assert.match(systemPrompt, /NOT a search-result matcher/);
   // Hard rule: weak picks → drop to talking head.
   assert.match(systemPrompt, /HARD RULE.*kind of related.*DO NOT USE IT/);
-  assert.match(systemPrompt, /Fewer strong picks beat more weak picks/i);
+  // 2026-06-01 PR2: old "Fewer strong picks beat more" framing replaced
+  // with explicit thoroughness language. Quality bar stays; conservatism
+  // penalised.
+  assert.match(systemPrompt, /VOLUME EXPECTATION/);
+  assert.match(systemPrompt, /5-8 strong b-roll moments/);
+  assert.match(systemPrompt, /actively SEARCH every sentence/);
+  assert.doesNotMatch(systemPrompt, /Fewer strong picks beat more weak picks/i);
+});
+
+test('Editor-brain PR2: skipped_moments schema is documented + required when <5 picks on 60s+', () => {
+  const { systemPrompt } = buildPrompts({
+    transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.55,
+  });
+  // Response schema lists the new optional array.
+  assert.match(systemPrompt, /skipped_moments/);
+  assert.match(systemPrompt, /skip_reason/);
+  // Mandatory-when-sparse clause.
+  assert.match(systemPrompt, /REQUIRED when insertions\.length < 5/);
+  // Per-entry fields documented.
+  assert.match(systemPrompt, /"startSec": number, "endSec": number, "skip_reason": string/);
 });
 
 test('PR-Q: system prompt output schema includes match_type and visual_concept fields', () => {

@@ -183,16 +183,20 @@ test('PR-N: BETTER ON SPEAKER FACE criteria list present (expression / direct ad
   assert.match(userPrompt, /short connective phrase/i);
 });
 
-test('PR-N: coverage framed as FLOOR with no upper cap, exceed when script supports more', () => {
+test('Editor-brain: coverage framed as QUALITY FLOOR / soft hint, NOT a count target', () => {
+  // Supersedes the PR-N "COVERAGE FLOOR with no upper cap" rule (Chelsea
+  // 2026-06-01 editor-mindset rewrite). The old framing pressured Gemini to
+  // hit coverage; the new framing prioritises quality and explicitly says
+  // coverage is a consequence of strong matches, not a target.
   const { userPrompt } = buildPrompts({
     transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.55,
   });
-  assert.match(userPrompt, /COVERAGE FLOOR/);
-  assert.match(userPrompt, /AT LEAST/);
-  assert.match(userPrompt, /NO upper cap/i);
-  assert.match(userPrompt, /exceed the floor/i);
-  // Stop-at-floor language for low-opportunity scripts.
-  assert.match(userPrompt, /stop at the floor/i);
+  assert.match(userPrompt, /QUALITY FLOOR/);
+  assert.match(userPrompt, /SOFT HINT|soft hint/);
+  assert.match(userPrompt, /Coverage is a CONSEQUENCE of strong matches/);
+  assert.match(userPrompt, /Do not pad/);
+  // Old "COVERAGE FLOOR" header is gone (replaced by QUALITY FLOOR).
+  assert.doesNotMatch(userPrompt, /^COVERAGE FLOOR$/m);
 });
 
 test('PR-N: ANTI-PADDING rule present (weak/generic/repetitive picks not allowed to hit floor)', () => {
@@ -325,12 +329,16 @@ test("buildPrompts: unrecognized clientPreference falls back to 'balanced' (defe
 
 // ── PR-Q: match quality rubric, cut timing, visual variety, semantic relevance ──
 
-test('PR-Q: system prompt requires semantic relevance — generic picks are worse than no b-roll', () => {
+test('Editor-brain: system prompt enforces editor-as-reviewer mindset (supersedes PR-Q semantic-relevance wording)', () => {
   const { systemPrompt } = buildPrompts({
     transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.55,
   });
-  assert.match(systemPrompt, /clear semantic relevance/i);
-  assert.match(systemPrompt, /generic or loosely related picks are worse than no b-roll/i);
+  // Editor framing — the model is told what role to take.
+  assert.match(systemPrompt, /PROFESSIONAL VIDEO EDITOR/);
+  assert.match(systemPrompt, /NOT a search-result matcher/);
+  // Hard rule: weak picks → drop to talking head.
+  assert.match(systemPrompt, /HARD RULE.*kind of related.*DO NOT USE IT/);
+  assert.match(systemPrompt, /Fewer strong picks beat more weak picks/i);
 });
 
 test('PR-Q: system prompt output schema includes match_type and visual_concept fields', () => {
@@ -401,11 +409,20 @@ test('PR-Q: constraints include match_type and visual_concept enforcement', () =
   assert.match(userPrompt, /Consecutive insertions MUST have different visual_concepts/);
 });
 
-test('PR-Q: anti-padding self-check question is present', () => {
-  const { userPrompt } = buildPrompts({
+test('Editor-brain: anti-padding self-check is the 8-question EDITOR\'S TEST (supersedes prior single-question check)', () => {
+  // Old PR-Q test asserted one self-check sentence on the user prompt; the
+  // editor-mindset rewrite moved self-checks into a richer 8-question
+  // checklist in the system prompt, and the user prompt explicitly points
+  // back to it from the ANTI-PADDING section.
+  const { systemPrompt, userPrompt } = buildPrompts({
     transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 60, brollDensity: 0.55,
   });
-  assert.match(userPrompt, /Would a viewer instantly understand why this visual appears/i);
+  assert.match(systemPrompt, /EDITOR'S TEST/);
+  assert.match(systemPrompt, /DIRECTLY support the exact spoken phrase/);
+  assert.match(systemPrompt, /ACTUALLY visible in the clip/);
+  // The user-prompt ANTI-PADDING block now references the editor's test.
+  assert.match(userPrompt, /ANTI-PADDING/);
+  assert.match(userPrompt, /EDITOR'S TEST/);
 });
 
 test('PR-Q: BETTER ON SPEAKER FACE includes momentum/punchline rule', () => {
@@ -415,10 +432,16 @@ test('PR-Q: BETTER ON SPEAKER FACE includes momentum/punchline rule', () => {
   assert.match(userPrompt, /building to a punchline or key point.*cutting away breaks momentum/i);
 });
 
-test('PR-Q: coverage floor targets at least 10 insertions for videos over 60s', () => {
+test('Editor-brain: the old "TARGET 10 INSERTIONS" coverage pressure is GONE', () => {
+  // Inversion of the prior PR-Q assertion (which locked the count target).
+  // The editor-mindset rewrite removes count targets entirely — fewer
+  // strong picks beat more weak picks. This guard prevents accidental
+  // re-introduction of the count target via a future refactor.
   const { userPrompt } = buildPrompts({
     transcript: TRANSCRIPT, library: LIBRARY, totalDuration: 120, brollDensity: 0.55,
   });
-  assert.match(userPrompt, /TARGET AT LEAST 10 INSERTIONS/);
-  assert.match(userPrompt, /any video over 60 seconds/);
+  assert.doesNotMatch(userPrompt, /TARGET AT LEAST 10 INSERTIONS/i);
+  assert.doesNotMatch(userPrompt, /any video over 60 seconds/i);
+  // Sanity: the new framing IS present.
+  assert.match(userPrompt, /Coverage is a CONSEQUENCE of strong matches/);
 });

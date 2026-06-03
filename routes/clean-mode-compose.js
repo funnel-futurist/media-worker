@@ -30,6 +30,11 @@
  */
 
 import { Router } from 'express';
+import { mkdirSync, createWriteStream, statSync, rmSync } from 'fs';
+import { join } from 'path';
+import { pipeline as streamPipeline } from 'stream/promises';
+import { randomUUID } from 'crypto';
+import axios from 'axios';
 import { runCleanModePipeline } from '../lib/clean_mode_pipeline.js';
 import {
   postReelEditedCallback,
@@ -37,7 +42,7 @@ import {
   buildReelFailedPayload,
   buildEditNotesSummary,
 } from '../lib/portal_webhook.js';
-import { signStorageUrl } from '../lib/storage_helpers.js';
+import { signStorageUrl, uploadToStorage } from '../lib/storage_helpers.js';
 
 /**
  * PR-181b: fire a failure callback to the portal so the row gets flipped
@@ -516,6 +521,156 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
       step: 'pipeline',
       error: err?.message ?? String(err),
     });
+  }
+});
+
+const MAX_SOURCE_BYTES = 500 * 1024 * 1024; // 500 MB — Railway OOM guard
+const SOURCE_DOWNLOAD_TIMEOUT_MS = 5 * 60 * 1000;
+const STAGING_BUCKET = 'video-modules';
+
+/**
+ * POST /clean-reel-from-source
+ *
+ * Thin wrapper around runCleanModePipeline that accepts ANY downloadable
+ * video URL (Drive direct link, Supabase signed URL, HTTPS) instead of a
+ * pre-staged Supabase Storage path. Use cases:
+ *   - operator fallback when a YouTube URL fails fetch
+ *   - end-to-end pipeline verification independent of YouTube extraction
+ *
+ * Defaults to aiEditMode='subtitles_hook_only' (Clean Talking Head Reel:
+ * hook title + subtitles + dead-air + bad-take cleanup, NO b-roll). Caller
+ * can override via `options`, but the explicit-flags-win precedence in
+ * lib/ai_edit_mode.js applies.
+ *
+ * Body: {
+ *   jobId: string,
+ *   clientId: string,
+ *   sourceUrl: string,          // https — Drive direct, Supabase signed, etc.
+ *   output?: { bucket, pathPrefix },  // optional; defaults to video-modules/clean-from-source/<clientId>/<date>/
+ *   options?: { ...clean-mode opts },
+ * }
+ *
+ * Response: same envelope as /clean-mode-compose sync mode.
+ */
+cleanModeComposeRouter.post('/clean-reel-from-source', async (req, res) => {
+  const body = req.body || {};
+  const jobId = typeof body.jobId === 'string' && body.jobId.length > 0 ? body.jobId : undefined;
+  const clientId = typeof body.clientId === 'string' && body.clientId.length > 0 ? body.clientId : undefined;
+  const sourceUrl = typeof body.sourceUrl === 'string' && body.sourceUrl.length > 0 ? body.sourceUrl : undefined;
+
+  if (!jobId) return res.status(400).json({ error: 'jobId is required (non-empty string)' });
+  if (!clientId) return res.status(400).json({ jobId, step: 'validate', error: 'clientId is required' });
+  if (!sourceUrl) return res.status(400).json({ jobId, step: 'validate', error: 'sourceUrl is required' });
+  if (!/^https?:\/\//i.test(sourceUrl)) {
+    return res.status(400).json({ jobId, step: 'validate', error: 'sourceUrl must be an http(s) URL' });
+  }
+
+  const tmpDir = `/tmp/cs-${jobId}-${randomUUID().slice(0, 8)}`;
+  const localPath = join(tmpDir, 'source.mp4');
+  const stagingPath = `clean-from-source/${clientId}/${new Date().toISOString().split('T')[0]}/${jobId}_source.mp4`;
+  const defaultOutput = {
+    bucket: STAGING_BUCKET,
+    pathPrefix: `clean-from-source/${clientId}/${new Date().toISOString().split('T')[0]}/${jobId}_`,
+  };
+  const output = body.output && typeof body.output.bucket === 'string' && typeof body.output.pathPrefix === 'string'
+    ? body.output
+    : defaultOutput;
+
+  try {
+    mkdirSync(tmpDir, { recursive: true });
+
+    // ── 1. Download with size guard ─────────────────────────────────────
+    console.log(`[clean-source:${jobId}] downloading source: ${sourceUrl}`);
+    const downloadRes = await axios.get(sourceUrl, {
+      responseType: 'stream',
+      timeout: SOURCE_DOWNLOAD_TIMEOUT_MS,
+      maxRedirects: 5,
+      validateStatus: () => true,
+    });
+    if (downloadRes.status < 200 || downloadRes.status >= 300) {
+      throw new Error(`source download ${downloadRes.status} ${downloadRes.statusText || ''}`.trim());
+    }
+    const advertisedLength = Number(downloadRes.headers['content-length'] ?? 0);
+    if (advertisedLength > 0 && advertisedLength > MAX_SOURCE_BYTES) {
+      downloadRes.data.destroy();
+      throw new Error(
+        `source too large: Content-Length ${advertisedLength} bytes exceeds ${MAX_SOURCE_BYTES} byte cap`,
+      );
+    }
+    let bytesWritten = 0;
+    downloadRes.data.on('data', (chunk) => {
+      bytesWritten += chunk.length;
+      if (bytesWritten > MAX_SOURCE_BYTES) {
+        downloadRes.data.destroy(
+          new Error(`source exceeded ${MAX_SOURCE_BYTES} byte cap mid-stream`),
+        );
+      }
+    });
+    await streamPipeline(downloadRes.data, createWriteStream(localPath));
+    const sourceSize = statSync(localPath).size;
+    console.log(`[clean-source:${jobId}] source fetched=true bytes=${sourceSize}`);
+
+    // ── 2. Stage into Supabase Storage ──────────────────────────────────
+    await uploadToStorage({
+      bucket: STAGING_BUCKET,
+      path: stagingPath,
+      filePath: localPath,
+      contentType: 'video/mp4',
+    });
+    console.log(`[clean-source:${jobId}] staged to ${STAGING_BUCKET}/${stagingPath}`);
+
+    // ── 3. Hand off to the clean-mode orchestrator ──────────────────────
+    const callerOptions = body.options && typeof body.options === 'object' ? body.options : {};
+    const mergedOptions = {
+      aiEditMode: 'subtitles_hook_only',
+      skipBroll: true,
+      introHookEnabled: true,
+      ...callerOptions,
+    };
+    const skipSubtitles = mergedOptions.skipSubtitles === true;
+    console.log(
+      `[clean-source:${jobId}] aiEditMode=${mergedOptions.aiEditMode} skipBroll=${mergedOptions.skipBroll} ` +
+      `introHookEnabled=${mergedOptions.introHookEnabled} skipSubtitles=${skipSubtitles}`,
+    );
+
+    const result = await runCleanModePipeline({
+      jobId,
+      sourceMP4: { bucket: STAGING_BUCKET, path: stagingPath },
+      clientId,
+      output,
+      options: mergedOptions,
+    });
+
+    if (result?.error) {
+      const errStep = result.error.step ?? 'unknown';
+      const errMsg = result.error.message ?? '(no message)';
+      console.error(`[clean-source:${jobId}] render failed at step=${errStep}: ${errMsg}`);
+      return res.status(pickStatusFromMessage(errMsg)).json(result);
+    }
+
+    const applied = result?.cuts?.byCategory?.applied ?? {};
+    const silenceCuts =
+      (applied.deadAir ?? 0) + (applied.leadingSilence ?? 0) + (applied.trailingSilence ?? 0);
+    const badTakeCuts = applied.badTake ?? 0;
+    console.log(
+      `[clean-source:${jobId}] cleanup applied: silenceCuts=${silenceCuts} badTakeCuts=${badTakeCuts}`,
+    );
+    console.log(`[clean-source:${jobId}] render complete: url=${result.finalUrl}`);
+    return res.json(result);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[clean-source:${jobId}] failed: ${msg}`);
+    return res.status(500).json({
+      jobId,
+      step: 'clean-reel-from-source',
+      error: msg,
+    });
+  } finally {
+    try {
+      rmSync(tmpDir, { recursive: true, force: true });
+    } catch {
+      // best-effort cleanup
+    }
   }
 });
 

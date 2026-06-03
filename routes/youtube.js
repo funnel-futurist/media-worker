@@ -7,6 +7,7 @@ import { randomUUID } from 'crypto';
 import { chromium } from 'playwright';
 import { Innertube } from 'youtubei.js';
 import { getCachedCookies } from './youtube-auth.js';
+import { runCleanModePipeline } from '../lib/clean_mode_pipeline.js';
 
 const execAsync = promisify(exec);
 
@@ -900,55 +901,156 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
 
           // ── Route by content type ──────────────────────────────────────
           // Long form: skip the render pipeline entirely — deliver the raw clip
-          //   straight to Drive (status='rendered' lets upload_captioned pick
-          //   it up immediately, bypassing compose_pending → Hyperframes).
-          // Short form: status='classified' so compose_pending picks it up and
-          //   authors a Hyperframes blueprint. The blueprint composer reads
-          //   has_burned_subtitles + motion_graphics_plan from gemini_markup
-          //   and biases scene placement accordingly (omitCaptionsTrack +
-          //   subtitleSafeZone when the source already has burned-in captions).
-          const ingestionStatus = isLongForm ? 'rendered' : 'classified';
-          const assetType = isLongForm ? 'youtube_longform' : 'reel_raw';
-
-          // Phase 2 enrichment from the in-repo clip planner (lib/youtube_clipper.ts).
-          // Long-form clips bypass Hyperframes entirely — force motion_graphics_plan=[]
-          // for them regardless of what the planner sent, so compose layer never
-          // sees a hint for a clip it shouldn't be authoring.
+          //   straight to Drive (status='rendered'). Unchanged.
+          // Short form: route directly into the clean talking-head reel
+          //   pipeline (runCleanModePipeline) with aiEditMode='subtitles_hook_only'.
+          //   Produces hook title + subtitles + dead-air + bad-take cleanup
+          //   only — NO b-roll, NO motion graphics. Bypasses compose_pending
+          //   and Hyperframes entirely. motion_graphics_plan stays populated
+          //   in gemini_markup for a future Full AI Edit opt-in mode but is
+          //   ignored on this code path.
           const planScore = typeof clip.score === 'number' ? clip.score : null;
           const planMotionGraphics = isLongForm
             ? []
             : Array.isArray(clip.motionGraphicsPlan) ? clip.motionGraphicsPlan : [];
 
-          await supabaseInsert('ad_ingestion', {
-            client_id: clientId,
-            uploaded_by: clientId,
-            upload_source: 'youtube_clip',
-            asset_type: assetType,
-            format: 'video',
-            file_url: clipUrl,
-            original_filename: filename,
-            status: ingestionStatus,
-            gemini_markup: {
-              source: 'youtube',
-              youtube_content_type: youtubeContentType,
-              has_burned_subtitles: clipHasBurnedSubs,
-              hook_text: clip.hookText ?? null,
-              clip_plan_id: clipPlanId,
-              youtube_url: youtubeUrl,
-              video_title: videoTitle,
-              clip_title: clip.title,
-              suggested_caption: clip.suggestedCaption ?? null,
-              score: planScore,
-              motion_graphics_plan: planMotionGraphics,
-              broll_cues: [],
-              emotion_tags: [],
-            },
-          });
+          const sharedGeminiMarkup = {
+            source: 'youtube',
+            youtube_content_type: youtubeContentType,
+            has_burned_subtitles: clipHasBurnedSubs,
+            hook_text: clip.hookText ?? null,
+            clip_plan_id: clipPlanId,
+            youtube_url: youtubeUrl,
+            video_title: videoTitle,
+            clip_title: clip.title,
+            suggested_caption: clip.suggestedCaption ?? null,
+            score: planScore,
+            motion_graphics_plan: planMotionGraphics,
+            broll_cues: [],
+            emotion_tags: [],
+          };
 
-          extractedClips.push({ title: clip.title, url: clipUrl });
+          if (isLongForm) {
+            console.log(
+              `[youtube-clipper:${clipPlanId}] clip${i} long_form fetched=true durationSec=${durationSec.toFixed(1)} ` +
+              `start=${clip.startTimestamp} end=${clip.endTimestamp}`,
+            );
+            await supabaseInsert('ad_ingestion', {
+              client_id: clientId,
+              uploaded_by: clientId,
+              upload_source: 'youtube_clip',
+              asset_type: 'youtube_longform',
+              format: 'video',
+              file_url: clipUrl,
+              original_filename: filename,
+              status: 'rendered',
+              gemini_markup: sharedGeminiMarkup,
+            });
+            console.log(
+              `[youtube-clipper:${clipPlanId}] clip${i} long_form render complete: url=${clipUrl}`,
+            );
+            extractedClips.push({ title: clip.title, url: clipUrl });
+          } else {
+            // Short-form → clean reel pipeline directly.
+            const renderJobId = `yt-${clipPlanId.slice(0, 8)}-${i}-${randomUUID().slice(0, 8)}`;
+            const skipSubtitles = clipHasBurnedSubs === true;
+            const date2 = new Date().toISOString().split('T')[0];
+            const outputPathPrefix = `youtube-reels/${clientId}/${date2}/${renderJobId}_`;
+
+            console.log(
+              `[youtube-clipper:${renderJobId}] clip${i} short_form fetched=true durationSec=${durationSec.toFixed(1)} ` +
+              `start=${clip.startTimestamp} end=${clip.endTimestamp}`,
+            );
+            console.log(
+              `[youtube-clipper:${renderJobId}] hook="${clip.hookText ?? ''}" ` +
+              `burnedSubsDetected=${clipHasBurnedSubs} skipSubtitles=${skipSubtitles}`,
+            );
+
+            let renderResult;
+            try {
+              renderResult = await runCleanModePipeline({
+                jobId: renderJobId,
+                sourceMP4: { bucket: 'video-modules', path: storagePath },
+                clientId,
+                output: { bucket: 'video-modules', pathPrefix: outputPathPrefix },
+                options: {
+                  aiEditMode: 'subtitles_hook_only',
+                  skipBroll: true,
+                  introHookEnabled: true,
+                  skipSubtitles,
+                },
+              });
+            } catch (renderErr) {
+              const msg = renderErr instanceof Error ? renderErr.message : String(renderErr);
+              console.error(
+                `[youtube-clipper:${renderJobId}] render threw: ${msg}`,
+              );
+              await supabaseInsert('ad_ingestion', {
+                client_id: clientId,
+                uploaded_by: clientId,
+                upload_source: 'youtube_clip',
+                asset_type: 'reel_raw',
+                format: 'video',
+                file_url: clipUrl,
+                original_filename: filename,
+                status: 'failed',
+                last_error: msg,
+                gemini_markup: sharedGeminiMarkup,
+              });
+              if (existsSync(clipPath)) unlinkSync(clipPath);
+              continue;
+            }
+
+            if (renderResult?.error) {
+              const errStep = renderResult.error.step ?? 'unknown';
+              const errMsg = renderResult.error.message ?? '(no message)';
+              console.error(
+                `[youtube-clipper:${renderJobId}] render failed at step=${errStep}: ${errMsg}`,
+              );
+              await supabaseInsert('ad_ingestion', {
+                client_id: clientId,
+                uploaded_by: clientId,
+                upload_source: 'youtube_clip',
+                asset_type: 'reel_raw',
+                format: 'video',
+                file_url: clipUrl,
+                original_filename: filename,
+                status: 'failed',
+                last_error: `${errStep}: ${errMsg}`,
+                gemini_markup: sharedGeminiMarkup,
+              });
+              if (existsSync(clipPath)) unlinkSync(clipPath);
+              continue;
+            }
+
+            const applied = renderResult?.cuts?.byCategory?.applied ?? {};
+            const silenceCuts =
+              (applied.deadAir ?? 0) + (applied.leadingSilence ?? 0) + (applied.trailingSilence ?? 0);
+            const badTakeCuts = applied.badTake ?? 0;
+            console.log(
+              `[youtube-clipper:${renderJobId}] cleanup applied: silenceCuts=${silenceCuts} badTakeCuts=${badTakeCuts}`,
+            );
+            console.log(
+              `[youtube-clipper:${renderJobId}] render complete: url=${renderResult.finalUrl}`,
+            );
+
+            await supabaseInsert('ad_ingestion', {
+              client_id: clientId,
+              uploaded_by: clientId,
+              upload_source: 'youtube_clip',
+              asset_type: 'reel_raw',
+              format: 'video',
+              file_url: renderResult.finalUrl,
+              original_filename: filename,
+              status: 'rendered',
+              gemini_markup: sharedGeminiMarkup,
+            });
+
+            extractedClips.push({ title: clip.title, url: renderResult.finalUrl });
+          }
         } catch (clipErr) {
-          console.error(`[youtube] clip ${i} failed:`, clipErr.message);
-          // Persist error to pipeline events so we can diagnose without Railway logs
+          console.error(`[youtube-clipper:${clipPlanId}] clip${i} failed: ${clipErr.message}`);
+          // Persist error to pipeline events for diagnostics (existing behavior).
           await supabaseInsert('content_pipeline_events', {
             client_id: clientId,
             event_type: 'error',
@@ -962,6 +1064,40 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
               end: clip.endTimestamp,
             },
           }).catch(() => {});
+
+          // Also persist a visible ad_ingestion row so the failure surfaces in
+          // the normal operator workflow (status filters, dashboards), not
+          // just in content_pipeline_events. file_url is null because no clip
+          // was successfully fetched + uploaded.
+          await supabaseInsert('ad_ingestion', {
+            client_id: clientId,
+            uploaded_by: clientId,
+            upload_source: 'youtube_clip',
+            asset_type: 'reel_raw',
+            format: 'video',
+            file_url: null,
+            original_filename: `${(clip.title ?? `clip_${i}`).slice(0, 100)}.mp4`,
+            status: 'failed',
+            last_error: clipErr.message,
+            gemini_markup: {
+              source: 'youtube',
+              clip_plan_id: clipPlanId,
+              clip_index: i,
+              youtube_url: youtubeUrl,
+              video_title: videoTitle,
+              clip_title: clip.title ?? null,
+              clip_start: clip.startTimestamp,
+              clip_end: clip.endTimestamp,
+              hook_text: clip.hookText ?? null,
+              failure_stage: 'fetch_or_upload',
+            },
+          }).catch((rowErr) => {
+            // Defensive: if the failure-row insert itself fails, don't mask
+            // the original error — log loudly and rely on the events row.
+            console.error(
+              `[youtube-clipper:${clipPlanId}] clip${i} failure-row insert FAILED: ${rowErr?.message ?? rowErr}`,
+            );
+          });
         }
 
         // Cleanup clip temp file

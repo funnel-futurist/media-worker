@@ -840,19 +840,40 @@ async function downloadTranscript(youtubeUrl, tmpDir) {
  * }
  */
 youtubeRouter.post('/youtube-extract-async', async (req, res) => {
-  const { clipPlanId, youtubeUrl, videoTitle, clientId, clips } = req.body;
+  const { clipPlanId, youtubeUrl, videoTitle, clientId, clips, youtubeEditMode: rawMode } = req.body;
   if (!clipPlanId || !youtubeUrl || !clientId || !Array.isArray(clips)) {
     return res.status(400).json({ error: 'clipPlanId, youtubeUrl, clientId, clips required' });
   }
 
-  res.json({ accepted: true, clipPlanId, clipCount: clips.length });
+  // Two product modes under one YouTube Clipper feature:
+  //   'clean_talking_head' (default) → render directly via runCleanModePipeline
+  //                                    (hook + subtitles + dead-air/bad-take cleanup,
+  //                                    NO b-roll, NO Hyperframes motion graphics)
+  //   'full_ai_edit'                 → write status='classified' so the existing
+  //                                    compose_pending → Hyperframes blueprint flow
+  //                                    picks the row up (motion graphics, scene
+  //                                    patterns, etc.). Opt-in only — must be
+  //                                    explicitly requested by the caller.
+  // Unknown values are coerced to the default. Long-form (>3min) ignores this
+  // setting entirely.
+  if (rawMode != null && rawMode !== 'clean_talking_head' && rawMode !== 'full_ai_edit') {
+    return res.status(400).json({
+      error: `youtubeEditMode must be 'clean_talking_head' or 'full_ai_edit' (got ${JSON.stringify(rawMode)})`,
+    });
+  }
+  const youtubeEditMode = rawMode === 'full_ai_edit' ? 'full_ai_edit' : 'clean_talking_head';
+
+  res.json({ accepted: true, clipPlanId, clipCount: clips.length, youtubeEditMode });
 
   setImmediate(async () => {
     const tmpDir = `/tmp/yt-${randomUUID()}`;
     await execAsync(`mkdir -p "${tmpDir}"`);
 
     try {
-      console.log(`[youtube] starting extraction for plan ${clipPlanId} (${clips.length} clips)`);
+      console.log(
+        `[youtube] starting extraction for plan ${clipPlanId} ` +
+        `(${clips.length} clips, youtubeEditMode=${youtubeEditMode})`,
+      );
 
       const extractedClips = [];
 
@@ -899,16 +920,18 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
           const safeTitle = clip.title?.slice(0, 100) ?? `Clip ${i + 1}`;
           const filename = `${safeTitle}.mp4`;
 
-          // ── Route by content type ──────────────────────────────────────
-          // Long form: skip the render pipeline entirely — deliver the raw clip
-          //   straight to Drive (status='rendered'). Unchanged.
-          // Short form: route directly into the clean talking-head reel
-          //   pipeline (runCleanModePipeline) with aiEditMode='subtitles_hook_only'.
-          //   Produces hook title + subtitles + dead-air + bad-take cleanup
-          //   only — NO b-roll, NO motion graphics. Bypasses compose_pending
-          //   and Hyperframes entirely. motion_graphics_plan stays populated
-          //   in gemini_markup for a future Full AI Edit opt-in mode but is
-          //   ignored on this code path.
+          // ── Route by content type + editMode ───────────────────────────
+          // Long form: skip the render pipeline entirely — deliver the raw
+          //   clip straight to Drive (status='rendered'). Unchanged; ignores
+          //   youtubeEditMode.
+          // Short form:
+          //   - clean_talking_head (default) → route into runCleanModePipeline
+          //     with aiEditMode='subtitles_hook_only'. Produces hook title +
+          //     subtitles + dead-air + bad-take cleanup. NO b-roll, NO
+          //     Hyperframes motion graphics.
+          //   - full_ai_edit → write status='classified' so the existing
+          //     compose_pending → Hyperframes blueprint flow picks the row up
+          //     and authors motion graphics from motion_graphics_plan.
           const planScore = typeof clip.score === 'number' ? clip.score : null;
           const planMotionGraphics = isLongForm
             ? []
@@ -916,6 +939,10 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
 
           const sharedGeminiMarkup = {
             source: 'youtube',
+            // Persist the routing decision so compose_pending's defensive
+            // guard can tell a legitimate full_ai_edit row from a stuck/legacy
+            // clean_talking_head row that should never be in 'classified'.
+            youtube_edit_mode: youtubeEditMode,
             youtube_content_type: youtubeContentType,
             has_burned_subtitles: clipHasBurnedSubs,
             hook_text: clip.hookText ?? null,
@@ -950,8 +977,32 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
               `[youtube-clipper:${clipPlanId}] clip${i} long_form render complete: url=${clipUrl}`,
             );
             extractedClips.push({ title: clip.title, url: clipUrl });
+          } else if (youtubeEditMode === 'full_ai_edit') {
+            // Short-form, Full AI Edit (opt-in) → write status='classified'
+            // so the existing compose_pending → Hyperframes blueprint flow
+            // takes over. motion_graphics_plan in sharedGeminiMarkup carries
+            // the scene-pattern hints through to the blueprint composer.
+            console.log(
+              `[youtube-clipper:${clipPlanId}] clip${i} short_form full_ai_edit fetched=true ` +
+              `durationSec=${durationSec.toFixed(1)} start=${clip.startTimestamp} end=${clip.endTimestamp}`,
+            );
+            await supabaseInsert('ad_ingestion', {
+              client_id: clientId,
+              uploaded_by: clientId,
+              upload_source: 'youtube_clip',
+              asset_type: 'reel_raw',
+              format: 'video',
+              file_url: clipUrl,
+              original_filename: filename,
+              status: 'classified',
+              gemini_markup: sharedGeminiMarkup,
+            });
+            console.log(
+              `[youtube-clipper:${clipPlanId}] clip${i} routed to compose_pending (Hyperframes)`,
+            );
+            extractedClips.push({ title: clip.title, url: clipUrl });
           } else {
-            // Short-form → clean reel pipeline directly.
+            // Short-form, Clean Talking Head (default) → clean reel pipeline.
             const renderJobId = `yt-${clipPlanId.slice(0, 8)}-${i}-${randomUUID().slice(0, 8)}`;
             const skipSubtitles = clipHasBurnedSubs === true;
             const date2 = new Date().toISOString().split('T')[0];
@@ -1081,6 +1132,7 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
             last_error: clipErr.message,
             gemini_markup: {
               source: 'youtube',
+              youtube_edit_mode: youtubeEditMode,
               clip_plan_id: clipPlanId,
               clip_index: i,
               youtube_url: youtubeUrl,

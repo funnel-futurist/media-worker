@@ -9,6 +9,72 @@ import { Innertube } from 'youtubei.js';
 import { getCachedCookies } from './youtube-auth.js';
 import { runCleanModePipeline } from '../lib/clean_mode_pipeline.js';
 
+/**
+ * Extract a richer diagnostic from a thrown error than just .message.
+ *
+ * Node 18+ `fetch()` (used by youtubei.js / Innertube under the hood)
+ * throws a generic `TypeError: fetch failed` with the real reason buried
+ * in `err.cause` — sometimes nested several levels deep. Capturing only
+ * `.message` collapses everything to literally "fetch failed" with zero
+ * actionable info, which is what was happening on the YouTube clipper's
+ * failure path before this change.
+ *
+ * Returns a JSON-safe object capped at sane sizes for Supabase storage.
+ *
+ *   {
+ *     message: string,        // err.message (capped)
+ *     name: string,           // err.name (e.g. "TypeError")
+ *     code: string|undefined, // err.code (e.g. "ENOTFOUND")
+ *     causes: Array<{         // err.cause chain, capped at 5 levels
+ *       message, name, code
+ *     }>,
+ *     stackHead: string,      // first ~1500 chars of err.stack
+ *     formatted: string,      // human-readable single-line summary
+ *   }
+ */
+function describeError(err) {
+  const MAX_MSG = 500;
+  const MAX_STACK = 1500;
+  const MAX_CAUSE_DEPTH = 5;
+  const cap = (s) => (typeof s === 'string' ? s.slice(0, MAX_MSG) : s);
+
+  if (!err || typeof err !== 'object') {
+    const msg = err == null ? 'unknown error' : String(err);
+    return { message: cap(msg), name: 'NonError', code: undefined, causes: [], stackHead: '', formatted: cap(msg) };
+  }
+
+  const causes = [];
+  let cur = err.cause;
+  let depth = 0;
+  while (cur && depth < MAX_CAUSE_DEPTH) {
+    causes.push({
+      message: cap(cur?.message ?? String(cur)),
+      name: cur?.name,
+      code: cur?.code,
+    });
+    cur = cur?.cause;
+    depth++;
+  }
+
+  // One-line summary for log lines + last_error column. Includes top-level
+  // error + first cause's code/message — usually the actionable bit.
+  const head = `${err.name ?? 'Error'}: ${cap(err.message ?? String(err))}`;
+  const firstCause = causes[0];
+  const causeTail = firstCause
+    ? ` <= ${firstCause.code ? `[${firstCause.code}] ` : ''}${firstCause.message}`
+    : '';
+  const formatted = cap(head + causeTail);
+
+  return {
+    message: cap(err.message ?? String(err)),
+    name: err.name,
+    code: err.code,
+    causes,
+    stackHead: typeof err.stack === 'string' ? err.stack.slice(0, MAX_STACK) : '',
+    formatted,
+  };
+}
+
 const execAsync = promisify(exec);
 
 export const youtubeRouter = Router();
@@ -1100,8 +1166,28 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
             extractedClips.push({ title: clip.title, url: renderResult.finalUrl });
           }
         } catch (clipErr) {
-          console.error(`[youtube-clipper:${clipPlanId}] clip${i} failed: ${clipErr.message}`);
-          // Persist error to pipeline events for diagnostics (existing behavior).
+          // Rich diagnostic — captures err.cause chain, code, stack head.
+          // Before this change, the catch was collapsing every failure mode
+          // to literally `clipErr.message` which is "fetch failed" for any
+          // Node fetch() error (Innertube, yt-dlp, anything else). Operators
+          // had no way to tell DNS failure from connection refused from
+          // TLS handshake without ssh'ing to Railway.
+          const errInfo = describeError(clipErr);
+          console.error(
+            `[youtube-clipper:${clipPlanId}] clip${i} failed: ${errInfo.formatted}`,
+          );
+          if (errInfo.causes.length > 0) {
+            console.error(
+              `[youtube-clipper:${clipPlanId}] clip${i} cause chain:`,
+              JSON.stringify(errInfo.causes),
+            );
+          }
+          if (errInfo.stackHead) {
+            console.error(
+              `[youtube-clipper:${clipPlanId}] clip${i} stack head:\n${errInfo.stackHead}`,
+            );
+          }
+          // Persist enriched error to pipeline events for diagnostics.
           await supabaseInsert('content_pipeline_events', {
             client_id: clientId,
             event_type: 'error',
@@ -1110,7 +1196,17 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
               clip_plan_id: clipPlanId,
               clip_index: i,
               clip_title: clip.title,
-              error: clipErr.message,
+              // Keep legacy `error` key for any existing dashboards/filters
+              // that read it. Add `error_detail` with the full structured
+              // breakdown for new readers.
+              error: errInfo.formatted,
+              error_detail: {
+                message: errInfo.message,
+                name: errInfo.name,
+                code: errInfo.code,
+                causes: errInfo.causes,
+                stack_head: errInfo.stackHead,
+              },
               start: clip.startTimestamp,
               end: clip.endTimestamp,
             },
@@ -1129,7 +1225,10 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
             file_url: null,
             original_filename: `${(clip.title ?? `clip_${i}`).slice(0, 100)}.mp4`,
             status: 'failed',
-            last_error: clipErr.message,
+            // last_error gets the formatted one-line summary so operators see
+            // the real reason in the row view; full structured breakdown is
+            // in content_pipeline_events.metadata.error_detail.
+            last_error: errInfo.formatted,
             gemini_markup: {
               source: 'youtube',
               youtube_edit_mode: youtubeEditMode,
@@ -1142,6 +1241,9 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
               clip_end: clip.endTimestamp,
               hook_text: clip.hookText ?? null,
               failure_stage: 'fetch_or_upload',
+              error_name: errInfo.name,
+              error_code: errInfo.code,
+              error_causes: errInfo.causes,
             },
           }).catch((rowErr) => {
             // Defensive: if the failure-row insert itself fails, don't mask

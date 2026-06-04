@@ -32,6 +32,31 @@ import { runCleanModePipeline } from '../lib/clean_mode_pipeline.js';
  *     formatted: string,      // human-readable single-line summary
  *   }
  */
+/**
+ * Extract the YouTube video ID from any common URL shape so we can build a
+ * stable sentinel `file_url` for failure rows.
+ *
+ * Why a sentinel: ad_ingestion.file_url is NOT NULL at the DB level, so
+ * `file_url: null` on a fetch-failure row violates the constraint and the
+ * insert silently fails (the .catch swallows the violation to console.error
+ * on Railway stdout — invisible to operators). Using a recognizable
+ * `failed://youtube/<video_id>/clip_<i>` sentinel both satisfies the
+ * constraint and gives operators a self-describing marker they can grep
+ * for in dashboards.
+ *
+ * Returns 'unknown' if no recognizable pattern matches.
+ */
+function extractYoutubeVideoId(url) {
+  if (typeof url !== 'string' || url.length === 0) return 'unknown';
+  // ?v=... or &v=... (standard watch URLs)
+  const vParam = url.match(/[?&]v=([A-Za-z0-9_-]{6,})/);
+  if (vParam) return vParam[1];
+  // youtu.be/<id>, /shorts/<id>, /embed/<id>, /live/<id>
+  const pathSeg = url.match(/(?:youtu\.be|youtube\.com\/(?:shorts|embed|live|v))\/([A-Za-z0-9_-]{6,})/);
+  if (pathSeg) return pathSeg[1];
+  return 'unknown';
+}
+
 function describeError(err) {
   const MAX_MSG = 500;
   const MAX_STACK = 1500;
@@ -1214,15 +1239,25 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
 
           // Also persist a visible ad_ingestion row so the failure surfaces in
           // the normal operator workflow (status filters, dashboards), not
-          // just in content_pipeline_events. file_url is null because no clip
-          // was successfully fetched + uploaded.
+          // just in content_pipeline_events.
+          //
+          // file_url uses a sentinel `failed://youtube/<video_id>/clip_<i>`
+          // because the column is NOT NULL at the DB level. Prior code passed
+          // `null` and the insert silently failed (Supabase 23502 constraint
+          // violation, swallowed by the .catch into Railway stdout that
+          // operators can't see — so the operator-visibility promise of this
+          // row was never actually delivered until this fix). The sentinel
+          // both satisfies the constraint AND gives operators a recognizable
+          // grep-able marker. Real reason still lives in `last_error` and
+          // `gemini_markup.failure_stage`.
+          const failureFileUrl = `failed://youtube/${extractYoutubeVideoId(youtubeUrl)}/clip_${i}`;
           await supabaseInsert('ad_ingestion', {
             client_id: clientId,
             uploaded_by: clientId,
             upload_source: 'youtube_clip',
             asset_type: 'reel_raw',
             format: 'video',
-            file_url: null,
+            file_url: failureFileUrl,
             original_filename: `${(clip.title ?? `clip_${i}`).slice(0, 100)}.mp4`,
             status: 'failed',
             // last_error gets the formatted one-line summary so operators see

@@ -61,11 +61,12 @@ function describeError(err) {
   const MAX_MSG = 500;
   const MAX_STACK = 1500;
   const MAX_CAUSE_DEPTH = 5;
+  const MAX_ATTEMPTS = 20;
   const cap = (s) => (typeof s === 'string' ? s.slice(0, MAX_MSG) : s);
 
   if (!err || typeof err !== 'object') {
     const msg = err == null ? 'unknown error' : String(err);
-    return { message: cap(msg), name: 'NonError', code: undefined, causes: [], stackHead: '', formatted: cap(msg) };
+    return { message: cap(msg), name: 'NonError', code: undefined, causes: [], attempts: [], stackHead: '', formatted: cap(msg) };
   }
 
   const causes = [];
@@ -81,6 +82,25 @@ function describeError(err) {
     depth++;
   }
 
+  // err.attempts is a downloadClip convention: each Innertube client / yt-dlp
+  // strategy that failed appends { strategy, name, code, message, causes,
+  // ...} so the final thrown error carries the full attempt chain instead of
+  // collapsing to "All yt-dlp attempts failed". See downloadClip().
+  const rawAttempts = Array.isArray(err.attempts) ? err.attempts.slice(0, MAX_ATTEMPTS) : [];
+  const attempts = rawAttempts.map((a) => ({
+    strategy: typeof a?.strategy === 'string' ? cap(a.strategy) : undefined,
+    name: a?.name,
+    code: a?.code,
+    message: cap(a?.message ?? ''),
+    causes: Array.isArray(a?.causes)
+      ? a.causes.slice(0, MAX_CAUSE_DEPTH).map((c) => ({
+          message: cap(c?.message ?? ''),
+          name: c?.name,
+          code: c?.code,
+        }))
+      : [],
+  }));
+
   // One-line summary for log lines + last_error column. Includes top-level
   // error + first cause's code/message — usually the actionable bit.
   const head = `${err.name ?? 'Error'}: ${cap(err.message ?? String(err))}`;
@@ -88,13 +108,26 @@ function describeError(err) {
   const causeTail = firstCause
     ? ` <= ${firstCause.code ? `[${firstCause.code}] ` : ''}${firstCause.message}`
     : '';
-  const formatted = cap(head + causeTail);
+  // When attempt chain is present, append a compact summary so operators
+  // see at a glance which strategies were tried. Full per-attempt detail
+  // lives in the structured `attempts` field.
+  const attemptsTail = attempts.length > 0
+    ? ` | attempts(${attempts.length}): ` + attempts
+        .map((a) => {
+          const head = a.strategy ? `${a.strategy}=` : '';
+          const codeTag = a.code ? `[${a.code}]` : '';
+          return cap(`${head}${codeTag}${a.message.slice(0, 80)}`);
+        })
+        .join(' ; ')
+    : '';
+  const formatted = cap(head + causeTail + attemptsTail);
 
   return {
     message: cap(err.message ?? String(err)),
     name: err.name,
     code: err.code,
     causes,
+    attempts,
     stackHead: typeof err.stack === 'string' ? err.stack.slice(0, MAX_STACK) : '',
     formatted,
   };
@@ -608,6 +641,58 @@ function extractVideoId(url) {
  * Uses YouTube's internal mobile app API — bypasses bot detection without cookies.
  * Falls back to yt-dlp if Innertube fails.
  */
+/**
+ * Build a per-attempt record from a thrown error. Used to populate the
+ * `attempts[]` chain on the final downloadClip throw. Mirrors the
+ * describeError shape so operators see consistent fields whether they're
+ * looking at the outer error or one of its attempts.
+ */
+function recordAttempt(strategy, err) {
+  const desc = describeError(err);
+  return {
+    strategy,
+    name: desc.name,
+    code: desc.code,
+    message: desc.message,
+    causes: desc.causes,
+  };
+}
+
+/**
+ * Optional fetch wrapper for the Innertube session. Logs each request URL +
+ * method so we can pinpoint WHICH Innertube call fails when undici rejects
+ * a response. Enabled only when env var YOUTUBE_INNERTUBE_FETCH_INSTRUMENT
+ * is set to "true" (or "1") — defaults off so production traffic isn't
+ * spammed.
+ *
+ * youtubei.js v17 accepts a custom fetch via `Innertube.create({ fetch })`
+ * (see node_modules/youtubei.js/dist/src/core/Session.d.ts:193). The shape
+ * is `typeof fetch`, so passing the global fetch wrapped in a logger is
+ * a no-op behavior-wise.
+ *
+ * NOTE: this is observability only. To actually swap the HTTP layer (e.g.
+ * replace undici with node-fetch), we'd need to add a new dependency and
+ * make the swap unconditional, which is OUT of scope for this PR.
+ */
+function makeInstrumentedInnertubeFetch(jobLabel) {
+  return async function instrumentedFetch(input, init) {
+    const url = typeof input === 'string' ? input : (input?.url ?? '<unknown>');
+    const method = init?.method ?? (typeof input === 'object' && input?.method) ?? 'GET';
+    let host = '<no-host>';
+    try { host = new URL(url).host; } catch {}
+    console.log(`[innertube-fetch:${jobLabel}] ${method} ${host}${url.includes('?') ? ' (with query)' : ''}`);
+    try {
+      const res = await fetch(input, init);
+      console.log(`[innertube-fetch:${jobLabel}] ${method} ${host} -> ${res.status}`);
+      return res;
+    } catch (err) {
+      const desc = describeError(err);
+      console.error(`[innertube-fetch:${jobLabel}] ${method} ${host} THREW: ${desc.formatted}`);
+      throw err;
+    }
+  };
+}
+
 async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
   const startSec = tsToSeconds(startTs);
   const endSec = tsToSeconds(endTs);
@@ -616,6 +701,24 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
   if (duration <= 0) throw new Error(`Invalid time range: ${startTs} → ${endTs}`);
 
   console.log(`[youtube] downloading clip ${startTs}→${endTs} (${duration}s)`);
+
+  // Accumulate per-attempt failure records here so the final throw carries
+  // the full chain (Innertube-per-client + yt-dlp-per-strategy). Operators
+  // see this in ad_ingestion.last_error and gemini_markup.error_attempts
+  // via the catch block in /youtube-extract-async.
+  const attempts = [];
+
+  // Custom fetch for Innertube — observability only, gated on env var so
+  // production noise stays opt-in. See makeInstrumentedInnertubeFetch.
+  const instrumentEnabled = ['1', 'true', 'yes'].includes(
+    (process.env.YOUTUBE_INNERTUBE_FETCH_INSTRUMENT ?? '').toLowerCase(),
+  );
+  const innertubeFetchOption = instrumentEnabled
+    ? { fetch: makeInstrumentedInnertubeFetch(extractVideoId(youtubeUrl) ?? 'unknown') }
+    : {};
+  if (instrumentEnabled) {
+    console.log('[youtube] Innertube fetch instrumentation ENABLED');
+  }
 
   // ── Attempt 1: Innertube (youtubei.js) ─────────────────────────────────
   // Uses YouTube's internal mobile client API — works from any IP without cookies.
@@ -636,12 +739,17 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
       cache: null,
       generate_session_locally: true,
       ...(cookieHeader && { cookie: cookieHeader }),
+      ...innertubeFetchOption,
     });
 
     // Anonymous session — used for WEB client to avoid SABR (which is account-level).
     // Shannon's Google account is SABR-enrolled: authenticated WEB returns status=OK but 0 URLs.
     // An anonymous WEB session bypasses SABR and returns direct stream URLs.
-    const ytAnon = await Innertube.create({ cache: null, generate_session_locally: true });
+    const ytAnon = await Innertube.create({
+      cache: null,
+      generate_session_locally: true,
+      ...innertubeFetchOption,
+    });
 
     // Try clients in priority order.
     // ANDROID/IOS (anon): mobile clients don't support cookie auth — passing cookies causes 400.
@@ -672,8 +780,18 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
           successClient = client;
           break;
         }
+        // No URLs but no throw — record as a soft failure so the final
+        // chain shows we tried this client.
+        attempts.push({
+          strategy: `innertube:${client}`,
+          name: 'NoUsableFormats',
+          code: undefined,
+          message: `playability_status=${status ?? 'unknown'}, 0 usable adaptive formats`,
+          causes: [],
+        });
       } catch (clientErr) {
         console.error(`[youtube] Innertube ${client} error: ${clientErr.message}`);
+        attempts.push(recordAttempt(`innertube:${client}`, clientErr));
       }
     }
 
@@ -744,6 +862,10 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
     }
   } catch (innertubeErr) {
     console.error(`[youtube] Innertube failed: ${innertubeErr.message}`);
+    // Record the outer Innertube failure (typically just the "no usable
+    // formats" throw above, but could also be a session creation crash).
+    // Per-client failures are already in `attempts` from the loop.
+    attempts.push(recordAttempt('innertube:outer', innertubeErr));
     // Continue to yt-dlp fallback
   }
 
@@ -762,29 +884,71 @@ async function downloadClip(youtubeUrl, startTs, endTs, outputPath) {
     `"${youtubeUrl}"`,
   ].join(' ');
 
-  const attempts = [
-    // ios,web first: iOS client bypasses SABR experiment (datacenter IP quality cap) per John's recommendation
-    `yt-dlp ${cookiesArg} --extractor-args "youtube:player_client=ios,web" ${baseArgs}`,
-    // ios alone with cookies: strong SABR bypass, simpler client stack
-    `yt-dlp ${cookiesArg} --extractor-args "youtube:player_client=ios" ${baseArgs}`,
-    // web + cookies + EJS from GitHub: generates Botguard PO token, solves n-challenge, handles SABR
-    `yt-dlp --js-runtimes node --remote-components ejs:github ${cookiesArg} --extractor-args "youtube:player_client=web" ${baseArgs}`,
-    // web anonymous + EJS: no SABR enrollment; Railway IP may be flagged but worth trying
-    `yt-dlp --js-runtimes node --remote-components ejs:github --extractor-args "youtube:player_client=web" ${baseArgs}`,
-    // android/ios without cookies: last resort
-    `yt-dlp --extractor-args "youtube:player_client=android" ${baseArgs}`,
+  // Strategy name + command, so the attempt chain in the final error
+  // identifies WHICH yt-dlp invocation failed instead of just "yt-dlp".
+  const ytDlpStrategies = [
+    {
+      name: 'yt-dlp:ios,web+cookies',
+      cmd: `yt-dlp ${cookiesArg} --extractor-args "youtube:player_client=ios,web" ${baseArgs}`,
+    },
+    {
+      name: 'yt-dlp:ios+cookies',
+      cmd: `yt-dlp ${cookiesArg} --extractor-args "youtube:player_client=ios" ${baseArgs}`,
+    },
+    {
+      name: 'yt-dlp:web+cookies+ejs',
+      cmd: `yt-dlp --js-runtimes node --remote-components ejs:github ${cookiesArg} --extractor-args "youtube:player_client=web" ${baseArgs}`,
+    },
+    {
+      name: 'yt-dlp:web+anon+ejs',
+      cmd: `yt-dlp --js-runtimes node --remote-components ejs:github --extractor-args "youtube:player_client=web" ${baseArgs}`,
+    },
+    {
+      name: 'yt-dlp:android+anon',
+      cmd: `yt-dlp --extractor-args "youtube:player_client=android" ${baseArgs}`,
+    },
   ];
 
-  for (const cmd of attempts) {
+  for (const { name: strategy, cmd } of ytDlpStrategies) {
     try {
-      console.log(`[youtube] yt-dlp attempt: ${cmd.slice(0, 80)}...`);
+      console.log(`[youtube] yt-dlp attempt (${strategy}): ${cmd.slice(0, 80)}...`);
       await execAsync(cmd, { timeout: 300000 });
       if (existsSync(outputPath)) return;
+      // Command exited 0 but no file landed — rare but worth recording.
+      attempts.push({
+        strategy,
+        name: 'NoOutputFile',
+        code: undefined,
+        message: 'yt-dlp exited successfully but output file is missing',
+        causes: [],
+      });
     } catch (e) {
-      console.error(`[youtube] yt-dlp attempt failed: ${e.message.split('\n').slice(0, 3).join(' | ')}`);
+      const head = (e?.message ?? '').split('\n').slice(0, 3).join(' | ');
+      console.error(`[youtube] yt-dlp attempt failed (${strategy}): ${head}`);
+      // Attach the head of stdout/stderr to the recorded attempt so the
+      // operator can see WHICH yt-dlp line tripped it (e.g. "ERROR:
+      // [youtube] xyz: Sign in to confirm you're not a bot").
+      const attemptRecord = recordAttempt(strategy, e);
+      // execAsync surfaces stderr in e.stderr / e.stdout — fold a short tail
+      // of stderr in so we don't lose the actual yt-dlp diagnostic.
+      const stderrTail = typeof e?.stderr === 'string'
+        ? e.stderr.split('\n').filter(Boolean).slice(-5).join(' | ').slice(0, 500)
+        : '';
+      if (stderrTail) attemptRecord.message = `${attemptRecord.message} | stderr: ${stderrTail}`;
+      attempts.push(attemptRecord);
     }
   }
-  throw new Error('All yt-dlp attempts failed — see logs above for details');
+
+  // Build a single thrown Error carrying the full attempt chain.
+  // describeError() picks up `attempts` and surfaces it in formatted +
+  // structured form so ad_ingestion.last_error and
+  // gemini_markup.error_attempts both reflect the chain.
+  const finalErr = new Error(
+    'All download strategies failed (Innertube + yt-dlp). See attempts[] for per-strategy reasons.',
+  );
+  finalErr.name = 'AllDownloadStrategiesFailed';
+  finalErr.attempts = attempts;
+  throw finalErr;
 }
 
 /**
@@ -1230,6 +1394,7 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
                 name: errInfo.name,
                 code: errInfo.code,
                 causes: errInfo.causes,
+                attempts: errInfo.attempts,
                 stack_head: errInfo.stackHead,
               },
               start: clip.startTimestamp,
@@ -1279,6 +1444,7 @@ youtubeRouter.post('/youtube-extract-async', async (req, res) => {
               error_name: errInfo.name,
               error_code: errInfo.code,
               error_causes: errInfo.causes,
+              error_attempts: errInfo.attempts,
             },
           }).catch((rowErr) => {
             // Defensive: if the failure-row insert itself fails, don't mask

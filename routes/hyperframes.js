@@ -7,6 +7,7 @@ import { createWriteStream } from 'fs';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 import { rewriteScenesWithScript } from '../lib/scene_rewriter.js';
+import { setupBlueprintWorkspace, readBlueprintDimensions } from '../lib/blueprint_render.js';
 
 export const hyperframesRouter = Router();
 
@@ -121,55 +122,97 @@ function runCommand(cmd, args, cwd, label) {
 /**
  * POST /hyperframes-render-async
  *
- * Body:
- * {
- *   adIngestionId: string,
- *   clientId: string,
- *   clientSlug: string,
- *   videoUrl: string,
- *   musicUrl?: string | null,
- *   brollUrls: string[],
- *   script: string,
- *   brandTokens: { accent: string, warn: string }
- * }
+ * Two render paths, selected by whether `compositionProjectUrl` is present:
  *
- * Returns immediately with { accepted: true, adIngestionId }. Render runs
- * in background; on completion this endpoint directly updates the Supabase
- * ad_ingestion row to status='rendered' + file_url, and logs a
+ * 1. **Blueprint path** (used by long-form landscape AI edit and any other
+ *    caller that pre-materializes a per-video CompositionBlueprint into the
+ *    `hyperframes-projects` bucket). Body shape:
+ *      {
+ *        adIngestionId, clientId, clientSlug,
+ *        compositionProjectUrl: string,   // signed URL to the project's index.html
+ *        blueprintJson: object,           // full CompositionBlueprint (for dimensions + audit)
+ *        sourceUrl?: string,              // signed URL to the trimmed face source mp4
+ *      }
+ *    Workspace is built by downloading every file under the project's prefix
+ *    in `hyperframes-projects/<adIngestionId>/...` — that project's HTML and
+ *    `meta.json` already carry the correct viewport/dimensions for whichever
+ *    kit the blueprint uses (1920×1080 for landscape, 1080×1920 for portrait).
+ *    No template copy, no Gemini scene rewrite — the project IS the per-video
+ *    composition.
+ *
+ * 2. **Legacy template path** (existing short-form portrait reels). Body shape
+ *    unchanged:
+ *      {
+ *        adIngestionId, clientId, clientSlug,
+ *        videoUrl, musicUrl?, brollUrls?, script?, brandTokens?,
+ *      }
+ *    Copies the static `hyperframes-template/` pilot, swaps in `videoUrl`,
+ *    rewrites scene text with Gemini, runs the legacy prep + render. This
+ *    path is UNCHANGED in this PR.
+ *
+ * Returns immediately with { accepted: true, adIngestionId, mode }. Render
+ * runs in background; on completion this endpoint directly updates the
+ * Supabase ad_ingestion row to status='rendered' + file_url, and logs a
  * hyperframes_render_complete event.
  */
 hyperframesRouter.post('/hyperframes-render-async', async (req, res) => {
+  const body = req.body || {};
   const {
     adIngestionId,
     clientId,
     clientSlug,
+    // Blueprint path:
+    compositionProjectUrl,
+    blueprintJson,
+    sourceUrl,
+    // Legacy template path:
     videoUrl,
     musicUrl,
     brollUrls = [],
     script = '',
     brandTokens = { accent: '#37bdf8', warn: '#f09025' },
-  } = req.body || {};
+  } = body;
 
-  if (!adIngestionId || !clientId || !clientSlug || !videoUrl) {
-    return res.status(400).json({ error: 'adIngestionId, clientId, clientSlug, videoUrl are required' });
+  if (!adIngestionId || !clientId || !clientSlug) {
+    return res.status(400).json({ error: 'adIngestionId, clientId, clientSlug are required' });
+  }
+
+  const useBlueprintPath = Boolean(compositionProjectUrl);
+  if (!useBlueprintPath && !videoUrl) {
+    return res.status(400).json({
+      error: 'Either compositionProjectUrl (blueprint path) or videoUrl (legacy template path) is required',
+    });
   }
 
   // Fire-and-forget: return immediately so Vercel cron doesn't block.
-  res.json({ accepted: true, adIngestionId });
+  res.json({ accepted: true, adIngestionId, mode: useBlueprintPath ? 'blueprint' : 'legacy' });
 
   // Background processing
-  runHyperframesJob({
-    adIngestionId,
-    clientId,
-    clientSlug,
-    videoUrl,
-    musicUrl,
-    brollUrls,
-    script,
-    brandTokens,
-  }).catch((err) => {
-    console.error(`[hf] background job failed for ${adIngestionId}:`, err.message);
-  });
+  if (useBlueprintPath) {
+    runBlueprintRenderJob({
+      adIngestionId,
+      clientId,
+      clientSlug,
+      compositionProjectUrl,
+      blueprintJson,
+      sourceUrl: sourceUrl ?? null,
+    }).catch((err) => {
+      console.error(`[hf:blueprint] background job failed for ${adIngestionId}:`, err.message);
+    });
+  } else {
+    runHyperframesJob({
+      adIngestionId,
+      clientId,
+      clientSlug,
+      videoUrl,
+      musicUrl,
+      brollUrls,
+      script,
+      brandTokens,
+    }).catch((err) => {
+      console.error(`[hf] background job failed for ${adIngestionId}:`, err.message);
+    });
+  }
 });
 
 async function runHyperframesJob({
@@ -360,6 +403,144 @@ async function runHyperframesJob({
     }).catch(() => {});
   } finally {
     // Clean up workspace
+    try {
+      rmSync(workspace, { recursive: true, force: true });
+    } catch (_err) {
+      /* ignore */
+    }
+  }
+}
+
+/**
+ * Blueprint-path render: downloads the per-video CompositionBlueprint project
+ * from `hyperframes-projects/<adIngestionId>/...` and renders it directly.
+ *
+ * No template copy, no scene rewrite — the project emitted by creative-engine's
+ * `compose_pending` (via `lib/hyperframes/render_blueprint.ts`) is the
+ * per-video composition with the correct viewport/dimensions baked into its
+ * own `index.html` and `meta.json`. The `npx hyperframes render` CLI reads
+ * those at launch time; Chromium and ffmpeg both inherit the project's
+ * dimensions from the same source (the project's own files), so landscape
+ * (1920×1080) and portrait (1080×1920) projects render at their authored
+ * sizes without explicit per-call overrides.
+ *
+ * Upload + status-update + event-log + failure semantics mirror
+ * `runHyperframesJob` so retries land in the same place.
+ */
+async function runBlueprintRenderJob({
+  adIngestionId,
+  clientId,
+  clientSlug,
+  compositionProjectUrl,
+  blueprintJson,
+  sourceUrl,
+}) {
+  const workspace = join(WORKSPACE_BASE, `hf-bp-${adIngestionId}-${randomUUID()}`);
+  console.log(`[hf:blueprint] starting render for ${adIngestionId} in ${workspace}`);
+
+  try {
+    const serviceKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!serviceKey) {
+      throw new Error('SUPABASE_SERVICE_KEY/SUPABASE_SERVICE_ROLE_KEY not set');
+    }
+
+    // 1. Materialize the per-video project + face source into the workspace.
+    //    Throws on download failure; the catch below reverts row status.
+    const { downloadedCount, dimensions } = await setupBlueprintWorkspace({
+      workspace,
+      compositionProjectUrl,
+      sourceUrl,
+      blueprintJson,
+      serviceKey,
+    });
+    console.log(
+      `[hf:blueprint] workspace ready: ${downloadedCount} project files + ${sourceUrl ? '1' : '0'} source files. ` +
+      `Blueprint dimensions: ${dimensions ? `${dimensions.width}x${dimensions.height}` : 'unknown (will use project meta.json)'}`,
+    );
+
+    mkdirSync(join(workspace, 'renders'), { recursive: true });
+
+    // 2. Run `hyperframes render`. CLI reads viewport + dimensions from the
+    //    project's own `meta.json` and index.html viewport meta tag — both
+    //    emitted with the correct values by render_blueprint.ts. Chromium
+    //    capture and ffmpeg output therefore both inherit the same dimensions.
+    //
+    //    --workers 1 to match the legacy path's serial-capture constraint
+    //    (Railway's 4-core container times out parallel Chromium workers).
+    console.log(`[hf:blueprint] running hyperframes render (serial)...`);
+    await runCommand(
+      'npx',
+      ['hyperframes', 'render', '--quality', 'draft', '--workers', '1', '--quiet'],
+      workspace,
+      'render',
+    );
+
+    // 3. Find the output MP4 (same logic as legacy path).
+    const rendersDir = join(workspace, 'renders');
+    const renderFiles = readdirSync(rendersDir)
+      .filter((f) => f.endsWith('.mp4'))
+      .map((f) => ({ name: f, mtime: statSync(join(rendersDir, f)).mtime }))
+      .sort((a, b) => b.mtime - a.mtime);
+
+    if (renderFiles.length === 0) {
+      throw new Error('No MP4 produced in renders/ directory');
+    }
+    const outputPath = join(rendersDir, renderFiles[0].name);
+    console.log(`[hf:blueprint] render complete: ${renderFiles[0].name}`);
+
+    // 4. Upload to Supabase Storage (reuses the same helper as legacy path).
+    const datePrefix = new Date().toISOString().slice(0, 10);
+    const storagePath = `hyperframes-output/${clientId}/${datePrefix}/${randomUUID()}.mp4`;
+    const publicUrl = await uploadToSupabaseStorage(outputPath, storagePath);
+    console.log(`[hf:blueprint] uploaded to ${publicUrl}`);
+
+    // 5. Update ad_ingestion — success signal for the pipeline.
+    await supabaseUpdate('ad_ingestion', adIngestionId, {
+      status: 'rendered',
+      file_url: publicUrl,
+    });
+
+    // 6. Log event — BEST EFFORT (matching the legacy path's swallow-on-fail
+    //    behaviour, per the comment in runHyperframesJob: event_type CHECK
+    //    constraint may reject 'hyperframes_render_complete' until a future
+    //    migration lands).
+    try {
+      await supabaseInsert('content_pipeline_events', {
+        client_id: clientId,
+        event_type: 'hyperframes_render_complete',
+        source_module: 'media-worker/hyperframes',
+        metadata: {
+          ingestion_id: adIngestionId,
+          client_slug: clientSlug,
+          render_mode: 'blueprint',
+          dimensions: dimensions ?? null,
+          output_path: storagePath,
+        },
+      });
+    } catch (logErr) {
+      console.warn(`[hf:blueprint] event log write failed (non-fatal): ${logErr.message}`);
+    }
+
+    console.log(`[hf:blueprint] ✓ complete for ${adIngestionId}`);
+  } catch (err) {
+    console.error(`[hf:blueprint] ✗ render failed for ${adIngestionId}:`, err.message);
+
+    // Revert to washed so creative-engine's cron retries next tick (same
+    // recovery semantics as legacy path).
+    await supabaseUpdate('ad_ingestion', adIngestionId, { status: 'washed' }).catch(() => {});
+    await supabaseInsert('content_pipeline_events', {
+      client_id: clientId,
+      event_type: 'error',
+      source_module: 'media-worker/hyperframes',
+      metadata: {
+        ingestion_id: adIngestionId,
+        render_mode: 'blueprint',
+        error: err.message.slice(0, 1800),
+        stage: err.stage ?? null,
+        tail: err.tail ? err.tail.slice(-1500) : null,
+      },
+    }).catch(() => {});
+  } finally {
     try {
       rmSync(workspace, { recursive: true, force: true });
     } catch (_err) {

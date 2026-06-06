@@ -2,7 +2,8 @@ import { Router } from 'express';
 import axios from 'axios';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { writeFileSync, readFileSync, unlinkSync, existsSync } from 'fs';
+import { writeFileSync, readFileSync, unlinkSync, existsSync, createWriteStream, statSync } from 'fs';
+import { pipeline } from 'stream/promises';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 
@@ -13,6 +14,73 @@ export const classifyRouter = Router();
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 const GEMINI_UPLOAD_URL = 'https://generativelanguage.googleapis.com/upload/v1beta/files';
 const MODEL = 'gemini-2.0-flash';
+
+/**
+ * Stream-download a URL straight to disk via axios stream + Node pipeline.
+ *
+ * Exists because the previous `axios.get(url, { responseType: 'arraybuffer' })`
+ * path in this file OOM-d the Railway worker (or surfaced as the generic
+ * undici "fetch failed" with no actionable `cause`) on 500MB+ long-form
+ * sources. Streaming caps RSS at the pipe's internal high-water-mark
+ * (default 16 KB) regardless of source size.
+ *
+ * On error: cleans up any partial bytes already written so retries don't
+ * accumulate orphan files, and promotes any hidden `err.cause` chain
+ * (axios / undici hide ECONNRESET, UND_ERR_HEADERS_TIMEOUT, etc. behind a
+ * generic top-level message) into the thrown Error's message so the
+ * downstream `last_error` row column is actionable.
+ *
+ * Exported for the test in test/classify_stream_download.test.js.
+ *
+ * @param {string} url            HTTP(S) URL to download
+ * @param {string} destPath       Absolute path to write the response body to
+ * @param {object} [opts]
+ * @param {number} [opts.timeout] axios per-request timeout (ms). 0 = no timeout
+ *                                — appropriate for large bodies on slow links.
+ * @returns {Promise<{ bytes: number }>}
+ */
+export async function streamDownloadToTempFile(url, destPath, opts = {}) {
+  try {
+    const dl = await axios.get(url, {
+      responseType: 'stream',
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+      timeout: opts.timeout ?? 0,
+    });
+    await pipeline(dl.data, createWriteStream(destPath));
+    const bytes = statSync(destPath).size;
+    return { bytes };
+  } catch (err) {
+    // Clean up the partial download — Railway's /tmp is ephemeral but tests
+    // run on dev machines where the leak would persist.
+    if (existsSync(destPath)) {
+      try { unlinkSync(destPath); } catch { /* best-effort */ }
+    }
+
+    // Unwrap as much of the underlying transport error as the runtime gave us
+    // so the thrown message isn't the opaque "fetch failed" placeholder.
+    const parts = [];
+    if (err.name && err.name !== 'Error') parts.push(`name=${err.name}`);
+    if (err.code) parts.push(`code=${err.code}`);
+    if (err.cause) {
+      const c = err.cause;
+      const causeBits = [
+        c.name && c.name !== 'Error' ? `name=${c.name}` : null,
+        c.code ? `code=${c.code}` : null,
+        c.message ? `msg=${c.message}` : null,
+      ].filter(Boolean).join(' ');
+      if (causeBits) parts.push(`cause(${causeBits})`);
+    }
+    const detail = parts.length > 0 ? ` [${parts.join(' ')}]` : '';
+
+    const wrapped = new Error(`Stream-download failed: ${err.message}${detail}`);
+    // Preserve the original stack so Railway logs still show where it
+    // originated rather than only this re-throw site.
+    if (err.stack) wrapped.stack = `${wrapped.message}\nCaused by: ${err.stack}`;
+    if (err.cause) wrapped.cause = err.cause;
+    throw wrapped;
+  }
+}
 
 function getGeminiKey() {
   const key = process.env.GEMINI_API_KEY?.replace(/\\n/g, '').trim();
@@ -157,6 +225,11 @@ async function runClassification({ ingestionId, storageUrl, mimeType, filename, 
     console.log(`[classify] starting: ${ingestionId} (${filename})`);
 
     let buffer;
+    // Path to the source video on local disk. Set by both Drive and portal
+    // paths below — Drive writes a materialized buffer here for ffmpeg;
+    // portal streams directly to this path without ever materializing the
+    // full file in memory.
+    let sourceFilePath;
     if (driveFileId && driveToken) {
       // Download directly from Google Drive (avoids Vercel serverless memory limits)
       console.log(`[classify] downloading from Drive: ${driveFileId}`);
@@ -202,30 +275,51 @@ async function runClassification({ ingestionId, storageUrl, mimeType, filename, 
         }
       }
     } else {
-      // Download from Supabase Storage (legacy path)
-      const { data: fileData } = await axios.get(storageUrl, { responseType: 'arraybuffer' });
-      buffer = Buffer.from(fileData);
-      console.log(`[classify] downloaded ${Math.round(buffer.length / 1024 / 1024)}MB`);
+      // Portal path: stream the signed URL directly to disk. Previously this
+      // buffered the whole response into memory via
+      // `axios.get(..., { responseType: 'arraybuffer' })` and then `writeFileSync`-d
+      // it back out. For long-form uploads (500MB+, e.g. the 535MB 36-min
+      // case that surfaced this bug on 2026-06-06) that path either OOM-d
+      // the worker or surfaced as undici "fetch failed" with no `cause` chain,
+      // both producing the same useless `last_error: "fetch failed"` row
+      // state. Streaming caps memory at the stream's internal buffer
+      // (default 16 KB) regardless of file size, and only the ffmpeg-trimmed
+      // ~180s slice ever lands in a JS Buffer for the Gemini upload below.
+      sourceFilePath = join('/tmp', `${randomUUID()}_classify_dl.mp4`);
+      console.log(`[classify] streaming portal source to ${sourceFilePath}`);
+      const { bytes } = await streamDownloadToTempFile(storageUrl, sourceFilePath);
+      console.log(`[classify] streamed ${Math.round(bytes / 1024 / 1024)}MB to disk (${bytes} bytes)`);
+    }
+
+    // Drive path produced `buffer` for the Supabase Storage re-upload step
+    // above but still needs an on-disk copy for ffmpeg below. Materialize it.
+    if (buffer && !sourceFilePath) {
+      sourceFilePath = join('/tmp', `${randomUUID()}_classify_raw.mp4`);
+      writeFileSync(sourceFilePath, buffer);
     }
 
     // 2. Trim to 3 min for Gemini — full 150-200MB videos cause Gemini init failures
     //    (rate limit / payload size). Classification only needs a representative sample.
     //    broll_cues up to 180s are still accurate; hook/emotion/quality unaffected.
     const CLASSIFY_MAX_SECONDS = 180;
-    const rawPath = join('/tmp', `${randomUUID()}_classify_raw.mp4`);
     const trimPath = join('/tmp', `${randomUUID()}_classify_trim.mp4`);
-    let geminiBuffer = buffer;
+    let geminiBuffer;
     try {
-      writeFileSync(rawPath, buffer);
-      await execAsync(`ffmpeg -i "${rawPath}" -t ${CLASSIFY_MAX_SECONDS} -c copy -y "${trimPath}"`, { timeout: 60000 });
+      await execAsync(`ffmpeg -i "${sourceFilePath}" -t ${CLASSIFY_MAX_SECONDS} -c copy -y "${trimPath}"`, { timeout: 60000 });
       if (existsSync(trimPath)) {
         geminiBuffer = readFileSync(trimPath);
         console.log(`[classify] trimmed to ${CLASSIFY_MAX_SECONDS}s for Gemini: ${Math.round(geminiBuffer.length / 1024 / 1024)}MB`);
+      } else {
+        // ffmpeg returned 0 without producing the trim file. Fall back to the
+        // source so behaviour matches the pre-stream version on small files.
+        geminiBuffer = readFileSync(sourceFilePath);
+        console.warn(`[classify] trim produced no output; using full source (${Math.round(geminiBuffer.length / 1024 / 1024)}MB)`);
       }
     } catch (trimErr) {
-      console.warn(`[classify] ffmpeg trim failed, using full buffer: ${trimErr.message}`);
+      console.warn(`[classify] ffmpeg trim failed, using full source: ${trimErr.message}`);
+      geminiBuffer = readFileSync(sourceFilePath);
     } finally {
-      if (existsSync(rawPath)) unlinkSync(rawPath);
+      if (existsSync(sourceFilePath)) unlinkSync(sourceFilePath);
       if (existsSync(trimPath)) unlinkSync(trimPath);
     }
 

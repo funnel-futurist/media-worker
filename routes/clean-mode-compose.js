@@ -459,6 +459,12 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
       if (rawCleanupRaw != null && typeof rawCleanupRaw !== 'boolean') {
         return res.status(400).json({ jobId, step: 'validate', error: 'options.rawVideoCleanup must be a boolean' });
       }
+      // Phase 1B: segment detection (detect/log only, no split) opt-in. Also
+      // runs automatically when rawVideoCleanup is on (to feed segmentHint).
+      const segmentDetectRaw = body.options.segmentDetect;
+      if (segmentDetectRaw != null && typeof segmentDetectRaw !== 'boolean') {
+        return res.status(400).json({ jobId, step: 'validate', error: 'options.segmentDetect must be a boolean' });
+      }
       const cleanupFracRaw = body.options.cleanupMaxFraction;
       if (cleanupFracRaw != null && (typeof cleanupFracRaw !== 'number' || cleanupFracRaw <= 0 || cleanupFracRaw > 1)) {
         return res.status(400).json({ jobId, step: 'validate', error: 'options.cleanupMaxFraction must be a number in (0, 1]' });

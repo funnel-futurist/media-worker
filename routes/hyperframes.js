@@ -173,15 +173,32 @@ hyperframesRouter.post('/hyperframes-render-async', async (req, res) => {
     brandTokens = { accent: '#37bdf8', warn: '#f09025' },
   } = body;
 
-  if (!adIngestionId || !clientId || !clientSlug) {
-    return res.status(400).json({ error: 'adIngestionId, clientId, clientSlug are required' });
+  if (!adIngestionId || !clientId) {
+    return res.status(400).json({ error: 'adIngestionId and clientId are required' });
   }
 
   const useBlueprintPath = Boolean(compositionProjectUrl);
-  if (!useBlueprintPath && !videoUrl) {
-    return res.status(400).json({
-      error: 'Either compositionProjectUrl (blueprint path) or videoUrl (legacy template path) is required',
-    });
+  if (useBlueprintPath) {
+    // Blueprint path needs no additional fields beyond ids — the per-video
+    // project at `compositionProjectUrl` carries everything else (HTML,
+    // meta.json, scene compositions). sourceUrl is optional in this path
+    // because some test/replay flows materialize the source separately.
+  } else {
+    // Legacy template path needs the source video URL AND a clientSlug for
+    // the per-client output prefix. PR #213 originally hoisted the
+    // clientSlug check to the top-level guard but that broke the new
+    // blueprint dispatch from creative-engine which doesn't pass clientSlug
+    // (the blueprint's output bucket prefix uses clientId, not slug).
+    if (!videoUrl) {
+      return res.status(400).json({
+        error: 'Legacy template path requires videoUrl (or use the blueprint path via compositionProjectUrl)',
+      });
+    }
+    if (!clientSlug) {
+      return res.status(400).json({
+        error: 'Legacy template path requires clientSlug',
+      });
+    }
   }
 
   // Fire-and-forget: return immediately so Vercel cron doesn't block.

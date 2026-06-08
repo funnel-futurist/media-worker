@@ -201,6 +201,30 @@ test('PR-L: both intro fields together (full PR-L body)', () => {
   assert.equal(opts.introDurationSec, 4.0);
 });
 
+// ── Phase 2: best-take + end-on-CTA option pass-through ──────────────
+
+test('Phase2: endOnCta + bestTakeDetect default to false (opt-in rollout)', () => {
+  const opts = buildPipelineOpts({ options: {} });
+  assert.equal(opts.endOnCta, false);
+  assert.equal(opts.bestTakeDetect, false);
+});
+
+test('Phase2: endOnCta:true / bestTakeDetect:true flow through', () => {
+  const opts = buildPipelineOpts({ options: { endOnCta: true, bestTakeDetect: true } });
+  assert.equal(opts.endOnCta, true);
+  assert.equal(opts.bestTakeDetect, true);
+});
+
+test('Phase2: endOnCta coerces non-boolean to false (route also validates)', () => {
+  const opts = buildPipelineOpts({ options: { endOnCta: 'yes' } });
+  assert.equal(opts.endOnCta, false);
+});
+
+test('Phase2: ctaTrailBufferSec flows through; undefined when omitted', () => {
+  assert.equal(buildPipelineOpts({ options: { ctaTrailBufferSec: 0.75 } }).ctaTrailBufferSec, 0.75);
+  assert.equal(buildPipelineOpts({ options: {} }).ctaTrailBufferSec, undefined);
+});
+
 // ── 2. INTEGRATION WITH REBALANCER ───────────────────────────────────
 // The exact failure mode that motivated this PR: route accepts a body,
 // pipeline builds opts, opts.brollMaxClientCount flows into the

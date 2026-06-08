@@ -13,7 +13,14 @@ export const classifyRouter = Router();
 
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 const GEMINI_UPLOAD_URL = 'https://generativelanguage.googleapis.com/upload/v1beta/files';
-const MODEL = 'gemini-2.0-flash';
+// gemini-2.0-flash was retired by Google (404 NOT_FOUND from generativelanguage
+// API as of 2026-06-08). Bumped to gemini-3.1-pro-preview per Shannon's
+// directive — same model family the long-form blueprint compose layer uses
+// (creative-engine/lib/hyperframes/blueprint.ts) so classify quality matches
+// the editorial discipline downstream. Pro is heavier than Flash but the
+// classify call only sends a 180s ffmpeg-trimmed slice + a JSON-output prompt,
+// so the per-row cost is bounded.
+const MODEL = 'gemini-3.1-pro-preview';
 
 /**
  * Stream-download a URL straight to disk via axios stream + Node pipeline.

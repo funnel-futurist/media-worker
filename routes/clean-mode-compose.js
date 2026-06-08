@@ -473,6 +473,21 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
       if (cleanupMinRemRaw != null && (typeof cleanupMinRemRaw !== 'number' || cleanupMinRemRaw < 0)) {
         return res.status(400).json({ jobId, step: 'validate', error: 'options.cleanupMinRemainingSec must be a number >= 0' });
       }
+
+      // Phase 2: best-take + end-on-CTA. Both opt-in booleans (default OFF) +
+      // an optional trailing-buffer knob. Omitted → buildPipelineOpts defaults.
+      const endOnCtaRaw = body.options.endOnCta;
+      if (endOnCtaRaw != null && typeof endOnCtaRaw !== 'boolean') {
+        return res.status(400).json({ jobId, step: 'validate', error: 'options.endOnCta must be a boolean' });
+      }
+      const bestTakeDetectRaw = body.options.bestTakeDetect;
+      if (bestTakeDetectRaw != null && typeof bestTakeDetectRaw !== 'boolean') {
+        return res.status(400).json({ jobId, step: 'validate', error: 'options.bestTakeDetect must be a boolean' });
+      }
+      const ctaTrailBufRaw = body.options.ctaTrailBufferSec;
+      if (ctaTrailBufRaw != null && (typeof ctaTrailBufRaw !== 'number' || ctaTrailBufRaw < 0)) {
+        return res.status(400).json({ jobId, step: 'validate', error: 'options.ctaTrailBufferSec must be a number >= 0' });
+      }
     }
 
     // PR-I v2: callback shape validation. The async-mode contract requires

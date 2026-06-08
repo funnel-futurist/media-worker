@@ -1,0 +1,215 @@
+# Converged PR auto-reviewer — event-driven, one brain (pr_review skill), GitHub-enforced gate.
+# Replaces the DO cron (github_pr_autoreviewer_v2.js). See:
+#   11_Operations/overnight/SPEC_converged_pr_autoreviewer_2026_06_08.md
+#
+# Three jobs:
+#   static_checks — deterministic floor (no LLM). REQUIRED status check. Fails only on a true BLOCK.
+#   ai_review     — runs the pr_review skill via claude-code-action. Posts the review, writes verdict.json.
+#   gate          — deterministic. Sets the `pr-gate` commit status + enables native auto-merge if eligible.
+#
+# Gating model (all GitHub-enforced — see SPEC):
+#   Tier 1 (in-lane, low-risk, eligible)        -> auto-merge, no human
+#   Tier 2 (touches a CODEOWNERS path)          -> require_code_owner_reviews holds it for John
+#   Tier 3 (secrets / destructive migration)    -> static_checks fails -> unmergeable
+#
+# Fail asymmetry: blocking fails OPEN (a bug never blocks a human); auto-merge fails CLOSED
+# (any uncertainty -> not eligible -> human merges).
+
+name: PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Cancel a stale review when a new commit is pushed — no push/review/push loop.
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write          # enable auto-merge
+  pull-requests: write     # post review comment
+  statuses: write          # set the pr-gate commit status
+  checks: read
+  id-token: write          # reserved (OIDC, if ever routed via Bedrock/Vertex)
+
+jobs:
+  # ── 1. Deterministic floor — required status check, zero deps, zero cost ──────
+  static_checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Skip forks (no secrets there); internal org PRs come from branches, not forks.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    outputs:
+      has_block: ${{ steps.run.outputs.has_block }}
+      overall: ${{ steps.run.outputs.overall }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Collect PR diff + metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh pr diff "$PR" --repo "$REPO" > diff.txt || true
+          gh pr view "$PR" --repo "$REPO" --json files,additions,deletions \
+            -q '{files: [.files[].path], additions: .additions, deletions: .deletions}' > meta.base.json
+          # Repeatable guardrail: audit the WHOLE repo for tracked symlinks with untracked targets
+          # (they dangle on every fresh clone). Merge the result into meta as dangling_symlinks.
+          node scripts/pr_review/symlink_audit.mjs > dangling.json || echo "[]" > dangling.json
+          node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('meta.base.json'));m.dangling_symlinks=JSON.parse(fs.readFileSync('dangling.json'));fs.writeFileSync('meta.json',JSON.stringify(m));"
+      - name: Run deterministic checks
+        id: run
+        run: |
+          set +e
+          node scripts/pr_review/static_checks.mjs diff.txt meta.json --out static_verdict.json
+          code=$?
+          set -e
+          overall=$(node -e "console.log(JSON.parse(require('fs').readFileSync('static_verdict.json')).overall)")
+          echo "overall=$overall" >> "$GITHUB_OUTPUT"
+          echo "has_block=$([ "$code" -eq 1 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          exit $code      # exit 1 on BLOCK -> this required check goes red
+      - name: Persist verdict for the gate job
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: static_verdict
+          path: static_verdict.json
+          retention-days: 3
+          if-no-files-found: ignore
+
+  # ── 2. The brain — pr_review skill via the official action ────────────────────
+  ai_review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: static_checks
+    # Skip the (paid) deep review when the deterministic floor already hard-blocks. Matches the cron.
+    if: needs.static_checks.outputs.has_block != 'true'
+    steps:
+      - uses: actions/checkout@v4          # check out the PR HEAD branch so the reviewer can push auto-fixes (+ discover .claude/skills)
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+      - name: Claude review (pr_review skill)
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Allow the action to run on bot-initiated events — needed so the re-run AFTER an auto-fix
+          # push (made by the claude bot) is permitted to finalize (review→approve). The skill's
+          # [pr-autofix] loop guard prevents an actual loop (the re-run reviews, it never re-fixes).
+          allowed_bots: "*"
+          prompt: "/pr_review ${{ github.repository }} ${{ github.event.pull_request.number }}"
+          claude_args: |
+            --model claude-sonnet-4-6
+            --max-turns 20
+            --allowedTools Bash,Read,Glob,Grep,Write,Edit
+            --append-system-prompt "You are running headless in GitHub Actions CI as the always-on PR reviewer. Follow the pr_review skill CI mode exactly: review with intent; AUTO-FIX safe mechanical issues and push them to the PR branch (honor the [pr-autofix] loop guard — never re-fix your own fix commit); APPROVE good work; request-changes only on genuine blockers; and ALWAYS write ./verdict.json per the skill schema. Never auto-fix secrets or destructive changes."
+        env:
+          # DB-free v1: no DATABASE_CONNECTION_URL on the runner (smallest attack surface,
+          # matches the client version). Schema-checks downgraded to "flag for human" in the skill.
+          GH_TOKEN: ${{ github.token }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      - name: Persist verdict for the gate job
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai_verdict
+          path: verdict.json
+          retention-days: 3
+          if-no-files-found: ignore
+
+  # ── 3. Deterministic gate — sets pr-gate status + enables native auto-merge ───
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [static_checks, ai_review]
+    if: always() && github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: ai_verdict, path: ., merge-multiple: true }
+        continue-on-error: true            # ai_review may have been skipped (hard block) — handled below
+      - name: Decide gate + auto-merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ADDITIONS: ${{ github.event.pull_request.additions }}
+          STATIC_BLOCK: ${{ needs.static_checks.outputs.has_block }}
+          AI_RESULT: ${{ needs.ai_review.result }}
+          PR_AUTOMERGE: ${{ vars.PR_AUTOMERGE }}   # repo variable; unset/!="on" => auto-merge DISARMED (bake mode + kill-switch)
+        run: |
+          node <<'EOF'
+          const fs = require('fs');
+          const { GH_TOKEN, PR, REPO, HEAD_SHA, ADDITIONS, STATIC_BLOCK, AI_RESULT } = process.env;
+          const sh = (c) => require('child_process').execSync(c, { stdio: 'pipe' }).toString().trim();
+
+          // Read the AI verdict if present; fail CLOSED for auto-merge on any uncertainty.
+          let v = null;
+          try { v = JSON.parse(fs.readFileSync('verdict.json', 'utf8')); } catch {}
+
+          const staticBlocked = STATIC_BLOCK === 'true';
+          const aiErrored = AI_RESULT !== 'success' && AI_RESULT !== 'skipped';
+          const hasErrorSeverity = !!(v && v.has_error_severity);
+          const codeownerTouched = !!(v && v.codeowner_path_touched);
+          const score = (v && Number(v.quality_score)) || 0;
+          const adds = Number(ADDITIONS) || 0;
+
+          // pr-gate status: FAIL only on a real block signal. Otherwise success (do not block humans
+          // on an AI crash — the deterministic floor already guarded the dangerous stuff).
+          const gateFail = staticBlocked || hasErrorSeverity;
+          const state = gateFail ? 'failure' : 'success';
+          const desc = staticBlocked ? 'Blocked by deterministic floor'
+            : hasErrorSeverity ? 'AI review found error-severity issues'
+            : aiErrored ? 'AI review did not complete - manual merge only'
+            : 'Passed review';
+          const safeDesc = desc.replace(/'/g, '').slice(0, 140);
+          sh(`gh api -X POST repos/${REPO}/statuses/${HEAD_SHA} ` +
+             `-f state=${state} -f context=pr-gate -f description='${safeDesc}'`);
+
+          // Tiering (deterministic — from the cron). Eligible => enable native auto-merge.
+          const tierEligible =
+            (adds <= 200 && score >= 7) || (adds <= 500 && score >= 8) || (adds <= 1000 && score >= 9);
+          const eligible = !gateFail && !aiErrored && !codeownerTouched && v && tierEligible;
+          const armed = process.env.PR_AUTOMERGE === 'on';   // repo variable; OFF during bake = kill-switch
+
+          let mergeNote = 'manual merge';
+          if (eligible && armed) {
+            try {
+              sh(`gh pr merge ${PR} --repo ${REPO} --squash --auto --delete-branch`);
+              mergeNote = `auto-merge enabled (${adds} lines, score ${score}/10)`;
+            } catch (e) {
+              mergeNote = 'auto-merge enable failed: ' + e.message.split('\n')[0];
+            }
+          } else if (eligible && !armed) {
+            mergeNote = `eligible (${adds} lines, score ${score}/10) — auto-merge DISARMED (PR_AUTOMERGE != on)`;
+          } else if (codeownerTouched) {
+            mergeNote = 'escalated to CODEOWNER (John)';
+          } else if (staticBlocked || hasErrorSeverity) {
+            mergeNote = 'blocked';
+          }
+
+          console.log(`pr-gate=${state} | ${desc} | ${mergeNote}`);
+          fs.writeFileSync(process.env.GITHUB_STEP_SUMMARY || '/dev/null',
+            `### Gate\n- pr-gate: **${state}** (${desc})\n- merge: **${mergeNote}**\n- score: ${score}/10, +${adds} lines\n`, { flag: 'a' });
+          EOF
+      - name: Slack notify
+        if: always()
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          TITLE: ${{ github.event.pull_request.title }}
+          URL: ${{ github.event.pull_request.html_url }}
+          STATIC_BLOCK: ${{ needs.static_checks.outputs.has_block }}
+        run: |
+          [ -z "$SLACK_BOT_TOKEN" ] && exit 0
+          emoji="✅"; [ "$STATIC_BLOCK" = "true" ] && emoji="🚫"
+          # Build the JSON in node so '\n' becomes a REAL newline (a shell string keeps it literal,
+          # and JSON.stringify of a literal backslash-n double-escapes -> Slack shows "\n").
+          payload=$(node -e "console.log(JSON.stringify({channel:'C0ALM6GNT37', text: process.argv[1]+' *PR Review* — '+process.argv[2]+' #'+process.argv[3]+'\n*'+process.argv[4]+'*\n'+process.argv[5]}))" "$emoji" "$REPO" "$PR" "$TITLE" "$URL")
+          curl -s -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" -H "Content-Type: application/json" \
+            -d "$payload" >/dev/null || true

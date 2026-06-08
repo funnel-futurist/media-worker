@@ -452,6 +452,21 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
           }
         }
       }
+
+      // Phase 1A: raw_video_cleanup pre-edit stage. Opt-in boolean + optional
+      // budget knobs. Omitted → buildPipelineOpts default (cleanup OFF).
+      const rawCleanupRaw = body.options.rawVideoCleanup;
+      if (rawCleanupRaw != null && typeof rawCleanupRaw !== 'boolean') {
+        return res.status(400).json({ jobId, step: 'validate', error: 'options.rawVideoCleanup must be a boolean' });
+      }
+      const cleanupFracRaw = body.options.cleanupMaxFraction;
+      if (cleanupFracRaw != null && (typeof cleanupFracRaw !== 'number' || cleanupFracRaw <= 0 || cleanupFracRaw > 1)) {
+        return res.status(400).json({ jobId, step: 'validate', error: 'options.cleanupMaxFraction must be a number in (0, 1]' });
+      }
+      const cleanupMinRemRaw = body.options.cleanupMinRemainingSec;
+      if (cleanupMinRemRaw != null && (typeof cleanupMinRemRaw !== 'number' || cleanupMinRemRaw < 0)) {
+        return res.status(400).json({ jobId, step: 'validate', error: 'options.cleanupMinRemainingSec must be a number >= 0' });
+      }
     }
 
     // PR-I v2: callback shape validation. The async-mode contract requires

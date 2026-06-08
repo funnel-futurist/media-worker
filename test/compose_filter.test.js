@@ -60,26 +60,33 @@ test('compose filter: uses fill-crop scale chain (parameterized W/H) — PR #111
   );
 });
 
-test('compose filter: face branch uses face-aware crop expression with outputWidth — PR #114 + per-job resolution', () => {
-  // The face branch must apply the face_detect-driven horizontal offset.
-  // After parameterization the shape is `crop=${outputWidth}:${outputHeight}:${cropXExpr}:0`.
-  // Catches a regression where someone reverts the dynamic offset and
-  // pushes off-center subjects to the edge again.
-  const DYNAMIC_FACE_CROP = /crop=\$\{outputWidth\}:\$\{outputHeight\}:\$\{cropXExpr\}:0/;
+test('compose filter: face branch uses face-aware crop expression (X + Y) with outputWidth/Height', () => {
+  // The face branch must apply the face_detect-driven horizontal AND vertical
+  // offsets. After the vertical-crop fix the shape is
+  // `crop=${outputWidth}:${outputHeight}:${cropXExpr}:${cropYExpr}` — the y was
+  // previously a hardcoded `:0` (top crop) that clipped low-framed speakers
+  // when a tall 9:16 source was cropped to a 4:5 ad. Catches a regression to
+  // either the static offset (x) or the top-pinned crop (y).
+  const DYNAMIC_FACE_CROP = /crop=\$\{outputWidth\}:\$\{outputHeight\}:\$\{cropXExpr\}:\$\{cropYExpr\}/;
   assert.match(
     SOURCE,
     DYNAMIC_FACE_CROP,
-    'face segment must use crop=${outputWidth}:${outputHeight}:${cropXExpr}:0 ' +
-    '(PR #114 + per-job resolution) so the face_detect offset reaches ffmpeg ' +
-    'at the requested target dimensions',
+    'face segment must use crop=${outputWidth}:${outputHeight}:${cropXExpr}:${cropYExpr} ' +
+    'so both face_detect offsets reach ffmpeg at the requested target dimensions',
   );
   // buildCropXExpression must be called with the outputWidth so the crop
   // math centers on the correct half-width (1080/2=540 by default).
   assert.match(
     SOURCE,
     /buildCropXExpression\(faceCropOffsetX,\s*outputWidth\)/,
-    'composeFaceAndBrolls must call buildCropXExpression(faceCropOffsetX, outputWidth) ' +
-    'so the crop expression matches the requested output width',
+    'composeFaceAndBrolls must call buildCropXExpression(faceCropOffsetX, outputWidth)',
+  );
+  // ...and buildCropYExpression with the outputHeight for the vertical center.
+  assert.match(
+    SOURCE,
+    /buildCropYExpression\(faceCropOffsetY,\s*outputHeight\)/,
+    'composeFaceAndBrolls must call buildCropYExpression(faceCropOffsetY, outputHeight) ' +
+    'so the vertical crop centers on the face instead of the top of frame',
   );
 });
 

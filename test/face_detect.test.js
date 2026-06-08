@@ -22,7 +22,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'events';
-import { detectFaceOffsetX, buildCropXExpression } from '../lib/face_detect.js';
+import { detectFaceOffsetX, buildCropXExpression, buildCropYExpression } from '../lib/face_detect.js';
 
 // ── Fake child process factory ────────────────────────────────────────
 
@@ -59,13 +59,32 @@ function throwingSpawn(message) {
 
 // ── happy path ────────────────────────────────────────────────────────
 
-test('detectFaceOffsetX: parses valid float from stdout', async () => {
+test('detectFaceOffsetX: parses valid "x y" floats from stdout', async () => {
+  const result = await detectFaceOffsetX('/fake/video.mp4', {
+    spawnImpl: fakeSpawn({ stdout: '0.4231 0.6600\n' }),
+  });
+  assert.equal(result.offsetX, 0.4231);
+  assert.equal(result.offsetY, 0.66);
+  assert.equal(result.source, 'detected');
+  assert.match(result.detail, /median face center/);
+});
+
+test('detectFaceOffsetX: missing y token → offsetY falls back to 0.5 (back-compat)', async () => {
   const result = await detectFaceOffsetX('/fake/video.mp4', {
     spawnImpl: fakeSpawn({ stdout: '0.4231\n' }),
   });
   assert.equal(result.offsetX, 0.4231);
+  assert.equal(result.offsetY, 0.5);
   assert.equal(result.source, 'detected');
-  assert.match(result.detail, /median face center/);
+});
+
+test('detectFaceOffsetX: out-of-range y → offsetY 0.5 but valid x preserved', async () => {
+  const result = await detectFaceOffsetX('/fake/video.mp4', {
+    spawnImpl: fakeSpawn({ stdout: '0.42 1.9\n' }),
+  });
+  assert.equal(result.offsetX, 0.42);
+  assert.equal(result.offsetY, 0.5);
+  assert.equal(result.source, 'detected');
 });
 
 test('detectFaceOffsetX: classifies exact 0.5 as fallback (no faces case)', async () => {
@@ -73,9 +92,10 @@ test('detectFaceOffsetX: classifies exact 0.5 as fallback (no faces case)', asyn
   // We treat exact-center as fallback so the orchestrator can report
   // transparently — same behavior happens in either case (center crop).
   const result = await detectFaceOffsetX('/fake/video.mp4', {
-    spawnImpl: fakeSpawn({ stdout: '0.5000\n', stderr: 'face_detect: no faces in any...\n' }),
+    spawnImpl: fakeSpawn({ stdout: '0.5000 0.5000\n', stderr: 'face_detect: no faces in any...\n' }),
   });
   assert.equal(result.offsetX, 0.5);
+  assert.equal(result.offsetY, 0.5);
   assert.equal(result.source, 'fallback');
   assert.match(result.detail, /no faces detected/);
 });
@@ -208,4 +228,32 @@ test('buildCropXExpression: deterministic output for the same input', () => {
   const a = buildCropXExpression(0.4231);
   const b = buildCropXExpression(0.4231);
   assert.equal(a, b);
+});
+
+// ── buildCropYExpression ──────────────────────────────────────────────
+
+test('buildCropYExpression: center (0.5) produces a clamped ih expression', () => {
+  const expr = buildCropYExpression(0.5);
+  // offsetY*ih - 960, clamped to [0, ih-1920] (default cropHeight 1920).
+  assert.match(expr, /ih/);
+  assert.match(expr, /max\(0/);
+  assert.match(expr, /min\(ih-1920/);
+  assert.match(expr, /0\.5000\*ih-960/);
+});
+
+test('buildCropYExpression: off-center (0.66) embeds offsetY + honors custom height', () => {
+  const expr = buildCropYExpression(0.66, 1350); // 4:5 ad height
+  assert.match(expr, /0\.6600\*ih-675/);
+  assert.match(expr, /min\(ih-1350/);
+});
+
+test('buildCropYExpression: clamps out-of-range input defensively', () => {
+  assert.match(buildCropYExpression(-0.5), /0\.0000\*ih-960/);
+  assert.match(buildCropYExpression(1.5), /1\.0000\*ih-960/);
+});
+
+test('buildCropYExpression: escapes commas for the ffmpeg filter graph', () => {
+  const expr = buildCropYExpression(0.5);
+  assert.ok(expr.includes('max(0\\,'), `expected backslash-comma after max(0; got ${expr}`);
+  assert.ok(expr.includes('min(ih-1920\\,'), `expected backslash-comma after min(ih-1920; got ${expr}`);
 });

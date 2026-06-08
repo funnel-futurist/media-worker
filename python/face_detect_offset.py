@@ -3,13 +3,13 @@
 python/face_detect_offset.py
 
 Sample N evenly-spaced frames from a video, run OpenCV Haar cascade face
-detection on each frame, and emit the MEDIAN face-center X position as a
-fraction of the source frame width on stdout.
+detection on each frame, and emit the MEDIAN face-center X and Y positions as
+fractions of the source frame width/height on stdout.
 
-Output: a single float on stdout, e.g. "0.42"
-        - 0.5 = face is centered (or no faces detected → fallback to center)
-        - <0.5 = face is left-of-center in the source
-        - >0.5 = face is right-of-center in the source
+Output: two space-separated floats on stdout, e.g. "0.42 0.66"  →  "<x> <y>"
+        - x: 0.5 = horizontally centered; <0.5 left-of-center; >0.5 right
+        - y: 0.5 = vertically centered;   <0.5 upper;          >0.5 lower
+        - "0.5 0.5" = no faces detected / any fallback → center crop both axes
 
 Used by lib/face_detect.js (PR #114) to compute the horizontal `crop=` offset
 for the production fill-crop reframe in composeFaceAndBrolls. Replaces the
@@ -37,7 +37,7 @@ try:
     import cv2
 except ImportError:
     # If opencv isn't available, fall back to center. Don't crash.
-    print('0.5')
+    print('0.5 0.5')
     sys.stderr.write('face_detect: opencv-python-headless not installed — falling back to center crop\n')
     sys.exit(0)
 
@@ -52,7 +52,7 @@ def main():
 
     cap = cv2.VideoCapture(args.video_path)
     if not cap.isOpened():
-        print('0.5')
+        print('0.5 0.5')
         sys.stderr.write(f'face_detect: failed to open {args.video_path}\n')
         sys.exit(0)
 
@@ -61,7 +61,7 @@ def main():
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     if total_frames < 1 or width < 1:
-        print('0.5')
+        print('0.5 0.5')
         cap.release()
         sys.stderr.write(f'face_detect: {args.video_path} has invalid frame count/width ({total_frames}/{width})\n')
         sys.exit(0)
@@ -69,7 +69,7 @@ def main():
     cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
     face_cascade = cv2.CascadeClassifier(cascade_path)
     if face_cascade.empty():
-        print('0.5')
+        print('0.5 0.5')
         cap.release()
         sys.stderr.write(f'face_detect: failed to load Haar cascade from {cascade_path}\n')
         sys.exit(0)
@@ -83,6 +83,7 @@ def main():
     ]
 
     face_centers_x = []
+    face_centers_y = []
     samples_attempted = 0
     samples_successful = 0
     for idx in sample_indices:
@@ -106,11 +107,12 @@ def main():
             faces_sorted = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
             x, y, w, h = faces_sorted[0]
             face_centers_x.append((x + w / 2.0) / width)
+            face_centers_y.append((y + h / 2.0) / height)
 
     cap.release()
 
     if not face_centers_x:
-        print('0.5')
+        print('0.5 0.5')
         sys.stderr.write(
             f'face_detect: no faces in any of {samples_successful}/{samples_attempted} sampled frames '
             f'({width}x{height}) — falling back to center crop\n'
@@ -119,13 +121,15 @@ def main():
 
     sorted_centers = sorted(face_centers_x)
     median = sorted_centers[len(sorted_centers) // 2]
+    sorted_centers_y = sorted(face_centers_y)
+    median_y = sorted_centers_y[len(sorted_centers_y) // 2]
 
     sys.stderr.write(
         f'face_detect: {len(face_centers_x)}/{samples_successful} samples had faces '
-        f'(min={min(face_centers_x):.3f} median={median:.3f} max={max(face_centers_x):.3f}) '
-        f'on {width}x{height} source\n'
+        f'(x: min={min(face_centers_x):.3f} median={median:.3f} max={max(face_centers_x):.3f}; '
+        f'y median={median_y:.3f}) on {width}x{height} source\n'
     )
-    print(f'{median:.4f}')
+    print(f'{median:.4f} {median_y:.4f}')
 
 
 if __name__ == '__main__':

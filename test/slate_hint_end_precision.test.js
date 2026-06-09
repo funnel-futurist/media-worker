@@ -18,7 +18,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { findHintEndMsInSentence, detectDeterministicSlateFloor } from '../lib/slate_detect.js';
+import { findHintEndMsInSentence, detectDeterministicSlateFloor, detectSlate } from '../lib/slate_detect.js';
 
 // Helper: build a Deepgram-style word given a 1-based positional index, the
 // raw word text, and ms-aligned start/end times.
@@ -159,4 +159,112 @@ test('floor: hint match in a CLEAN sentence (slate followed by a period) is unch
   const out = detectDeterministicSlateFloor(words, { slateHint: 'A Quiet Reminder' });
   assert.ok(out, 'expected a floor match');
   assert.equal(out.endSec, 1.0);
+});
+
+// ─────────────────────────── detectSlate LLM-clamp ─────────────────────────
+//
+// 2026-06-09 follow-up to PR #222: even when the floor returns a precise
+// hint-end, the Gemini LLM independently judges what's slate and the
+// "take the larger" rule (line ~709) was letting the LLM over-cut past
+// the hint into the hook. When matchedHint is set, the hint-end is
+// AUTHORITATIVE — Gemini's larger value gets clamped.
+
+test('detectSlate: matchedHint clamps Gemini\'s over-cut to the hint-end (Saturday case)', async () => {
+  // Saturday's Deepgram fused-sentence transcript (same as the floor test).
+  const wordTimestamps = [
+    w('saturday', 0, 500),
+    w('june', 500, 800),
+    w('13th', 800, 1200),
+    w('the', 1200, 1300),
+    w('calm', 1300, 1700),
+    w('reminder', 1700, 2300),
+    w('about', 2300, 2600),
+    w('june', 2600, 2900),
+    w('30', 2900, 3400),       // ← end of hint
+    w('a', 3500, 3600),
+    w('quiet', 3600, 4000),
+    w('reminder', 4000, 4600),
+    w('for', 4600, 4800),
+    w('any', 4800, 5000),
+    w('family.', 5000, 5400),
+  ];
+
+  // Simulate the worst case: Gemini independently judges the whole opening
+  // as slate and returns 8.0s (well past the hook).
+  const fakeFetch = async () => ({
+    ok: true,
+    json: async () => ({
+      candidates: [{
+        content: {
+          parts: [{
+            text: JSON.stringify({
+              isSlate: true,
+              slateEndSeconds: 8.0,         // ← LLM over-cut into hook
+              transcribedText: 'saturday june 13th the calm reminder about june 30 a quiet reminder for any family',
+              identifier: 'date+title',
+            }),
+          }],
+        },
+      }],
+    }),
+    text: async () => '',
+  });
+
+  const result = await detectSlate(
+    { wordTimestamps, sourceDuration: 60 },
+    {
+      apiKey: 'test-key',
+      slateHint: 'saturday june 13th the calm reminder about june 30',
+      fetchImpl: fakeFetch,
+    },
+  );
+
+  assert.ok(result, 'expected detectSlate to return a slate');
+  // The Gemini value was 8.0s but the hint-end is 3.4s. With the clamp,
+  // we MUST use 3.4s (hook preserved). Without the clamp, this would be
+  // 8.0s and the hook would be eaten.
+  assert.equal(result.end, 3.4, 'matchedHint should clamp Gemini\'s over-cut');
+  assert.equal(result.identifier, 'deterministic_floor_hint');
+});
+
+test('detectSlate: no hint provided → Gemini-larger-wins behavior unchanged (Phil meta-marker path)', async () => {
+  // Phil's classic flow: "Selected option" meta marker. No slateHint passed.
+  // Gemini says 1.2s (correct). Floor says 1.2s (matches meta marker).
+  // Both agree → use 1.2s.
+  const wordTimestamps = [
+    w('Selected', 0, 400),
+    w('option', 400, 800),
+    w('A.', 800, 1200),
+    w('What', 1300, 1600),
+    w('your', 1600, 1800),
+    w('future.', 1800, 2200),
+  ];
+
+  const fakeFetch = async () => ({
+    ok: true,
+    json: async () => ({
+      candidates: [{
+        content: {
+          parts: [{
+            text: JSON.stringify({
+              isSlate: true,
+              slateEndSeconds: 1.2,
+              transcribedText: 'Selected option A.',
+              identifier: 'option',
+            }),
+          }],
+        },
+      }],
+    }),
+    text: async () => '',
+  });
+
+  const result = await detectSlate(
+    { wordTimestamps, sourceDuration: 30 },
+    { apiKey: 'test-key', fetchImpl: fakeFetch },  // ← no slateHint
+  );
+  assert.ok(result);
+  assert.equal(result.end, 1.2, 'no-hint path unchanged');
+  // identifier should be Gemini's (the option marker), not deterministic_floor_hint.
+  assert.notEqual(result.identifier, 'deterministic_floor_hint');
 });

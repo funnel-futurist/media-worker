@@ -276,3 +276,41 @@ test('buildEditNotesSummary: caps output at EDIT_NOTES_MAX_CHARS', () => {
   });
   assert.ok(s.length <= 480, `expected length<=480, got ${s.length}`);
 });
+
+// ── buildEditNotesSummary: Phase 2 best-take + CTA line (log-only) ──────
+
+test('buildEditNotesSummary: CTA found + proposed drops → Deliverables-card line', () => {
+  const s = buildEditNotesSummary({
+    durationSec: 80,
+    steps: { bestTakeCta: { cta: { found: true, end_time: 64.0, confidence: 0.88 }, trimApplied: false, proposedDropCount: 2 } },
+  });
+  assert.match(s, /CTA detected @64\.0s \(0\.88\)\. Best-take: 2 proposed drop\(s\)\./);
+});
+
+test('buildEditNotesSummary: no CTA → "No CTA detected" + zero-drops phrasing', () => {
+  const s = buildEditNotesSummary({
+    steps: { bestTakeCta: { cta: { found: false, end_time: 0, confidence: 0 }, trimApplied: false, proposedDropCount: 0 } },
+  });
+  assert.match(s, /No CTA detected\. Best-take: no proposed drops\./);
+});
+
+test('buildEditNotesSummary: trimApplied annotates the CTA line', () => {
+  const s = buildEditNotesSummary({
+    steps: { bestTakeCta: { cta: { found: true, end_time: 70.0, confidence: 0.9 }, trimApplied: true, proposedDropCount: 0 } },
+  });
+  assert.match(s, /CTA detected @70\.0s \(0\.90\), trimmed\./);
+});
+
+test('buildEditNotesSummary: bestTakeCta error is omitted (no misleading "No CTA")', () => {
+  const s = buildEditNotesSummary({
+    durationSec: 60,
+    steps: { bestTakeCta: { error: 'Gemini 503', cta: null, proposedDropCount: 0 } },
+  });
+  assert.doesNotMatch(s, /CTA/);
+  assert.match(s, /60\.0s/); // the rest of the summary still renders
+});
+
+test('buildEditNotesSummary: no bestTakeCta step (reel / flag off) → no Phase 2 line', () => {
+  const s = buildEditNotesSummary({ durationSec: 30, insertions: { clientCount: 1, stockCount: 0 } });
+  assert.doesNotMatch(s, /CTA|Best-take/);
+});

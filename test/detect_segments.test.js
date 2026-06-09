@@ -11,7 +11,15 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { detectSegments } from '../lib/detect_segments.js';
+
+const PIPELINE_SRC = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'clean_mode_pipeline.js'),
+  'utf8',
+);
 
 function w(word, startSec, endSec) {
   return { word, start_ms: Math.round(startSec * 1000), end_ms: Math.round(endSec * 1000) };
@@ -36,6 +44,24 @@ function mockFetcher(out, { ok = true, status = 200 } = {}) {
 }
 
 const SAMPLE_WORDS = [w('hello', 0, 0.5), w('world', 1, 1.5), w('again', 2, 2.5)];
+
+// ── pipeline gating: detection is OPT-IN, not auto-run with cleanup ────────
+// 2026-06-09: decoupled from rawVideoCleanup so it stops firing a wasted Gemini
+// pass on every cleanup job (operators pre-segment + upload single clips, so it
+// always returned "single clip"). Must run ONLY when opts.segmentDetect is set.
+
+test('pipeline: segment detection gates on opts.segmentDetect ONLY (decoupled from rawVideoCleanup)', () => {
+  assert.match(
+    PIPELINE_SRC,
+    /if \(opts\.segmentDetect\) \{[\s\S]*?stepStart\('segmentDetect'\)/,
+    'segment detection must run only when opts.segmentDetect is set',
+  );
+  assert.doesNotMatch(
+    PIPELINE_SRC,
+    /if \(opts\.rawVideoCleanup \|\| opts\.segmentDetect\)/,
+    'segment detection must NOT auto-run with rawVideoCleanup (decoupled 2026-06-09)',
+  );
+});
 
 // ── single clip ──────────────────────────────────────────────────────────
 

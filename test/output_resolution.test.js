@@ -154,6 +154,69 @@ test('pipeline: pickBrollInsertions call passes outputWidth + outputHeight to th
   );
 });
 
+// ── reframe-when-no-compose fallback (skipBroll / 0-insertions / compose-fail) ──
+// Root cause (2026-06-09): compose is the ONLY step that scales+face-crops the
+// cut to opts.outputWidth×outputHeight, and it's gated behind `if (!skipBroll)`.
+// With b-roll off (every ad since portal #352), compose never ran, so ads
+// shipped at SOURCE dims (confirmed: a 720×1280 selfie as a "1080×1350 ad").
+// These lock in the reframe fallback that runs when compose didn't.
+
+test('pipeline: reframe fallback runs when no compose happened (videoForSubtitles === cutPath)', () => {
+  assert.match(
+    PIPELINE,
+    /if \(videoForSubtitles === cutPath\) \{[\s\S]*?stepStart\('reframe'\)/,
+    'a reframe step must run when compose did not (videoForSubtitles still === cutPath) — ' +
+    'covers skipBroll (all ads since #352), 0 insertions, and compose failure',
+  );
+});
+
+test('pipeline: reframe is gated on a real dimension mismatch (no-op when already at target)', () => {
+  assert.match(
+    PIPELINE,
+    /const needsReframe = sw !== opts\.outputWidth \|\| sh !== opts\.outputHeight/,
+    'reframe must only fire when source dims differ from opts.outputWidth/Height ' +
+    'so an already-correct source stays a byte-identical no-op (no extra re-encode)',
+  );
+});
+
+test('pipeline: reframe reuses composeFaceAndBrolls with ZERO insertions (pure reframe)', () => {
+  assert.match(
+    PIPELINE,
+    /composeFaceAndBrolls\(\{\s*facePath: cutPath,\s*brolledPath: reframedPath,\s*insertions: \[\]/,
+    'reframe fallback must call composeFaceAndBrolls with facePath:cutPath, brolledPath:reframedPath, insertions:[] ' +
+    '(empty insertions degrade to one face segment = a pure face-aware scale+crop)',
+  );
+  assert.match(
+    PIPELINE,
+    /composeFaceAndBrolls\(\{[\s\S]*?insertions: \[\][\s\S]*?faceCropOffsetX: faceDetectResult\.offsetX[\s\S]*?outputWidth: opts\.outputWidth[\s\S]*?outputHeight: opts\.outputHeight[\s\S]*?\}\)/,
+    'reframe fallback must thread the face_detect offsets + opts.outputWidth/Height',
+  );
+});
+
+test('pipeline: reframe fallback is non-fatal (keeps source cut + warns on failure)', () => {
+  assert.match(
+    PIPELINE,
+    /warnings\.push\(`reframe_failed:[\s\S]*?output stays at source dimensions`\)/,
+    'reframe failure must be non-fatal: warn + keep the source-dimension cut and ship',
+  );
+});
+
+test('pipeline: reframe records steps.reframe telemetry', () => {
+  assert.match(
+    PIPELINE,
+    /steps\.reframe = \{[\s\S]*?reframed,[\s\S]*?sourceDims:[\s\S]*?targetDims:/,
+    'reframe must record steps.reframe { reframed, sourceDims, targetDims }',
+  );
+});
+
+test('pipeline: reframedPath temp file is defined alongside the other job paths', () => {
+  assert.match(
+    PIPELINE,
+    /const reframedPath = join\(tmpDir, 'reframed\.mp4'\)/,
+    'reframedPath must be defined in the per-job tmp paths block',
+  );
+});
+
 // ── Route validation wiring ───────────────────────────────────────────
 
 test('route: rejects half-specified outputWidth/outputHeight (both must be present)', () => {

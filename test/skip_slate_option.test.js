@@ -1,19 +1,3 @@
-/**
- * test/skip_slate_option.test.js
- *
- * 2026-06-09: lock in the `skipSlate` opt-out flag.
- *
- * Why this exists: EnableSNP Saturday Jun 13 reel — title "A Calm Reminder
- * About June 30" + hook "A quiet reminder for any family…" — the shared
- * "reminder" token kept tricking slate_detect's LLM into judging the hook
- * as more slate. No amount of slateHint tuning fixed it. The fix is an
- * escape hatch: operator passes `skipSlate: true` AFTER pre-trimming the
- * spoken intro out of the raw, and slate_detect is bypassed entirely.
- *
- * Pure-function tests against buildPipelineOpts — full pipeline integration
- * is exercised live on Railway, not in this file.
- */
-
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildPipelineOpts } from '../lib/clean_mode_pipeline.js';

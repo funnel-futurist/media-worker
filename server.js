@@ -14,6 +14,7 @@ process.on('unhandledRejection', (reason) => {
 import { voiceoverRouter } from './routes/voiceover.js';
 import { screenshotRouter } from './routes/screenshot.js';
 import { annotateRouter } from './routes/annotate.js';
+import { assembleAdVariationRouter } from './routes/assemble-ad-variation.js';
 import { assembleRouter } from './routes/assemble.js';
 import { captionRouter } from './routes/caption.js';
 import { lipsyncRouter } from './routes/lipsync.js';
@@ -57,6 +58,7 @@ app.use('/', screenshotRouter);
 app.use('/', annotateRouter);
 // Routes — Phase 2
 app.use('/', assembleRouter);
+app.use('/', assembleAdVariationRouter);
 app.use('/', captionRouter);
 app.use('/', lipsyncRouter);
 // Routes — Phase 3 (Remotion)

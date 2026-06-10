@@ -429,6 +429,20 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
       if (silenceMinDurRaw != null && (typeof silenceMinDurRaw !== 'number' || !Number.isFinite(silenceMinDurRaw) || silenceMinDurRaw <= 0 || silenceMinDurRaw > 5)) {
         return res.status(400).json({ jobId, step: 'validate', error: 'options.silenceMinDur must be a number in (0, 5]' });
       }
+      // 2026-06-10: cut-precision tunables (defense in depth — the worker
+      // already accepts these; we 400 here so a typo doesn't reach the
+      // pipeline as a silent no-op).
+      const cutSafetyModeRaw = body.options.cutSafetyMode;
+      if (cutSafetyModeRaw != null &&
+          cutSafetyModeRaw !== 'safe_only' &&
+          cutSafetyModeRaw !== 'safe_and_soft' &&
+          cutSafetyModeRaw !== 'all') {
+        return res.status(400).json({ jobId, step: 'validate', error: "options.cutSafetyMode must be 'safe_only', 'safe_and_soft', or 'all'" });
+      }
+      const retainSecRaw = body.options.retainSec;
+      if (retainSecRaw != null && (typeof retainSecRaw !== 'number' || !Number.isFinite(retainSecRaw) || retainSecRaw <= 0 || retainSecRaw > 1)) {
+        return res.status(400).json({ jobId, step: 'validate', error: 'options.retainSec must be a number in (0, 1]' });
+      }
       // PR-AF: Deepgram keyword boosts. Optional array of non-empty
       // strings (max 20 — Deepgram's documented limit is higher but we
       // want to fail fast on misconfigured per-client defaults). Each

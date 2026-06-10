@@ -232,24 +232,34 @@ test('buildCropXExpression: deterministic output for the same input', () => {
 
 // ── buildCropYExpression ──────────────────────────────────────────────
 
-test('buildCropYExpression: center (0.5) produces a clamped ih expression', () => {
+test('buildCropYExpression: 0.5 produces a headroom-biased clamped ih expression', () => {
   const expr = buildCropYExpression(0.5);
-  // offsetY*ih - 960, clamped to [0, ih-1920] (default cropHeight 1920).
+  // offsetY*ih - (0.5 + 0.10)*1920 = offsetY*ih - 1152 (center 960 + 192px
+  // headroom), clamped to [0, ih-1920] (default cropHeight 1920).
   assert.match(expr, /ih/);
   assert.match(expr, /max\(0/);
   assert.match(expr, /min\(ih-1920/);
-  assert.match(expr, /0\.5000\*ih-960/);
+  assert.match(expr, /0\.5000\*ih-1152/);
 });
 
-test('buildCropYExpression: off-center (0.66) embeds offsetY + honors custom height', () => {
+test('buildCropYExpression: off-center (0.66) embeds offsetY + honors custom height + headroom', () => {
   const expr = buildCropYExpression(0.66, 1350); // 4:5 ad height
-  assert.match(expr, /0\.6600\*ih-675/);
+  // 1350 * (0.5 + 0.10) = 810
+  assert.match(expr, /0\.6600\*ih-810/);
   assert.match(expr, /min\(ih-1350/);
 });
 
 test('buildCropYExpression: clamps out-of-range input defensively', () => {
-  assert.match(buildCropYExpression(-0.5), /0\.0000\*ih-960/);
-  assert.match(buildCropYExpression(1.5), /1\.0000\*ih-960/);
+  assert.match(buildCropYExpression(-0.5), /0\.0000\*ih-1152/);
+  assert.match(buildCropYExpression(1.5), /1\.0000\*ih-1152/);
+});
+
+test('buildCropYExpression: applies a HEADROOM bias (offset > cropHeight/2 so hair is not clipped)', () => {
+  // The subtracted offset must exceed half the height — that upward shift IS
+  // the headroom that keeps a talking head's hair in frame on a 9:16→4:5 crop.
+  const m = buildCropYExpression(0.5, 1350).match(/ih-(\d+)\)/);
+  assert.ok(m, 'expression must contain ih-<offset>');
+  assert.ok(Number(m[1]) > 675, `offset ${m[1]} must exceed cropHeight/2 (675) for headroom`);
 });
 
 test('buildCropYExpression: escapes commas for the ffmpeg filter graph', () => {

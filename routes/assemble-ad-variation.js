@@ -6,6 +6,14 @@ import axios from 'axios';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { getDuration } from '../lib/media.js';
+// Ad-format stages reused from the clean-mode ad pipeline so the assembled
+// variation looks like a real ad (face-aware 1080x1350 crop, gold ad captions,
+// SupportED-style banner).
+import { detectFaceOffsetX } from '../lib/face_detect.js';
+import { composeFaceAndBrolls } from '../lib/clean_mode_pipeline.js';
+import { overlayBanner } from '../lib/banner_overlay.js';
+import { callDeepgramWithRetry, mapDeepgramResponse } from '../lib/deepgram_transcribe.js';
+import { groupIntoLines, writeAssAndBurn } from '../lib/subtitle_burn.js';
 
 const execAsync = promisify(exec);
 
@@ -186,11 +194,40 @@ async function postCallback(callback, payload) {
   }
 }
 
-/** Core work: download → normalise each → concat → upload. Returns { renderedUrl, duration }. */
-async function renderVariation({ clips, clientId, variationId, width, height }) {
+// Pre-concat canonical: a vertical 1080x1920 frame so heterogeneous clips
+// concat cleanly, then the face-aware reframe crops down to the ad's 1080x1350
+// (cropping top/bottom, NOT adding bars). Mirrors the clean-mode ad path which
+// face-crops a portrait talking-head into 1080x1350.
+const NORM_W = 1080;
+const NORM_H = 1920;
+
+/**
+ * Fallback reframe when face detect / composeFaceAndBrolls fails: scale-to-fit
+ * + pad to the output dims (the old v1 behaviour). Keeps output dims correct so
+ * downstream banner/subtitles still land right; just may have bars.
+ */
+async function padReframe(srcPath, outPath, w, h) {
+  await runFfmpeg(
+    `ffmpeg -i "${srcPath}" -vf "scale=${w}:${h}:force_original_aspect_ratio=decrease,` +
+      `pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p" ` +
+      `-c:v libx264 -preset veryfast -pix_fmt yuv420p -c:a aac -ar 48000 -ac 2 -movflags +faststart -y "${outPath}"`,
+  );
+}
+
+/**
+ * Core work: download → normalise → concat → face-aware reframe (1080x1350,
+ * no bars) → banner (optional) → burned ad captions → upload.
+ * Returns { renderedUrl, duration, warnings }. Each ad-format stage degrades
+ * gracefully (logs a warning, keeps the best video so far) so a styling hiccup
+ * never turns a stitchable variation into a hard failure.
+ */
+async function renderVariation({ clips, clientId, variationId, width, height, banner }) {
   const tmpDir = join('/tmp', `adv-${randomUUID()}`);
+  const warnings = [];
   try {
     mkdirSync(tmpDir, { recursive: true });
+
+    // 1. Download + validate + normalise each clip to the vertical canonical.
     const normPaths = [];
     for (let i = 0; i < clips.length; i++) {
       const rawPath = join(tmpDir, `raw_${i}.mp4`);
@@ -203,21 +240,113 @@ async function renderVariation({ clips, clientId, variationId, width, height }) 
       writeFileSync(rawPath, Buffer.from(resp.data));
       await assertValidVideo(rawPath, `clip ${i} (${clips[i].section ?? '?'})`);
       const normPath = join(tmpDir, `norm_${i}.mp4`);
-      await normaliseClip(rawPath, normPath, width, height);
+      await normaliseClip(rawPath, normPath, NORM_W, NORM_H);
       rmSync(rawPath, { force: true });
       normPaths.push(normPath);
     }
 
+    // 2. Concat the normalised clips (all identical params → stream copy).
     const listPath = join(tmpDir, 'filelist.txt');
     writeFileSync(listPath, normPaths.map((p) => `file '${p}'`).join('\n'));
+    const stitchedPath = join(tmpDir, 'stitched.mp4');
+    await runFfmpeg(`ffmpeg -f concat -safe 0 -i "${listPath}" -c copy -movflags +faststart -y "${stitchedPath}"`);
+    if (!existsSync(stitchedPath)) throw new Error('concat produced no output file');
 
-    const outputPath = join(tmpDir, 'output.mp4');
-    await runFfmpeg(`ffmpeg -f concat -safe 0 -i "${listPath}" -c copy -movflags +faststart -y "${outputPath}"`);
-    if (!existsSync(outputPath)) throw new Error('concat produced no output file');
+    // 3. Face-aware reframe to the ad frame (1080x1350) — fill, no bars.
+    let formattedPath = stitchedPath;
+    const reframedPath = join(tmpDir, 'reframed.mp4');
+    try {
+      const face = await detectFaceOffsetX(stitchedPath, { samples: 4 });
+      await composeFaceAndBrolls({
+        facePath: stitchedPath,
+        brolledPath: reframedPath,
+        insertions: [],
+        totalDuration: await getDuration(stitchedPath),
+        faceCropOffsetX: face.offsetX,
+        faceCropOffsetY: face.offsetY,
+        outputWidth: width,
+        outputHeight: height,
+      });
+      if (existsSync(reframedPath)) formattedPath = reframedPath;
+      else throw new Error('reframe produced no output');
+    } catch (err) {
+      warnings.push(`reframe_failed: ${(err?.message ?? err).toString().slice(0, 200)}`);
+      // Keep correct output dims via the pad fallback (bars, but right size).
+      const padPath = join(tmpDir, 'padded.mp4');
+      try {
+        await padReframe(stitchedPath, padPath, width, height);
+        if (existsSync(padPath)) formattedPath = padPath;
+      } catch (e2) {
+        warnings.push(`pad_fallback_failed: ${(e2?.message ?? e2).toString().slice(0, 120)}`);
+      }
+    }
 
-    const duration = await getDuration(outputPath);
-    const renderedUrl = await uploadAndSign(outputPath, clientId, variationId);
-    return { renderedUrl, duration };
+    // 4. Banner (optional) — AFTER reframe, BEFORE subtitles (banner_overlay.js
+    //    contract). Only when a headline is supplied.
+    let bannerApplied = false;
+    if (banner && typeof banner.headline === 'string' && banner.headline.trim()) {
+      const banneredPath = join(tmpDir, 'bannered.mp4');
+      try {
+        await overlayBanner({
+          inputPath: formattedPath,
+          outputPath: banneredPath,
+          bannerConfig: {
+            text: banner.headline.trim(),
+            ...(banner.eyebrow ? { eyebrow: String(banner.eyebrow).trim() } : {}),
+            ...(banner.subtext ? { subtext: String(banner.subtext).trim() } : {}),
+            ...(typeof banner.height === 'number' ? { height: banner.height } : {}),
+          },
+        });
+        if (existsSync(banneredPath)) {
+          formattedPath = banneredPath;
+          bannerApplied = true;
+        }
+      } catch (err) {
+        warnings.push(`banner_failed: ${(err?.message ?? err).toString().slice(0, 200)}`);
+      }
+    }
+
+    // 5. Burned ad captions — transcribe the (reframed) video, group, burn.
+    //    Degrades to no-captions on any failure / missing key.
+    const dgKey = process.env.DEEPGRAM_API_KEY?.trim();
+    if (dgKey) {
+      try {
+        const dgRaw = await callDeepgramWithRetry(dgKey, formattedPath, {});
+        const { word_timestamps } = mapDeepgramResponse(dgRaw);
+        if (word_timestamps.length > 0) {
+          const lines = groupIntoLines(word_timestamps);
+          const subPath = join(tmpDir, 'final.mp4');
+          await writeAssAndBurn({
+            lines,
+            assPath: join(tmpDir, 'subs.ass'),
+            inputPath: formattedPath,
+            outputPath: subPath,
+            assOpts: {
+              playResX: width,
+              playResY: height,
+              captionStyle: 'ad', // gold fill + black outline
+              marginV: 80, // lower-third (banner reserves the top)
+            },
+          });
+          if (existsSync(subPath)) formattedPath = subPath;
+        } else {
+          warnings.push('subtitles_skipped: no words transcribed');
+        }
+      } catch (err) {
+        warnings.push(`subtitles_failed: ${(err?.message ?? err).toString().slice(0, 200)}`);
+      }
+    } else {
+      warnings.push('subtitles_skipped: DEEPGRAM_API_KEY not set');
+    }
+
+    console.log(
+      `[assemble-ad-variation] variationId=${variationId} reframed=${formattedPath !== stitchedPath} ` +
+        `banner=${bannerApplied} warnings=${warnings.length ? warnings.join(' ; ') : 'none'}`,
+    );
+
+    const duration = await getDuration(formattedPath);
+    const renderedUrl = await uploadAndSign(formattedPath, clientId, variationId);
+    return { renderedUrl, duration, warnings };
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -235,7 +364,7 @@ async function renderVariationQueued(args) {
 
 assembleAdVariationRouter.post('/assemble-ad-variation', async (req, res) => {
   const body = req.body || {};
-  const { variationId, clientId, clips = [], output = {}, callback } = body;
+  const { variationId, clientId, clips = [], output = {}, callback, banner = null } = body;
   const width = Number(output.width) || DEFAULT_W;
   const height = Number(output.height) || DEFAULT_H;
 
@@ -255,8 +384,8 @@ assembleAdVariationRouter.post('/assemble-ad-variation', async (req, res) => {
   if (!isAsync) {
     // Sync mode (manual testing) — run inline and return the result.
     try {
-      const { renderedUrl, duration } = await renderVariationQueued({ clips, clientId, variationId, width, height });
-      return res.json({ variationId, renderedUrl, duration, clipCount: clips.length });
+      const { renderedUrl, duration, warnings } = await renderVariationQueued({ clips, clientId, variationId, width, height, banner });
+      return res.json({ variationId, renderedUrl, duration, clipCount: clips.length, warnings });
     } catch (err) {
       console.error(`[assemble-ad-variation] sync render failed variationId=${variationId}:`, err?.message ?? err);
       return res.status(500).json({ variationId, error: err?.message ?? 'render failed' });
@@ -266,7 +395,7 @@ assembleAdVariationRouter.post('/assemble-ad-variation', async (req, res) => {
   // Async mode — accept, then render + callback in the background (queued so
   // many concurrent dispatches from auto-render-on-build don't OOM Railway).
   res.status(202).json({ variationId, accepted: true, mode: 'async' });
-  renderVariationQueued({ clips, clientId, variationId, width, height })
+  renderVariationQueued({ clips, clientId, variationId, width, height, banner })
     .then(({ renderedUrl, duration }) =>
       postCallback(callback, { variationId, clientId, status: 'success', renderedUrl, duration }),
     )

@@ -85,3 +85,35 @@ test('renders are concurrency-gated to avoid Railway OOM', () => {
   assert.match(src, /releaseRenderSlot/);
   assert.match(src, /renderVariationQueued/);
 });
+
+test('ad-format: face-aware reframe to fill 1080x1350 (no bars)', () => {
+  assert.match(src, /detectFaceOffsetX/);
+  assert.match(src, /composeFaceAndBrolls/);
+  assert.match(src, /insertions: \[\]/);          // pure reframe, zero b-roll
+  assert.match(src, /faceCropOffsetX: face\.offsetX/);
+  assert.match(src, /NORM_W\s*=\s*1080/);          // pre-concat vertical canonical
+  assert.match(src, /NORM_H\s*=\s*1920/);
+});
+
+test('ad-format: SupportED banner overlay when a headline is supplied', () => {
+  assert.match(src, /overlayBanner/);
+  assert.match(src, /banner\.headline/);
+  assert.match(src, /eyebrow/);
+  assert.match(src, /subtext/);
+});
+
+test('ad-format: burned ad captions (gold) from a fresh transcript', () => {
+  assert.match(src, /callDeepgramWithRetry/);
+  assert.match(src, /mapDeepgramResponse/);
+  assert.match(src, /groupIntoLines/);
+  assert.match(src, /writeAssAndBurn/);
+  assert.match(src, /captionStyle: 'ad'/);
+});
+
+test('ad-format: each styling stage degrades gracefully (never hard-fails)', () => {
+  assert.match(src, /reframe_failed/);
+  assert.match(src, /padReframe/);            // reframe fallback keeps output dims
+  assert.match(src, /banner_failed/);
+  assert.match(src, /subtitles_failed|subtitles_skipped/);
+  assert.match(src, /warnings/);
+});

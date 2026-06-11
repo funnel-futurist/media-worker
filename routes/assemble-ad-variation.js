@@ -352,9 +352,26 @@ async function renderVariation({ clips, clientId, variationId, width, height, ba
     let qc = null;
     try {
       qc = await qcAdVariation(formattedPath);
-      if (qc) console.log(`[assemble-ad-variation] variationId=${variationId} qc=${qc.verdict} quality=${qc.quality}`);
     } catch (err) {
       warnings.push(`qc_failed: ${(err?.message ?? err).toString().slice(0, 160)}`);
+    }
+
+    // Fold DETERMINISTIC render defects (we know these for certain from the
+    // pipeline) into the QC issue list — more reliable than asking Gemini.
+    // Any such defect also forces the variation out of "green" so it stays in
+    // Deliverables with the reason rather than auto-promoting to Review.
+    const detIssues = [];
+    if (warnings.some((w) => w.startsWith('reframe_failed'))) detIssues.push('black_bars');
+    if (warnings.some((w) => w.startsWith('banner_failed'))) detIssues.push('banner_missing');
+    if (warnings.some((w) => w.startsWith('subtitles_failed') || w.startsWith('subtitles_skipped'))) detIssues.push('missing_subtitles');
+    if (warnings.some((w) => w.startsWith('pad_fallback_failed') || w.startsWith('qc_failed'))) detIssues.push('render_issue');
+    if (detIssues.length > 0) {
+      if (!qc) qc = { verdict: 'red', quality: 50, energy: null, issues: [], why: 'Automatic checks found a defect.', action: 'redo' };
+      qc.issues = [...new Set([...(qc.issues ?? []), ...detIssues])];
+      if (qc.verdict === 'green') qc.verdict = 'yellow';
+    }
+    if (qc) {
+      console.log(`[assemble-ad-variation] variationId=${variationId} qc=${qc.verdict} quality=${qc.quality} issues=[${(qc.issues ?? []).join(',')}]`);
     }
 
     const renderedUrl = await uploadAndSign(formattedPath, clientId, variationId);

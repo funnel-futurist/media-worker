@@ -117,3 +117,9 @@ test('ad-format: each styling stage degrades gracefully (never hard-fails)', () 
   assert.match(src, /subtitles_failed|subtitles_skipped/);
   assert.match(src, /warnings/);
 });
+
+test('Gemini QC runs on the finished ad + rides the success callback', () => {
+  assert.match(src, /qcAdVariation/);
+  assert.match(src, /status: 'success', renderedUrl, duration, qc/); // async callback carries qc
+  assert.match(src, /clipCount: clips\.length, warnings, qc/);        // sync response carries qc
+});

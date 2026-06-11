@@ -14,6 +14,7 @@ import { composeFaceAndBrolls } from '../lib/clean_mode_pipeline.js';
 import { overlayBanner } from '../lib/banner_overlay.js';
 import { callDeepgramWithRetry, mapDeepgramResponse } from '../lib/deepgram_transcribe.js';
 import { groupIntoLines, writeAssAndBurn } from '../lib/subtitle_burn.js';
+import { qcAdVariation } from '../lib/ad_variation_qc.js';
 
 const execAsync = promisify(exec);
 
@@ -345,8 +346,19 @@ async function renderVariation({ clips, clientId, variationId, width, height, ba
     );
 
     const duration = await getDuration(formattedPath);
+
+    // Gemini QC (advisory) on the finished ad — run on the local file before
+    // upload/cleanup. Non-fatal: null on any failure, render still ships.
+    let qc = null;
+    try {
+      qc = await qcAdVariation(formattedPath);
+      if (qc) console.log(`[assemble-ad-variation] variationId=${variationId} qc=${qc.verdict} quality=${qc.quality}`);
+    } catch (err) {
+      warnings.push(`qc_failed: ${(err?.message ?? err).toString().slice(0, 160)}`);
+    }
+
     const renderedUrl = await uploadAndSign(formattedPath, clientId, variationId);
-    return { renderedUrl, duration, warnings };
+    return { renderedUrl, duration, warnings, qc };
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -384,8 +396,8 @@ assembleAdVariationRouter.post('/assemble-ad-variation', async (req, res) => {
   if (!isAsync) {
     // Sync mode (manual testing) — run inline and return the result.
     try {
-      const { renderedUrl, duration, warnings } = await renderVariationQueued({ clips, clientId, variationId, width, height, banner });
-      return res.json({ variationId, renderedUrl, duration, clipCount: clips.length, warnings });
+      const { renderedUrl, duration, warnings, qc } = await renderVariationQueued({ clips, clientId, variationId, width, height, banner });
+      return res.json({ variationId, renderedUrl, duration, clipCount: clips.length, warnings, qc });
     } catch (err) {
       console.error(`[assemble-ad-variation] sync render failed variationId=${variationId}:`, err?.message ?? err);
       return res.status(500).json({ variationId, error: err?.message ?? 'render failed' });
@@ -396,8 +408,8 @@ assembleAdVariationRouter.post('/assemble-ad-variation', async (req, res) => {
   // many concurrent dispatches from auto-render-on-build don't OOM Railway).
   res.status(202).json({ variationId, accepted: true, mode: 'async' });
   renderVariationQueued({ clips, clientId, variationId, width, height, banner })
-    .then(({ renderedUrl, duration }) =>
-      postCallback(callback, { variationId, clientId, status: 'success', renderedUrl, duration }),
+    .then(({ renderedUrl, duration, qc }) =>
+      postCallback(callback, { variationId, clientId, status: 'success', renderedUrl, duration, qc }),
     )
     .catch((err) => {
       console.error(`[assemble-ad-variation] async render failed variationId=${variationId}:`, err?.message ?? err);

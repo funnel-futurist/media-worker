@@ -65,3 +65,23 @@ test('rendered output is uploaded then signed (1-year TTL)', () => {
   assert.match(src, /object\/sign\/video-modules/);
   assert.match(src, /RENDERED_URL_TTL_SEC\s*=\s*60 \* 60 \* 24 \* 365/);
 });
+
+test('ffmpeg failures surface the real stderr (not just the command)', () => {
+  assert.match(src, /function runFfmpeg/);
+  assert.match(src, /err\?\.stderr/);
+  assert.match(src, /maxBuffer: EXEC_MAXBUFFER/);
+  assert.doesNotMatch(src, /await execAsync\(\s*`ffmpeg -f concat/); // concat uses runFfmpeg now
+});
+
+test('downloads are validated as real video before normalising', () => {
+  assert.match(src, /function assertValidVideo/);
+  assert.match(src, /await assertValidVideo\(/);
+  assert.match(src, /is not a valid video/);
+});
+
+test('renders are concurrency-gated to avoid Railway OOM', () => {
+  assert.match(src, /MAX_CONCURRENT_RENDERS\s*=\s*2/);
+  assert.match(src, /acquireRenderSlot/);
+  assert.match(src, /releaseRenderSlot/);
+  assert.match(src, /renderVariationQueued/);
+});

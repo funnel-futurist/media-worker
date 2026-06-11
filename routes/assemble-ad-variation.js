@@ -43,17 +43,58 @@ export const assembleAdVariationRouter = Router();
 const DEFAULT_W = 1080;
 const DEFAULT_H = 1350;
 const RENDERED_URL_TTL_SEC = 60 * 60 * 24 * 365; // 1y — matches edit_file_url
+// ffmpeg/ffprobe stderr can be large; the exec default (1MB) silently kills the
+// process with a useless "Command failed" — give it real headroom.
+const EXEC_MAXBUFFER = 64 * 1024 * 1024;
+// How many variations render concurrently. Auto-render-on-build can dispatch
+// 18+ at once; ffmpeg is CPU+memory heavy, so cap to avoid Railway OOM.
+const MAX_CONCURRENT_RENDERS = 2;
+
+/**
+ * Run an ffmpeg/ffprobe command and, on failure, throw an Error whose message
+ * is the REAL ffmpeg stderr tail (not just "Command failed: <cmd>"). This is
+ * what makes render failures diagnosable end-to-end.
+ */
+async function runFfmpeg(cmd, { timeout = 300000 } = {}) {
+  try {
+    return await execAsync(cmd, { timeout, maxBuffer: EXEC_MAXBUFFER });
+  } catch (err) {
+    const stderr = (err?.stderr ?? '').toString();
+    const tail = stderr.split('\n').filter(Boolean).slice(-8).join(' | ').trim();
+    const reason = tail || err?.message || 'unknown ffmpeg error';
+    throw new Error(`ffmpeg failed: ${reason}`.slice(0, 600));
+  }
+}
 
 /** True if the file has at least one audio stream. */
 async function hasAudio(path) {
   try {
     const { stdout } = await execAsync(
       `ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 "${path}"`,
-      { timeout: 30000 },
+      { timeout: 30000, maxBuffer: EXEC_MAXBUFFER },
     );
     return stdout.trim().length > 0;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Validate a downloaded clip is actually a decodable video before we try to
+ * normalise it. Catches the common failure where a signed URL returned an error
+ * page / JSON instead of video bytes (→ a clear message instead of a cryptic
+ * ffmpeg dump).
+ */
+async function assertValidVideo(path, label) {
+  try {
+    const { stdout } = await execAsync(
+      `ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "${path}"`,
+      { timeout: 30000, maxBuffer: EXEC_MAXBUFFER },
+    );
+    if (!stdout.trim()) throw new Error('no video stream');
+  } catch (err) {
+    const msg = (err?.stderr ?? err?.message ?? '').toString().split('\n').filter(Boolean).slice(-3).join(' | ');
+    throw new Error(`${label} is not a valid video (${msg || 'unreadable'}). Check the clip's raw footage URL.`);
   }
 }
 
@@ -67,20 +108,39 @@ async function normaliseClip(srcPath, outPath, w, h) {
     `scale=${w}:${h}:force_original_aspect_ratio=decrease,` +
     `pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30,format=yuv420p`;
   const common =
-    `-c:v libx264 -preset veryfast -c:a aac -ar 48000 -ac 2 ` +
+    `-c:v libx264 -preset veryfast -pix_fmt yuv420p -c:a aac -ar 48000 -ac 2 ` +
     `-video_track_timescale 30000 -movflags +faststart -y`;
   if (await hasAudio(srcPath)) {
-    await execAsync(`ffmpeg -i "${srcPath}" -vf "${vf}" ${common} "${outPath}"`, { timeout: 300000 });
+    await runFfmpeg(`ffmpeg -i "${srcPath}" -vf "${vf}" ${common} "${outPath}"`);
   } else {
     // No audio stream — inject a silent stereo track so every normalised clip
     // has matching stream layout for the concat.
-    await execAsync(
+    await runFfmpeg(
       `ffmpeg -i "${srcPath}" -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 ` +
         `-vf "${vf}" -map 0:v:0 -map 1:a -shortest ${common} "${outPath}"`,
-      { timeout: 300000 },
     );
   }
   if (!existsSync(outPath)) throw new Error(`normalise produced no output for ${srcPath}`);
+}
+
+// ── Render concurrency gate ───────────────────────────────────────────────
+// Simple in-process semaphore: at most MAX_CONCURRENT_RENDERS renders run the
+// heavy ffmpeg work at once; the rest queue. Keeps auto-render-on-build (many
+// variations dispatched together) from OOMing Railway.
+let activeRenders = 0;
+const renderWaiters = [];
+async function acquireRenderSlot() {
+  if (activeRenders < MAX_CONCURRENT_RENDERS) {
+    activeRenders++;
+    return;
+  }
+  await new Promise((resolve) => renderWaiters.push(resolve));
+  activeRenders++;
+}
+function releaseRenderSlot() {
+  activeRenders--;
+  const next = renderWaiters.shift();
+  if (next) next();
 }
 
 /** Upload the rendered mp4 to Supabase Storage and return a 1-year signed URL. */
@@ -134,8 +194,14 @@ async function renderVariation({ clips, clientId, variationId, width, height }) 
     const normPaths = [];
     for (let i = 0; i < clips.length; i++) {
       const rawPath = join(tmpDir, `raw_${i}.mp4`);
-      const resp = await axios.get(clips[i].url, { responseType: 'arraybuffer', maxContentLength: Infinity });
+      let resp;
+      try {
+        resp = await axios.get(clips[i].url, { responseType: 'arraybuffer', maxContentLength: Infinity, timeout: 120000 });
+      } catch (err) {
+        throw new Error(`failed to download clip ${i} (${clips[i].section ?? '?'}): ${err?.response?.status ?? err?.message ?? 'download error'}`);
+      }
       writeFileSync(rawPath, Buffer.from(resp.data));
+      await assertValidVideo(rawPath, `clip ${i} (${clips[i].section ?? '?'})`);
       const normPath = join(tmpDir, `norm_${i}.mp4`);
       await normaliseClip(rawPath, normPath, width, height);
       rmSync(rawPath, { force: true });
@@ -146,10 +212,7 @@ async function renderVariation({ clips, clientId, variationId, width, height }) 
     writeFileSync(listPath, normPaths.map((p) => `file '${p}'`).join('\n'));
 
     const outputPath = join(tmpDir, 'output.mp4');
-    await execAsync(
-      `ffmpeg -f concat -safe 0 -i "${listPath}" -c copy -movflags +faststart -y "${outputPath}"`,
-      { timeout: 300000 },
-    );
+    await runFfmpeg(`ffmpeg -f concat -safe 0 -i "${listPath}" -c copy -movflags +faststart -y "${outputPath}"`);
     if (!existsSync(outputPath)) throw new Error('concat produced no output file');
 
     const duration = await getDuration(outputPath);
@@ -157,6 +220,16 @@ async function renderVariation({ clips, clientId, variationId, width, height }) 
     return { renderedUrl, duration };
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+/** Concurrency-gated wrapper: queues behind the render semaphore. */
+async function renderVariationQueued(args) {
+  await acquireRenderSlot();
+  try {
+    return await renderVariation(args);
+  } finally {
+    releaseRenderSlot();
   }
 }
 
@@ -182,22 +255,23 @@ assembleAdVariationRouter.post('/assemble-ad-variation', async (req, res) => {
   if (!isAsync) {
     // Sync mode (manual testing) — run inline and return the result.
     try {
-      const { renderedUrl, duration } = await renderVariation({ clips, clientId, variationId, width, height });
+      const { renderedUrl, duration } = await renderVariationQueued({ clips, clientId, variationId, width, height });
       return res.json({ variationId, renderedUrl, duration, clipCount: clips.length });
     } catch (err) {
-      console.error(`[assemble-ad-variation] sync render failed variationId=${variationId}:`, err?.stack ?? err);
+      console.error(`[assemble-ad-variation] sync render failed variationId=${variationId}:`, err?.message ?? err);
       return res.status(500).json({ variationId, error: err?.message ?? 'render failed' });
     }
   }
 
-  // Async mode — accept, then render + callback in the background.
+  // Async mode — accept, then render + callback in the background (queued so
+  // many concurrent dispatches from auto-render-on-build don't OOM Railway).
   res.status(202).json({ variationId, accepted: true, mode: 'async' });
-  renderVariation({ clips, clientId, variationId, width, height })
+  renderVariationQueued({ clips, clientId, variationId, width, height })
     .then(({ renderedUrl, duration }) =>
       postCallback(callback, { variationId, clientId, status: 'success', renderedUrl, duration }),
     )
     .catch((err) => {
-      console.error(`[assemble-ad-variation] async render failed variationId=${variationId}:`, err?.stack ?? err);
+      console.error(`[assemble-ad-variation] async render failed variationId=${variationId}:`, err?.message ?? err);
       return postCallback(callback, {
         variationId,
         clientId,

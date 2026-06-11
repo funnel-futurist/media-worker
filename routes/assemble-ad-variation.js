@@ -352,7 +352,7 @@ async function renderVariation({ clips, clientId, variationId, width, height, ba
     let qc = null;
     try {
       qc = await qcAdVariation(formattedPath);
-      if (qc) console.log(`[assemble-ad-variation] variationId=${variationId} qc=${qc.verdict} score=${qc.score}`);
+      if (qc) console.log(`[assemble-ad-variation] variationId=${variationId} qc=${qc.verdict} quality=${qc.quality}`);
     } catch (err) {
       warnings.push(`qc_failed: ${(err?.message ?? err).toString().slice(0, 160)}`);
     }

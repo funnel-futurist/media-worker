@@ -107,15 +107,40 @@ async function assertValidVideo(path, label) {
   }
 }
 
+/** Probe a clip's pixel width/height (null on failure). */
+async function probeDims(path) {
+  try {
+    const { stdout } = await execAsync(
+      `ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0:s=x "${path}"`,
+      { timeout: 30000, maxBuffer: EXEC_MAXBUFFER },
+    );
+    const [w, h] = stdout.trim().split('x').map((n) => parseInt(n, 10));
+    return Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0 ? { w, h } : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Normalise one clip to a canonical format so concat -c copy is safe:
- * exactly 1 video (H.264, yuv420p, WxH, 30fps, fixed timescale) + 1 stereo
- * 48k AAC audio (silent track injected when the source has none).
+ * Normalise one clip to the canonical WxH (portrait) so concat -c copy is safe:
+ * 1 video (H.264, yuv420p, WxH, 30fps, fixed timescale) + 1 stereo 48k AAC
+ * (silent track injected when the source has none).
+ *
+ * Aspect handling:
+ *   - Source WIDER than the portrait target (16:9, 1:1, 4:5 — would letterbox):
+ *     scale-to-COVER + centre-crop → FILLS the frame, no black bars. Keeps full
+ *     height (no head clipping); crops background left/right. A centred
+ *     talking-head survives; an off-centre one is caught later by QC (wrong_crop).
+ *   - Source 9:16 or taller: fit + pad (unchanged) — never crops a portrait take.
  */
 async function normaliseClip(srcPath, outPath, w, h) {
-  const vf =
-    `scale=${w}:${h}:force_original_aspect_ratio=decrease,` +
-    `pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30,format=yuv420p`;
+  const dims = await probeDims(srcPath);
+  // Wider than the portrait canonical → fit would add bars, so cover instead.
+  const wider = dims ? dims.w / dims.h > w / h : false;
+  const geom = wider
+    ? `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}` // cover (fill)
+    : `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black`; // fit (pad)
+  const vf = `${geom},setsar=1,fps=30,format=yuv420p`;
   const common =
     `-c:v libx264 -preset veryfast -pix_fmt yuv420p -c:a aac -ar 48000 -ac 2 ` +
     `-video_track_timescale 30000 -movflags +faststart -y`;

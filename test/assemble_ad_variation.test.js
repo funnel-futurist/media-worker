@@ -30,10 +30,11 @@ test('default output frame is 1080x1350 (ad format)', () => {
   assert.match(src, /DEFAULT_H\s*=\s*1350/);
 });
 
-test('normalise scales-to-fit + pads (no crop → faces never cut)', () => {
+test('normalise: portrait sources fit + pad (never crop a portrait take)', () => {
   assert.match(src, /force_original_aspect_ratio=decrease/);
   assert.match(src, /pad=\$\{w\}:\$\{h\}/);
-  assert.doesNotMatch(src, /crop=/); // v1 must not crop
+  // Wide sources cover-crop instead (tested in the landscape-fill test);
+  // portrait still uses the no-crop fit+pad path.
 });
 
 test('injects silent stereo audio when a clip has no audio stream', () => {
@@ -84,6 +85,13 @@ test('renders are concurrency-gated to avoid Railway OOM', () => {
   assert.match(src, /acquireRenderSlot/);
   assert.match(src, /releaseRenderSlot/);
   assert.match(src, /renderVariationQueued/);
+});
+
+test('ad-format: landscape/wide clips fill the frame (cover-crop), portrait pads', () => {
+  assert.match(src, /force_original_aspect_ratio=increase,crop=/); // wide → cover
+  assert.match(src, /force_original_aspect_ratio=decrease,pad=/);   // portrait → fit
+  assert.match(src, /probeDims/);
+  assert.match(src, /dims\.w \/ dims\.h > w \/ h/);                 // decision by aspect
 });
 
 test('ad-format: face-aware reframe to fill 1080x1350 (no bars)', () => {

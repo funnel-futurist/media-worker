@@ -47,3 +47,22 @@ test('QC is advisory + non-fatal (returns null on any failure, no throw)', () =>
   assert.match(src, /non-fatal/i);
   assert.match(src, /ADVISORY ONLY/i);
 });
+
+test('QC returns a structured issues[] from the fixed code list', () => {
+  assert.match(src, /QC_ISSUE_CODES/);
+  for (const code of ['missing_subtitles', 'wrong_crop', 'banner_missing', 'black_bars', 'cta_weak', 'render_issue', 'caption_issue']) {
+    assert.ok(src.includes(`'${code}'`) || src.includes(code), `prompt/codes missing: ${code}`);
+  }
+});
+
+test('any flagged issue downgrades a green verdict (so it stays in Deliverables)', () => {
+  assert.match(src, /issues\.length > 0 && verdict === 'green'/);
+});
+
+test('render route folds deterministic defects (bars/banner/subs) into qc.issues + gates green', () => {
+  const route = readFileSync(join(__dirname, '../routes/assemble-ad-variation.js'), 'utf8');
+  assert.match(route, /reframe_failed.*black_bars|black_bars/);
+  assert.match(route, /banner_failed.*banner_missing|banner_missing/);
+  assert.match(route, /subtitles_(failed|skipped).*missing_subtitles|missing_subtitles/);
+  assert.match(route, /qc\.verdict === 'green'\) qc\.verdict = 'yellow'/);
+});

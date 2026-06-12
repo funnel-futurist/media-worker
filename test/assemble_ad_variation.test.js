@@ -88,10 +88,18 @@ test('renders are concurrency-gated to avoid Railway OOM', () => {
 });
 
 test('ad-format: landscape/wide clips fill the frame (cover-crop), portrait pads', () => {
-  assert.match(src, /force_original_aspect_ratio=increase,crop=/); // wide → cover
+  assert.match(src, /coverGeomFaceAware/);                         // wide → cover
   assert.match(src, /force_original_aspect_ratio=decrease,pad=/);   // portrait → fit
   assert.match(src, /probeDims/);
   assert.match(src, /dims\.w \/ dims\.h > w \/ h/);                 // decision by aspect
+});
+
+test('ad-format: wide cover-crop is FACE-AWARE on the horizontal axis', () => {
+  assert.match(src, /detectFaceOffsetX\(srcPath/);            // detect face on wide clips
+  assert.match(src, /function coverGeomFaceAware/);
+  assert.match(src, /f \* sw - w \/ 2/);                      // crop x centred on the face
+  assert.match(src, /Math\.min\(cx, sw - w\)/);              // clamped into frame
+  assert.match(src, /evenDown/);                              // even offsets for yuv420p
 });
 
 test('ad-format: face-aware reframe to fill 1080x1350 (no bars)', () => {

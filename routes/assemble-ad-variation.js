@@ -121,6 +121,35 @@ async function probeDims(path) {
   }
 }
 
+/** Round down to the nearest even int (yuv420p needs even dims + crop offsets). */
+function evenDown(n) {
+  const r = Math.round(n);
+  return r % 2 === 0 ? r : r - 1;
+}
+
+/**
+ * Cover-fill geometry for a wider-than-portrait clip, FACE-AWARE on the
+ * horizontal axis: scale to cover WxH, then crop the window centred on the
+ * speaker's face (offsetX, 0..1 fraction of width) instead of frame-centre, so
+ * an off-centre talking-head isn't clipped. Falls back to centre-cover when
+ * dims are unknown.
+ */
+function coverGeomFaceAware(dims, w, h, offsetX) {
+  if (!dims) return `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}`;
+  const factor = Math.max(w / dims.w, h / dims.h);
+  let sw = Math.round(dims.w * factor);
+  let sh = Math.round(dims.h * factor);
+  if (sw < w) sw = w; // guard rounding so it always covers
+  if (sh < h) sh = h;
+  if (sw % 2) sw += 1; // even (stay >= target)
+  if (sh % 2) sh += 1;
+  const f = typeof offsetX === 'number' && offsetX >= 0 && offsetX <= 1 ? offsetX : 0.5;
+  let cx = Math.round(f * sw - w / 2); // centre the crop on the face
+  cx = evenDown(Math.max(0, Math.min(cx, sw - w)));
+  const cy = evenDown(Math.max(0, Math.min((sh - h) / 2, sh - h)));
+  return `scale=${sw}:${sh},crop=${w}:${h}:${cx}:${cy}`;
+}
+
 /**
  * Normalise one clip to the canonical WxH (portrait) so concat -c copy is safe:
  * 1 video (H.264, yuv420p, WxH, 30fps, fixed timescale) + 1 stereo 48k AAC
@@ -128,18 +157,28 @@ async function probeDims(path) {
  *
  * Aspect handling:
  *   - Source WIDER than the portrait target (16:9, 1:1, 4:5 — would letterbox):
- *     scale-to-COVER + centre-crop → FILLS the frame, no black bars. Keeps full
- *     height (no head clipping); crops background left/right. A centred
- *     talking-head survives; an off-centre one is caught later by QC (wrong_crop).
+ *     scale-to-COVER + FACE-AWARE crop → FILLS the frame, no black bars. Keeps
+ *     full height (no head clipping); crops background to one side of the
+ *     speaker rather than blindly centre, so an off-centre talking-head survives.
  *   - Source 9:16 or taller: fit + pad (unchanged) — never crops a portrait take.
  */
 async function normaliseClip(srcPath, outPath, w, h) {
   const dims = await probeDims(srcPath);
   // Wider than the portrait canonical → fit would add bars, so cover instead.
   const wider = dims ? dims.w / dims.h > w / h : false;
-  const geom = wider
-    ? `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}` // cover (fill)
-    : `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black`; // fit (pad)
+  let geom;
+  if (wider) {
+    // Face-aware horizontal crop. detectFaceOffsetX always resolves (0.5 on
+    // failure), so a no-face / detection error just yields a centre crop.
+    let offsetX = 0.5;
+    try {
+      const face = await detectFaceOffsetX(srcPath, { samples: 4 });
+      if (typeof face?.offsetX === 'number') offsetX = face.offsetX;
+    } catch { /* centre fallback */ }
+    geom = coverGeomFaceAware(dims, w, h, offsetX);
+  } else {
+    geom = `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black`;
+  }
   const vf = `${geom},setsar=1,fps=30,format=yuv420p`;
   const common =
     `-c:v libx264 -preset veryfast -pix_fmt yuv420p -c:a aac -ar 48000 -ac 2 ` +

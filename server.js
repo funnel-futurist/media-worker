@@ -30,6 +30,7 @@ import { audioLoudnormTrimRouter } from './routes/audio-loudnorm-trim.js';
 import { audioTranscribeRouter } from './routes/audio-transcribe.js';
 import { brollPickerRouter } from './routes/broll-picker.js';
 import { cleanModeComposeRouter } from './routes/clean-mode-compose.js';
+import { cleanModeClassifyRouter } from './routes/clean-mode-classify.js';
 import { repatchCaptionsRouter } from './routes/repatch-captions.js';
 import { recomposeBrollRouter } from './routes/recompose-broll.js';
 import { retimeIntroRouter } from './routes/retime-intro.js';
@@ -85,6 +86,8 @@ app.use('/', audioTranscribeRouter);
 app.use('/', brollPickerRouter);
 // Routes — Phase 13 M2 (Clean-mode full compose pipeline)
 app.use('/', cleanModeComposeRouter);
+// Routes — 2026-06-15 (Dry-run cut classifier — A/B threshold options fast)
+app.use('/', cleanModeClassifyRouter);
 // Routes — PR-AF (Caption-only repatch on already-edited reels)
 app.use('/', repatchCaptionsRouter);
 // Routes — PR-AP (Surgical b-roll swap on already-edited reels)

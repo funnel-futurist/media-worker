@@ -43,6 +43,15 @@ import {
   buildEditNotesSummary,
 } from '../lib/portal_webhook.js';
 import { signStorageUrl, uploadToStorage } from '../lib/storage_helpers.js';
+import {
+  validateCutSafetyMode,
+  validateRetainSec,
+  validateSilenceNoiseDb,
+  validateSilenceMinDur,
+  validateSlateHint,
+  validateSkipSlate,
+  validateDeepgramKeywords,
+} from '../lib/options_validation.js';
 
 /**
  * PR-181b: fire a failure callback to the portal so the row gets flipped
@@ -344,21 +353,10 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
       // treated as not provided; detector trims and falls back to default
       // meta-marker behavior. Length cap so an accidental paste of a whole
       // transcript doesn't reach the detector and inflate the token match.
-      const slateHintRaw = body.options.slateHint;
-      if (slateHintRaw != null) {
-        if (typeof slateHintRaw !== 'string') {
-          return res.status(400).json({
-            jobId, step: 'validate',
-            error: 'options.slateHint must be a string',
-          });
-        }
-        if (slateHintRaw.length > 200) {
-          return res.status(400).json({
-            jobId, step: 'validate',
-            error: 'options.slateHint must be ≤ 200 characters',
-          });
-        }
-      }
+      // 2026-06-15: validator extracted to lib/options_validation.js so the
+      // dry-run route (/clean-mode-classify) shares the same gate.
+      const slateHintErr = validateSlateHint(body.options.slateHint);
+      if (slateHintErr) return res.status(400).json({ jobId, step: 'validate', error: slateHintErr });
       // Consistency: each provided pair must hold min <= target <= max.
       // We check across whatever subset the caller supplied — undefined
       // values fall through to defaults at the use sites and don't
@@ -420,52 +418,27 @@ cleanModeComposeRouter.post('/clean-mode-compose', async (req, res) => {
       }
       // Silence detection tuning. noiseDb must be in [-60, -10] (dB);
       // minDur must be in (0, 5] (seconds). Ranges are generous — the
-      // defaults (-35 / 0.6) sit comfortably in the middle.
-      const noiseDbRaw = body.options.silenceNoiseDb;
-      if (noiseDbRaw != null && (typeof noiseDbRaw !== 'number' || !Number.isFinite(noiseDbRaw) || noiseDbRaw < -60 || noiseDbRaw > -10)) {
-        return res.status(400).json({ jobId, step: 'validate', error: 'options.silenceNoiseDb must be a number in [-60, -10]' });
-      }
-      const silenceMinDurRaw = body.options.silenceMinDur;
-      if (silenceMinDurRaw != null && (typeof silenceMinDurRaw !== 'number' || !Number.isFinite(silenceMinDurRaw) || silenceMinDurRaw <= 0 || silenceMinDurRaw > 5)) {
-        return res.status(400).json({ jobId, step: 'validate', error: 'options.silenceMinDur must be a number in (0, 5]' });
-      }
-      // 2026-06-10: cut-precision tunables (defense in depth — the worker
-      // already accepts these; we 400 here so a typo doesn't reach the
-      // pipeline as a silent no-op).
-      const cutSafetyModeRaw = body.options.cutSafetyMode;
-      if (cutSafetyModeRaw != null &&
-          cutSafetyModeRaw !== 'safe_only' &&
-          cutSafetyModeRaw !== 'safe_and_soft' &&
-          cutSafetyModeRaw !== 'all') {
-        return res.status(400).json({ jobId, step: 'validate', error: "options.cutSafetyMode must be 'safe_only', 'safe_and_soft', or 'all'" });
-      }
-      const retainSecRaw = body.options.retainSec;
-      if (retainSecRaw != null && (typeof retainSecRaw !== 'number' || !Number.isFinite(retainSecRaw) || retainSecRaw <= 0 || retainSecRaw > 1)) {
-        return res.status(400).json({ jobId, step: 'validate', error: 'options.retainSec must be a number in (0, 1]' });
-      }
+      // defaults (-35 / 0.6) sit comfortably in the middle. Cut-precision
+      // tunables (cutSafetyMode, retainSec) also gated here so a typo
+      // doesn't reach the pipeline as a silent no-op.
+      // 2026-06-15: all four extracted to lib/options_validation.js for
+      // /clean-mode-classify dry-run parity.
+      const noiseDbErr = validateSilenceNoiseDb(body.options.silenceNoiseDb);
+      if (noiseDbErr) return res.status(400).json({ jobId, step: 'validate', error: noiseDbErr });
+      const silenceMinDurErr = validateSilenceMinDur(body.options.silenceMinDur);
+      if (silenceMinDurErr) return res.status(400).json({ jobId, step: 'validate', error: silenceMinDurErr });
+      const cutSafetyModeErr = validateCutSafetyMode(body.options.cutSafetyMode);
+      if (cutSafetyModeErr) return res.status(400).json({ jobId, step: 'validate', error: cutSafetyModeErr });
+      const retainSecErr = validateRetainSec(body.options.retainSec);
+      if (retainSecErr) return res.status(400).json({ jobId, step: 'validate', error: retainSecErr });
       // PR-AF: Deepgram keyword boosts. Optional array of non-empty
       // strings (max 20 — Deepgram's documented limit is higher but we
       // want to fail fast on misconfigured per-client defaults). Each
       // entry is either a bare term ("special needs") or pre-formatted
       // "<term>:<intensifier>" where intensifier is 1-10.
-      const dgKw = body.options.deepgramKeywords;
-      if (dgKw != null) {
-        if (!Array.isArray(dgKw)) {
-          return res.status(400).json({ jobId, step: 'validate', error: 'options.deepgramKeywords must be an array of strings' });
-        }
-        if (dgKw.length > 20) {
-          return res.status(400).json({ jobId, step: 'validate', error: 'options.deepgramKeywords may not exceed 20 entries' });
-        }
-        for (let i = 0; i < dgKw.length; i++) {
-          const term = dgKw[i];
-          if (typeof term !== 'string' || term.trim().length === 0) {
-            return res.status(400).json({ jobId, step: 'validate', error: `options.deepgramKeywords[${i}] must be a non-empty string` });
-          }
-          if (term.length > 200) {
-            return res.status(400).json({ jobId, step: 'validate', error: `options.deepgramKeywords[${i}] is too long (max 200 chars)` });
-          }
-        }
-      }
+      // 2026-06-15: validator extracted to lib/options_validation.js.
+      const dgKwErr = validateDeepgramKeywords(body.options.deepgramKeywords);
+      if (dgKwErr) return res.status(400).json({ jobId, step: 'validate', error: dgKwErr });
 
       // Phase 1A: raw_video_cleanup pre-edit stage. Opt-in boolean + optional
       // budget knobs. Omitted → buildPipelineOpts default (cleanup OFF).

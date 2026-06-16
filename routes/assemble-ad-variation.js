@@ -360,6 +360,17 @@ async function renderVariation({ clips, clientId, variationId, width, height, ba
             ...(banner.eyebrow ? { eyebrow: String(banner.eyebrow).trim() } : {}),
             ...(banner.subtext ? { subtext: String(banner.subtext).trim() } : {}),
             ...(typeof banner.height === 'number' ? { height: banner.height } : {}),
+            // Styling passthrough — font sizes + colors from the client's
+            // bannerConfig. Without forwarding these, overlayBanner falls back
+            // to its built-in defaults (e.g. eyebrow always 30px) and any size/
+            // color the client configured is silently ignored.
+            ...(typeof banner.fontSize === 'number' ? { fontSize: banner.fontSize } : {}),
+            ...(typeof banner.eyebrowFontSize === 'number' ? { eyebrowFontSize: banner.eyebrowFontSize } : {}),
+            ...(typeof banner.subtextFontSize === 'number' ? { subtextFontSize: banner.subtextFontSize } : {}),
+            ...(banner.bgColor ? { bgColor: String(banner.bgColor) } : {}),
+            ...(banner.textColor ? { textColor: String(banner.textColor) } : {}),
+            ...(banner.eyebrowColor ? { eyebrowColor: String(banner.eyebrowColor) } : {}),
+            ...(banner.subtextColor ? { subtextColor: String(banner.subtextColor) } : {}),
           },
         });
         if (existsSync(banneredPath)) {

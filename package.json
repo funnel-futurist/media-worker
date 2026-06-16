@@ -6,7 +6,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "postinstall": "patch-package"
   },
   "dependencies": {
     "@google/genai": "^1.46.0",
@@ -22,5 +23,8 @@
     "hyperframes": "^0.4.20",
     "playwright": "^1.50.0",
     "youtubei.js": "^17.0.0"
+  },
+  "devDependencies": {
+    "patch-package": "^8.0.1"
   }
 }

@@ -1,0 +1,22 @@
+diff --git a/node_modules/hyperframes/dist/cli.js b/node_modules/hyperframes/dist/cli.js
+index 9af75a5..e4c47c3 100644
+--- a/node_modules/hyperframes/dist/cli.js
++++ b/node_modules/hyperframes/dist/cli.js
+@@ -26652,7 +26652,7 @@ async function initializeSession(session) {
+   });
+   const url = `${serverUrl}/index.html`;
+   if (session.captureMode === "screenshot") {
+-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 6e4 });
++    await page.goto(url, { waitUntil: "domcontentloaded", timeout: parseInt(process.env.HYPERFRAMES_PAGE_GOTO_TIMEOUT_MS ?? "60000", 10) });
+     const pageReadyTimeout2 = session.config?.playerReadyTimeout ?? DEFAULT_CONFIG2.playerReadyTimeout;
+     const pageReady2 = await pollPageExpression(
+       page,
+@@ -26713,7 +26713,7 @@ async function initializeSession(session) {
+   };
+   warmupLoop().catch(() => {
+   });
+-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 6e4 });
++  await page.goto(url, { waitUntil: "domcontentloaded", timeout: parseInt(process.env.HYPERFRAMES_PAGE_GOTO_TIMEOUT_MS ?? "60000", 10) });
+   const pageReadyTimeout = session.config?.playerReadyTimeout ?? DEFAULT_CONFIG2.playerReadyTimeout;
+   const pollDeadline = Date.now() + pageReadyTimeout;
+   while (Date.now() < pollDeadline) {

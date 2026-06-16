@@ -21,10 +21,8 @@
     "googleapis": "^171.4.0",
     "heic-convert": "^2.1.0",
     "hyperframes": "^0.4.20",
+    "patch-package": "^8.0.1",
     "playwright": "^1.50.0",
     "youtubei.js": "^17.0.0"
-  },
-  "devDependencies": {
-    "patch-package": "^8.0.1"
   }
 }

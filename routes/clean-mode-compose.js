@@ -70,7 +70,7 @@ import {
  * @param {Array<string>} [args.warnings]
  * @param {object} [args.stepTimings]
  */
-async function postFailureCallback({ body, jobId, callback, failedStep, errorMessage, warnings, stepTimings }) {
+async function postFailureCallback({ body, jobId, callback, failedStep, errorMessage, warnings, stepTimings, terminal }) {
   if (!callback?.url || !callback?.apiKey || !body?.contentItemId) {
     // No-op when async mode isn't configured (sync route already returned
     // the partial-data response to the caller directly).
@@ -85,6 +85,7 @@ async function postFailureCallback({ body, jobId, callback, failedStep, errorMes
       errorMessage,
       warnings,
       stepTimings,
+      terminal,
     });
     const post = await postReelEditedCallback({
       callbackUrl: callback.url,
@@ -740,6 +741,9 @@ async function runAsyncJob(body, jobId, callback) {
       errorMessage: result.error.message ?? '(no message)',
       warnings: result.warnings,
       stepTimings: result.steps,
+      // Forward terminal-ness (e.g. no speech in source) so the portal's
+      // retry-failed-edits sweep can skip non-retryable failures.
+      terminal: result.error.terminal === true,
     });
     return;
   }
